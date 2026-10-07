@@ -299,9 +299,68 @@ export function reportHerdrPaneTask(
   }
 }
 
+/** Agents-panel name of a child at `depth` (1 = direct child): "\u2514\u2500 name", "\u250a \u2514\u2500 name", \u2026 */
+function treeDisplayName(name: string, depth: number): string {
+  const label = name.replace(/[\r\n\t]+/g, " ").trim() || "subagent";
+  return `${"\u250a ".repeat(Math.max(0, depth - 1))}\u2514\u2500 ${label}`;
+}
+
+function buildPaneTreeArgs(
+  paneId: string,
+  name: string,
+  parentPaneId: string,
+  depth: number,
+): string[] {
+  return [
+    "pane",
+    "report-metadata",
+    paneId,
+    "--source",
+    "memo-subagents",
+    "--display-agent",
+    treeDisplayName(name, depth),
+    "--token",
+    `parent=${parentPaneId}`,
+    "--token",
+    `tree_depth=${depth}`,
+  ];
+}
+
+/** Depth of a pane in the subagent tree: its reported `tree_depth` token, else 0 (a root). */
+function parsePaneTreeDepth(output: string): number {
+  const pane = (parseHerdrJson(output) as { result?: { pane?: { tokens?: Record<string, unknown> } } } | null)
+    ?.result?.pane;
+  const depth = Number(pane?.tokens?.tree_depth);
+  return Number.isSafeInteger(depth) && depth > 0 ? depth : 0;
+}
+
+/**
+ * Display-only: name the child pane in Herdr's Agents panel as a branch under the
+ * calling pane ("\u2514\u2500 scout"), one level deeper than the caller when it is itself
+ * a subagent. Never affects identity or lifecycle; failures are ignored.
+ */
+export function reportHerdrPaneTree(paneId: string, name: string): void {
+  const parentPaneId = process.env.HERDR_PANE_ID;
+  if (!parentPaneId || parentPaneId === paneId) return;
+  let depth = 1;
+  try {
+    depth = parsePaneTreeDepth(herdrExec(["pane", "get", parentPaneId])) + 1;
+  } catch {
+    // Unknown parent depth: show as a direct child.
+  }
+  try {
+    herdrExec(buildPaneTreeArgs(paneId, name, parentPaneId, depth));
+  } catch {
+    // Cosmetic only.
+  }
+}
+
 export const __herdrTest__ = {
   buildTabCreateArgs,
   buildPaneReportTaskArgs,
+  buildPaneTreeArgs,
+  parsePaneTreeDepth,
+  treeDisplayName,
   parseHerdrJson,
   extractHerdrPaneId,
   extractHerdrRootPaneId,

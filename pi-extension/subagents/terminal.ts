@@ -12,6 +12,7 @@ import {
   renameHerdrTab,
   renameHerdrWorkspace,
   reportHerdrPaneTask,
+  reportHerdrPaneTree,
   sendHerdrCommand,
   sendHerdrEscape,
 } from "./herdr.ts";
@@ -39,15 +40,19 @@ export function shellQuote(value: string): string {
   return "'" + value.replace(/'/g, "'\\''") + "'";
 }
 
-/** Selector mode keeps one visible child; other children run in background tabs. */
+/** Selector mode keeps one visible child; other children run in background tabs.
+ * Every child is named as a branch under the caller in Herdr's Agents panel. */
 export function createSubagentPane(name: string, cwd: string = process.cwd()): PaneId {
   assertTerminalAvailable();
   const surfaceMode = process.env.PI_SUBAGENT_SURFACE ?? "selector";
-  if (surfaceMode === "selector") return paneSelector.create(name, cwd);
-  if (surfaceMode === "tab") {
-    return createHerdrSurface(name, cwd);
-  }
-  return createHerdrSurfaceSplit(name, "right", cwd);
+  const paneId =
+    surfaceMode === "selector"
+      ? paneSelector.create(name, cwd)
+      : surfaceMode === "tab"
+        ? createHerdrSurface(name, cwd)
+        : createHerdrSurfaceSplit(name, "right", cwd);
+  reportHerdrPaneTree(paneId, name);
+  return paneId;
 }
 
 /** Split the current herdr pane and return the child pane ID. */

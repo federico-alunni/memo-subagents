@@ -3128,6 +3128,32 @@ describe("herdr.ts", () => {
       );
     });
 
+    it("names a child as a branch under the caller in the Herdr Agents panel", () => {
+      assert.deepEqual(__herdrTest__.buildPaneTreeArgs("pane-3", "Scout", "pane-1", 1), [
+        "pane",
+        "report-metadata",
+        "pane-3",
+        "--source",
+        "memo-subagents",
+        "--display-agent",
+        "\u2514\u2500 Scout",
+        "--token",
+        "parent=pane-1",
+        "--token",
+        "tree_depth=1",
+      ]);
+      assert.equal(__herdrTest__.treeDisplayName("Reviewer\nx", 3), "\u250a \u250a \u2514\u2500 Reviewer x");
+    });
+
+    it("reads the caller's tree depth from its pane tokens (root when absent)", () => {
+      const pane = (tokens?: Record<string, string>) =>
+        JSON.stringify({ result: { pane: { pane_id: "p", ...(tokens ? { tokens } : {}) } } });
+      assert.equal(__herdrTest__.parsePaneTreeDepth(pane()), 0);
+      assert.equal(__herdrTest__.parsePaneTreeDepth(pane({ tree_depth: "2" })), 2);
+      assert.equal(__herdrTest__.parsePaneTreeDepth(pane({ tree_depth: "x" })), 0);
+      assert.equal(__herdrTest__.parsePaneTreeDepth("not json"), 0);
+    });
+
     it("flattens multi-line and tab-padded tasks into a single line", () => {
       assert.deepEqual(
         __herdrTest__.buildPaneReportTaskArgs(
