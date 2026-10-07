@@ -2800,19 +2800,64 @@ describe("subagent startup delay", () => {
   });
 });
 describe("subagents widget rendering", () => {
-  it("projects Claude agents as running and counts them as active", () => {
+  it("renders runtime agents of other clients in their own group box, with client status", () => {
+    const testApi = (subagentsModule as any).__test__;
+    const originalNow = Date.now;
+    Date.now = () => 65_000;
+    try {
+      const entries = [
+        { key: "a", group: "Issue Round", label: "#12 worker", model: "prov/gpt-x", thinking: "high", startedAt: 5_000, state: "active", status: "al lavoro", updatedAt: 0 },
+        { key: "b", group: "Issue Round", label: "merger", model: "prov/gpt-y", thinking: "low", startedAt: 5_000, state: "settled", updatedAt: 0 },
+        { key: "c", group: "Issue Round", label: "planner", model: "prov/gpt-z", thinking: "high", startedAt: 5_000, state: "active", status: "domanda per te", questionPending: true, updatedAt: 0 },
+      ];
+      const lines = testApi.renderWidgetLines([], entries, 90);
+      assert.match(lines[0], /Issue Round/);
+      assert.match(lines[0], /2 active · 1 open/);
+      assert.ok(lines[0].includes("\x1b[38;2;77;163;255m"));
+      assert.match(lines[1], /01:00  #12 worker/);
+      assert.match(lines[1], /gpt-x\|high · al lavoro/);
+      assert.match(lines[2], /gpt-y\|low · waiting/);
+      assert.match(lines[3], /❓ domanda per te/);
+      assert.match(lines[4], /╰/);
+      assert.ok(!lines.some((line: string) => line.includes("Subagents")));
+      assert.ok(!lines.some((line: string) => line.includes("/subagent")));
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
+  it("puts ungrouped runtime rows in the Subagents box and groups below it", () => {
+    const testApi = (subagentsModule as any).__test__;
+    const lines = testApi.renderWidgetLines(
+      [],
+      [
+        { key: "u", label: "scout", model: "prov/m", thinking: "low", startedAt: Date.now(), state: "starting", updatedAt: 0 },
+        { key: "g", group: "Issue Round", label: "merger", model: "prov/m", thinking: "low", startedAt: Date.now(), state: "stopped", active: false, updatedAt: 0 },
+      ],
+      80,
+    );
+    assert.match(lines[0], /Subagents/);
+    assert.match(lines[1], /scout/);
+    assert.match(lines[1], /starting…/);
+    assert.match(lines[2], /\/subagent/);
+    assert.match(lines[4], /Issue Round/);
+    assert.match(lines[4], /1 open/);
+    assert.ok(lines[4].includes("\x1b[38;2;214;158;46m"));
+    assert.equal(testApi.renderWidgetLines([], [], 80).length, 0);
+  });
+
+  it("projects process-only lifecycles as running and counts them as active", () => {
     const testApi = (subagentsModule as any).__test__;
     const originalNow = Date.now;
     Date.now = () => 30_000;
     try {
       const lines = testApi.renderSubagentWidgetLines([{
         id: "c1",
-        name: "Claude",
+        name: "Worker",
         task: "",
         surface: "s1",
         startTime: 5_000,
         sessionFile: "sess1",
-        cli: "claude",
         lifecycle: { ...createLifecycle(5_000), process: { kind: "running", startedAt: 5_000, confirmedAt: 5_000 } },
         interactive: false,
       }], 64);

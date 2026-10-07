@@ -101,6 +101,11 @@ import {
   type SubagentLifecycle,
   type PaneInspection,
 } from "./lifecycle.ts";
+import {
+  presence,
+  presenceActive,
+  type PresenceEntry,
+} from "./runtime/presence.ts";
 
 /** Absolute path to `pi-extension/subagents`. https://github.com/nodejs/node/issues/37845 */
 const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -111,6 +116,8 @@ const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
 const WIDGET_INTERVAL_KEY = Symbol.for("pi-subagents/widget-interval");
 const STATUS_INTERVAL_KEY = Symbol.for("pi-subagents/status-interval");
 const RUNTIME_KEY = Symbol.for("pi-subagents/runtime");
+// Unsubscribe of the widget's presence listener, replaced on /reload.
+const PRESENCE_WIDGET_KEY = Symbol.for("memo-subagents/presence-widget-unsubscribe");
 
 {
   const prevInterval = (globalThis as any)[WIDGET_INTERVAL_KEY];
@@ -785,16 +792,81 @@ function formatLifecycleWidgetLabel(
   return " starting… ";
 }
 
-function renderSubagentWidgetLines(agents: RunningSubagent[], width: number): string[] {
+const PRESENCE_STATE_LABEL: Record<PresenceEntry["state"], string> = {
+  launching: "starting…",
+  "launch-uncertain": "⚠ launch uncertain",
+  starting: "starting…",
+  active: "active",
+  settled: "waiting",
+  missing: "⚠ pane missing",
+  unavailable: "⚠ unavailable",
+  changed: "⚠ changed",
+  "taken-over": "taken over",
+  stopped: "stopped",
+};
+
+/** One runtime agent row: elapsed, label, model|thinking · status (client annotation first). */
+function presenceRowLine(entry: PresenceEntry, width: number, accent: string, now: number): string {
+  const elapsed = formatElapsedMMSS(entry.startedAt, now);
+  const left = `   ${elapsed}  ${entry.label} `;
+  const modelId = entry.model.includes("/") ? entry.model.slice(entry.model.indexOf("/") + 1) : entry.model;
+  const status = entry.questionPending
+    ? `❓ ${entry.status ?? "question"}`
+    : entry.status ?? PRESENCE_STATE_LABEL[entry.state] ?? entry.state;
+  return borderLine(left, ` ${modelId}|${entry.thinking} · ${status} `, width, accent);
+}
+
+/** Runtime agents of other clients, one box per display group (e.g. "Issue Round"). */
+function renderPresenceGroupLines(entries: PresenceEntry[], width: number, now = Date.now()): string[] {
+  const groups = new Map<string, PresenceEntry[]>();
+  for (const entry of entries) {
+    if (!entry.group) continue;
+    groups.set(entry.group, [...(groups.get(entry.group) ?? []), entry]);
+  }
+  const lines: string[] = [];
+  for (const [group, rows] of groups) {
+    const active = rows.filter(presenceActive).length;
+    const open = rows.length - active;
+    const info = [active && `${active} active`, open && `${open} open`].filter(Boolean).join(" · ");
+    const accent = active > 0 ? ACTIVE_ACCENT : OPEN_ACCENT;
+    lines.push(borderTop(group, info, width, accent));
+    for (const row of rows) lines.push(presenceRowLine(row, width, accent, now));
+    lines.push(borderBottom(width, accent));
+  }
+  return lines;
+}
+
+/** The single widget: generic subagents (legacy + ungrouped runtime rows), then one box per runtime group. */
+function renderWidgetLines(
+  agents: RunningSubagent[],
+  entries: PresenceEntry[],
+  width: number,
+): string[] {
+  const ungrouped = entries.filter((entry) => !entry.group);
+  return [
+    ...(agents.length > 0 || ungrouped.length > 0
+      ? renderSubagentWidgetLines(agents, width, ungrouped)
+      : []),
+    ...renderPresenceGroupLines(entries, width),
+  ];
+}
+
+function renderSubagentWidgetLines(
+  agents: RunningSubagent[],
+  width: number,
+  runtimeRows: PresenceEntry[] = [],
+): string[] {
   const now = Date.now();
   const rendered = agents.map((agent) => ({ agent, projection: projectLifecycle(ensureLifecycle(agent), now) }));
-  const activeCount = rendered.filter(({ projection }) =>
+  const legacyActiveCount = rendered.filter(({ projection }) =>
     projection.kind === "active" ||
     projection.kind === "starting" ||
     projection.kind === "running" ||
     projection.kind === "blocked"
   ).length;
-  const openCount = agents.length - activeCount;
+  const runtimeActive = runtimeRows.filter(presenceActive).length;
+  const activeCount = legacyActiveCount + runtimeActive;
+  const openCount = agents.length + runtimeRows.length - activeCount;
   const info = activeCount > 0
     ? openCount > 0 ? `${activeCount} active · ${openCount} open` : `${activeCount} active`
     : `${openCount} open`;
@@ -817,6 +889,7 @@ function renderSubagentWidgetLines(agents: RunningSubagent[], width: number): st
 
     lines.push(borderLine(left, right, width, accent));
   }
+  for (const row of runtimeRows) lines.push(presenceRowLine(row, width, accent, now));
 
   lines.push(borderLine(" /subagent · Ctrl+Alt+S: select visible agent ", "", width, accent));
   lines.push(borderBottom(width, accent));
@@ -827,7 +900,7 @@ function updateWidget() {
   const latestCtx = runtime.latestCtx;
   if (!latestCtx?.hasUI) return;
 
-  if (runningSubagents.size === 0) {
+  if (runningSubagents.size === 0 && presence().list().length === 0) {
     latestCtx.ui.setWidget("subagent-status", undefined);
     if (widgetInterval) {
       clearInterval(widgetInterval);
@@ -843,7 +916,7 @@ function updateWidget() {
       return {
         invalidate() {},
         render(width: number) {
-          return renderSubagentWidgetLines(Array.from(runningSubagents.values()), width);
+          return renderWidgetLines(Array.from(runningSubagents.values()), presence().list(), width);
         },
       };
     },
@@ -1375,6 +1448,8 @@ export const __test__ = {
   borderLine,
   getShellReadyDelayMs,
   renderSubagentWidgetLines,
+  renderWidgetLines,
+  renderPresenceGroupLines,
   loadAgentDefaults,
   discoverAgentDefinitions,
   buildAvailableAgentCatalog,
@@ -1795,6 +1870,14 @@ async function watchSubagent(
 export default function subagentsExtension(pi: ExtensionAPI) {
   runtime.pi = pi;
 
+  // Unified widget: agents launched by any AgentRuntime client in this process (e.g. issue-round)
+  // are shown next to the generic subagents. Display only.
+  (globalThis as any)[PRESENCE_WIDGET_KEY]?.();
+  (globalThis as any)[PRESENCE_WIDGET_KEY] = presence().subscribe(() => {
+    if (presence().list().length > 0) startWidgetRefresh();
+    else updateWidget();
+  });
+
   // Capture the UI context for widget updates and restore presentation for
   // subagents whose watchers survived a reload.
   pi.on("session_start", (_event, ctx) => {
@@ -1815,11 +1898,15 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       startWidgetRefresh();
       startStatusRefresh(pi);
       updateWidget();
+    } else if (presence().list().length > 0) {
+      startWidgetRefresh();
     }
   });
 
   // Clean up on session shutdown
   pi.on("session_shutdown", (event, _ctx) => {
+    (globalThis as any)[PRESENCE_WIDGET_KEY]?.();
+    (globalThis as any)[PRESENCE_WIDGET_KEY] = null;
     if (widgetInterval) {
       clearInterval(widgetInterval);
       widgetInterval = null;

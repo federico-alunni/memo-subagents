@@ -26,7 +26,8 @@
     "terminal.ts / herdr.ts: optional pane cwd argument (defaults to process.cwd() as before).",
     "Symbol.for('pi-subagents/*') runtime keys are unchanged; therefore never load together with pi-herdr-subagents.",
     "Tests live in test/ (upstream layout); test/integration copied from upstream v0.2.0 as opt-in (npm run test:integration).",
-    "Pi only: harness/drivers/{claude,codex,opencode,grok,generic}.ts, harness/pane-summary.ts and plugin/ (Claude Code hook) removed; registry resolves only pi and rejects other `cli` values; resumeSessionId/claudeSessionId removed from index.ts."
+    "Pi only: harness/drivers/{claude,codex,opencode,grok,generic}.ts, harness/pane-summary.ts and plugin/ (Claude Code hook) removed; registry resolves only pi and rejects other `cli` values; resumeSessionId/claudeSessionId removed from index.ts.",
+    "runtime/: AgentRuntime library (memo-subagents/runtime) ported from pi-issue-round@b3b19aa transport/child/protocol/readonly-bash/question-dialog, made role-agnostic; presence registry; index.ts renders runtime agents in the unified widget."
   ],
   "files": [
     {
@@ -121,7 +122,7 @@
     },
     {
       "path": "pi-extension/subagents/index.ts",
-      "sha256": "967053d0e66595674f236f35d84d09b4d61b6ba4fd640fa000f5b27271fca601",
+      "sha256": "cd21ac723c314049be4ca0ab9166f62c8f4a24a310a0060b62db3d6386952a07",
       "upstreamV020Sha256": "73a9ea0ab5ecd0cc13060697e00f8e9ca70fc95251090611e3bbea73be46fe93",
       "installedNpmSha256": "73a9ea0ab5ecd0cc13060697e00f8e9ca70fc95251090611e3bbea73be46fe93",
       "localPackageSha256": "d6917cb3a443fd32e2cedc9fca529d9ebc995903512b584cf4dc8de669ba61b4",
@@ -163,6 +164,96 @@
       "localPackageSha256": "e25cb5ffe6a4a876b0e34d9cc7025e6fd76e65c58faea755ed733035cde8dddb",
       "piIssueRoundVendoredSha256": "e25cb5ffe6a4a876b0e34d9cc7025e6fd76e65c58faea755ed733035cde8dddb",
       "status": "modified"
+    },
+    {
+      "path": "pi-extension/subagents/runtime/agent-runtime.ts",
+      "sha256": "0caf12f36a2a167d1e23e23171966956b443436d5e0b8f99986558de38300c8a",
+      "upstreamV020Sha256": null,
+      "installedNpmSha256": null,
+      "localPackageSha256": null,
+      "piIssueRoundVendoredSha256": null,
+      "status": "ported-from-pi-issue-round@b3b19aa"
+    },
+    {
+      "path": "pi-extension/subagents/runtime/child/env.ts",
+      "sha256": "983b2f08963b70f0629994c3d24a3e9dd4010c62f3b64468a156a230aa55c74c",
+      "upstreamV020Sha256": null,
+      "installedNpmSha256": null,
+      "localPackageSha256": null,
+      "piIssueRoundVendoredSha256": null,
+      "status": "ported-from-pi-issue-round@b3b19aa"
+    },
+    {
+      "path": "pi-extension/subagents/runtime/child/extension.ts",
+      "sha256": "e67474e516af2322a8029a954ec916b261d292cf33c06676b8337fa587fa434a",
+      "upstreamV020Sha256": null,
+      "installedNpmSha256": null,
+      "localPackageSha256": null,
+      "piIssueRoundVendoredSha256": null,
+      "status": "ported-from-pi-issue-round@b3b19aa"
+    },
+    {
+      "path": "pi-extension/subagents/runtime/child/question-dialog.ts",
+      "sha256": "8de40935a3295fd8cb3055514a0fa4aba630f749b33c06a5c9636aab1bd405db",
+      "upstreamV020Sha256": null,
+      "installedNpmSha256": null,
+      "localPackageSha256": null,
+      "piIssueRoundVendoredSha256": null,
+      "status": "ported-from-pi-issue-round@b3b19aa"
+    },
+    {
+      "path": "pi-extension/subagents/runtime/child/readonly-bash.ts",
+      "sha256": "ab864119c0f737c27abbcb6759f4bceb0b01f8ae091811a09411140583bab83b",
+      "upstreamV020Sha256": null,
+      "installedNpmSha256": null,
+      "localPackageSha256": null,
+      "piIssueRoundVendoredSha256": null,
+      "status": "ported-from-pi-issue-round@b3b19aa"
+    },
+    {
+      "path": "pi-extension/subagents/runtime/child/runtime.ts",
+      "sha256": "22f76a626696c51286a0f3ade18d426d3c66a56ffa7c2fd46eaaa213afd397c8",
+      "upstreamV020Sha256": null,
+      "installedNpmSha256": null,
+      "localPackageSha256": null,
+      "piIssueRoundVendoredSha256": null,
+      "status": "ported-from-pi-issue-round@b3b19aa"
+    },
+    {
+      "path": "pi-extension/subagents/runtime/index.ts",
+      "sha256": "d06e1c97c8ad7e3f49c727670f521f6c9bda64d7f30bf104cef2703910a8b6aa",
+      "upstreamV020Sha256": null,
+      "installedNpmSha256": null,
+      "localPackageSha256": null,
+      "piIssueRoundVendoredSha256": null,
+      "status": "ported-from-pi-issue-round@b3b19aa"
+    },
+    {
+      "path": "pi-extension/subagents/runtime/presence.ts",
+      "sha256": "20930d4078019fec4246a3a9d59feca12f4a36929bc2d2c916e9ba126d41f024",
+      "upstreamV020Sha256": null,
+      "installedNpmSha256": null,
+      "localPackageSha256": null,
+      "piIssueRoundVendoredSha256": null,
+      "status": "ported-from-pi-issue-round@b3b19aa"
+    },
+    {
+      "path": "pi-extension/subagents/runtime/protocol.ts",
+      "sha256": "05e7dbfe5980f207665531dab385bd511df70fa513e1f875ff88bcc7835bf019",
+      "upstreamV020Sha256": null,
+      "installedNpmSha256": null,
+      "localPackageSha256": null,
+      "piIssueRoundVendoredSha256": null,
+      "status": "ported-from-pi-issue-round@b3b19aa"
+    },
+    {
+      "path": "pi-extension/subagents/runtime/runner.ts",
+      "sha256": "52d6d0f6d4dddecbba39fa0f4b27bf169eae33f0105c245f7939d6fe7cfa62e5",
+      "upstreamV020Sha256": null,
+      "installedNpmSha256": null,
+      "localPackageSha256": null,
+      "piIssueRoundVendoredSha256": null,
+      "status": "ported-from-pi-issue-round@b3b19aa"
     },
     {
       "path": "pi-extension/subagents/session.ts",

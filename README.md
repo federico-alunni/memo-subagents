@@ -65,6 +65,13 @@ Agent frontmatter supports `name`, `description`, `model`, `thinking`, `tools`, 
 
 memo-subagents launches **only pi** children: the upstream drivers for other CLIs (Claude Code, Codex, OpenCode, Grok, generic `command` templates) and the Claude Code plugin hook were removed. A definition with `cli:` other than `pi` is rejected at spawn time.
 
+## Agent runtime (for other packages)
+
+`memo-subagents/runtime` is the library behind agent launching: exact pane/process identities, durable evidence,
+long-lived children with correlated tasks, delegated tools, read-only bash policy, proven shutdown. Other packages
+(pi-issue-round) launch their agents through it instead of their own transport, and every runtime agent appears in
+the same widget, grouped by client. Contract: [docs/runtime.md](docs/runtime.md).
+
 ## Worktrees
 
 `subagent({ name: "Fix", agent: "worker", worktree: true, task: "…" })` creates `<repo>-memo-worktrees/fix-<id8>` next to the repository on branch `memo/fix-<id8>` from the current `HEAD`, runs the child there (same sub-directory as the requested `cwd`), and reports `Worktree: <path> (branch …, N commits ahead of <base>, clean|dirty)` in the result plus `details.worktree`. Nothing is merged automatically; the worktree stays until you remove it with `subagent_worktrees` / `/subagent-worktrees` (never forced; `deleteBranch` uses `git branch -d`). With uncommitted changes in the source checkout, the interactive TUI asks whether to proceed from the last commit or cancel. Full description: [docs/worktrees.md](docs/worktrees.md).
