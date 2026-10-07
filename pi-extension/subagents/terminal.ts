@@ -40,14 +40,14 @@ export function shellQuote(value: string): string {
 }
 
 /** Selector mode keeps one visible child; other children run in background tabs. */
-export function createSubagentPane(name: string): PaneId {
+export function createSubagentPane(name: string, cwd: string = process.cwd()): PaneId {
   assertTerminalAvailable();
   const surfaceMode = process.env.PI_SUBAGENT_SURFACE ?? "selector";
-  if (surfaceMode === "selector") return paneSelector.create(name, process.cwd());
+  if (surfaceMode === "selector") return paneSelector.create(name, cwd);
   if (surfaceMode === "tab") {
-    return createHerdrSurface(name);
+    return createHerdrSurface(name, cwd);
   }
-  return createHerdrSurfaceSplit(name, "right");
+  return createHerdrSurfaceSplit(name, "right", cwd);
 }
 
 /** Split the current herdr pane and return the child pane ID. */

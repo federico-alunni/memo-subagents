@@ -43,6 +43,26 @@ import {
 } from "./harness/index.ts";
 import { loadModelConfig, resolveModelDefault, type ModelConfig } from "./model-config.ts";
 import { hostChildEnvAssignments, hostChildExtensionArgs } from "./child-host.ts";
+import {
+  createWorktree,
+  findWorktreeRecordBySession,
+  formatWorktreeLine,
+  getWorktreeState,
+  loadWorktreeConfig,
+  markWorktreeRecordRemoved,
+  planWorktree,
+  readWorktreeRecords,
+  removeWorktree,
+  repoToplevel,
+  rollbackWorktree,
+  samePath,
+  worktreeRegistryDir,
+  writeWorktreeRecord,
+  type WorktreeInfo,
+  type WorktreePlan,
+  type WorktreeRecord,
+  type WorktreeState,
+} from "./worktree.ts";
 
 import {
   findLastAssistantMessage,
@@ -179,6 +199,24 @@ const SubagentParams = Type.Object({
         "Resume a previous Claude Code session by its ID. Loads the conversation history and continues where it left off. The session ID is returned in details of every claude tool call. Use this to retry cancelled runs or ask follow-up questions.",
     }),
   ),
+  worktree: Type.Optional(
+    Type.Boolean({
+      description:
+        "Run the sub-agent in a fresh, isolated git worktree on a new branch, created from the repository of its working directory. The worktree is kept after completion; its path, branch and commit state are reported in the result. Nothing is merged automatically. Clean up with subagent_worktrees.",
+    }),
+  ),
+  worktreeBranch: Type.Optional(
+    Type.String({
+      description:
+        "Name of the NEW branch for the worktree (requires worktree: true). Must not exist yet. Default: memo/<name>-<id>.",
+    }),
+  ),
+  worktreeBase: Type.Optional(
+    Type.String({
+      description:
+        "Commit-ish the worktree starts from (requires worktree: true). Default: HEAD of the source checkout, resolved to a commit at spawn time.",
+    }),
+  ),
 });
 
 type SubagentSessionMode = "standalone" | "lineage-only" | "fork";
@@ -219,6 +257,7 @@ const SPAWNING_TOOLS = new Set([
   "subagent_interrupt",
   "subagents_list",
   "subagent_resume",
+  "subagent_worktrees",
 ]);
 
 /**
@@ -601,6 +640,8 @@ interface RunningSubagent {
   interactive: boolean;
   /** Parent-resolved model/thinking selection and provenance. */
   runtimePlan: ResolvedRuntimePlan | undefined;
+  /** Set when the child runs in a memo-subagents git worktree. */
+  worktree?: WorktreeInfo;
 }
 
 interface SubagentRuntime {
@@ -776,8 +817,9 @@ function renderSubagentWidgetLines(agents: RunningSubagent[], width: number): st
   for (const { agent, projection } of rendered) {
     const elapsed = formatElapsedMMSS(agent.startTime, projection.runtimeEndedAt ?? now);
     const agentTag = agent.agent ? ` (${agent.agent})` : "";
+    const worktreeTag = agent.worktree ? ` ⎇ ${agent.worktree.branch}` : "";
     const selected = paneSelector.state.selected === agent.surface ? "▶" : " ";
-    const left = ` ${selected} ${elapsed}  ${agent.name}${agentTag} `;
+    const left = ` ${selected} ${elapsed}  ${agent.name}${agentTag}${worktreeTag} `;
     const runtimeTag = agent.runtimePlan
       ? `${agent.runtimePlan.modelId}|${agent.runtimePlan.thinking} · `
       : "";
@@ -1111,6 +1153,254 @@ function buildResumeCommand(opts: {
   return `${cdPrefix}${resumeEnvPrefix}${parts.join(" ")}; echo '__SUBAGENT_DONE_'$?'__'`;
 }
 
+// ── git worktree integration (see worktree.ts, docs/worktrees.md) ──
+
+function getWorktreeRegistryDir(): string {
+  return worktreeRegistryDir(getAgentConfigDir());
+}
+
+function validateWorktreeParams(params: {
+  worktree?: boolean;
+  worktreeBranch?: string;
+  worktreeBase?: string;
+}): string | null {
+  if (params.worktree !== true && (params.worktreeBranch != null || params.worktreeBase != null)) {
+    return "worktreeBranch and worktreeBase require worktree: true.";
+  }
+  return null;
+}
+
+interface DirtySourcePromptContext {
+  hasUI?: boolean;
+  mode?: string;
+  ui?: { select?: (title: string, options: string[]) => Promise<string | undefined> };
+}
+
+/**
+ * Dirty source checkout: warn and ask. Only an interactive TUI asks; print,
+ * JSON and RPC modes proceed (the warning still reaches the child and the
+ * master). Returns false when the user cancels.
+ */
+async function confirmDirtyWorktreeSource(
+  plan: Pick<WorktreePlan, "repo" | "baseSha" | "sourceDirty" | "sourceUntracked">,
+  ctx: DirtySourcePromptContext,
+): Promise<boolean> {
+  const count = plan.sourceDirty + plan.sourceUntracked;
+  if (count === 0) return true;
+  if (!ctx.hasUI || (ctx.mode ?? "tui") !== "tui" || typeof ctx.ui?.select !== "function") return true;
+  const base7 = plan.baseSha.slice(0, 7);
+  const proceed = `Proceed from the last commit (${base7}) without these changes`;
+  const cancel = "Cancel (create nothing)";
+  const choice = await ctx.ui.select(
+    `The source checkout ${plan.repo} has ${count} uncommitted/untracked change(s) that will NOT be included in the worktree (it starts from ${base7}). Proceed?`,
+    [proceed, cancel],
+  );
+  return choice === proceed;
+}
+
+function worktreeTaskNote(info: WorktreeInfo): string {
+  return [
+    `[memo-subagents worktree] You are working in the git worktree ${info.cwd} on the new branch ${info.branch} (base ${info.base.slice(0, 7)}). ` +
+      `Commit your work on that branch. Do not modify the original checkout ${info.repo}. Nothing is merged automatically.`,
+    ...info.warnings.map((warning) => `Warning: ${warning}`),
+  ].join("\n");
+}
+
+function worktreeDetails(info: WorktreeInfo, state?: WorktreeState) {
+  return {
+    id: info.id,
+    repo: info.repo,
+    path: info.path,
+    cwd: info.cwd,
+    branch: info.branch,
+    base: info.base,
+    ...(info.warnings.length > 0 ? { warnings: info.warnings } : {}),
+    ...(state
+      ? {
+          exists: state.exists,
+          registered: state.registered,
+          ...(state.head ? { head: state.head } : {}),
+          ...(state.commitsAhead != null ? { commitsAhead: state.commitsAhead } : {}),
+          ...(state.dirty != null ? { dirty: state.dirty } : {}),
+          ...(state.untracked != null ? { untracked: state.untracked } : {}),
+          ...(state.error ? { error: state.error } : {}),
+        }
+      : {}),
+  };
+}
+
+function worktreeLines(info: WorktreeInfo, state?: WorktreeState): string {
+  return [
+    formatWorktreeLine(info, state),
+    ...info.warnings.map((warning) => `Worktree warning: ${warning}`),
+  ].join("\n");
+}
+
+async function describeWorktreeForResult(info: WorktreeInfo) {
+  let state: WorktreeState | undefined;
+  try {
+    state = await getWorktreeState(info);
+  } catch {
+    state = undefined;
+  }
+  return { text: worktreeLines(info, state), details: worktreeDetails(info, state) };
+}
+
+/** The `Worktree:` block (with its warnings) inserted into a result message. */
+function extractWorktreeBlock(content: string): string | undefined {
+  const matches = [...content.matchAll(/\n\nWorktree: [^\n]*(?:\nWorktree warning: [^\n]*)*/g)];
+  return matches.at(-1)?.[0];
+}
+
+function formatWorktreeBadge(worktree: {
+  path?: string;
+  branch?: string;
+  commitsAhead?: number;
+  dirty?: number;
+  untracked?: number;
+}): string {
+  const parts = [`⎇ ${worktree.branch}`];
+  if (worktree.commitsAhead != null) parts.push(`${worktree.commitsAhead} ahead`);
+  if (worktree.dirty != null || worktree.untracked != null) {
+    parts.push((worktree.dirty ?? 0) + (worktree.untracked ?? 0) > 0 ? "dirty" : "clean");
+  }
+  if (worktree.path) parts.push(worktree.path);
+  return parts.join(" · ");
+}
+
+/** Insert worktree lines before the trailing Session/Resume reference. */
+function insertBeforeSessionRef(text: string, addition: string): string {
+  const index = text.lastIndexOf("\n\nSession: ");
+  return index === -1
+    ? `${text}\n\n${addition}`
+    : `${text.slice(0, index)}\n\n${addition}${text.slice(index)}`;
+}
+
+function worktreeInfoFromRecord(record: WorktreeRecord): WorktreeInfo {
+  return {
+    id: record.id,
+    name: record.name,
+    repo: record.repo,
+    sourceCwd: record.sourceCwd,
+    path: record.path,
+    cwd: record.cwd,
+    branch: record.branch,
+    base: record.base,
+    createdAt: record.createdAt,
+    warnings: [],
+  };
+}
+
+function isWorktreeInUse(path: string): boolean {
+  return Array.from(runningSubagents.values()).some(
+    (running) => running.worktree && samePath(running.worktree.path, path),
+  );
+}
+
+interface WorktreeEntry {
+  record: WorktreeRecord;
+  state: WorktreeState;
+  inUse: boolean;
+}
+
+/** Registry records (not removed) cross-checked with git, by default for the repo of `cwd`. */
+async function listWorktreeEntries(options: { cwd: string; all?: boolean }): Promise<WorktreeEntry[]> {
+  let records = readWorktreeRecords(getWorktreeRegistryDir()).filter((record) => !record.removedAt);
+  if (!options.all) {
+    const top = await repoToplevel(options.cwd);
+    if (top) records = records.filter((record) => samePath(record.repo, top) || samePath(record.path, top));
+  }
+  const entries: WorktreeEntry[] = [];
+  for (const record of records) {
+    entries.push({ record, state: await getWorktreeState(record), inUse: isWorktreeInUse(record.path) });
+  }
+  return entries;
+}
+
+function formatWorktreeEntry({ record, state, inUse }: WorktreeEntry): string {
+  const flags: string[] = [];
+  if (!state.exists) flags.push("missing");
+  else if (!state.registered) flags.push("not registered");
+  else {
+    flags.push(`${state.commitsAhead ?? "?"} ahead of ${record.base.slice(0, 7)}`);
+    const changes = (state.dirty ?? 0) + (state.untracked ?? 0);
+    flags.push(changes > 0 ? `dirty (${state.dirty ?? 0} changed, ${state.untracked ?? 0} untracked)` : "clean");
+  }
+  if (state.locked) flags.push("locked");
+  if (state.operation) flags.push(`${state.operation} in progress`);
+  if (inUse) flags.push("in use");
+  if (state.error) flags.push(`error: ${state.error}`);
+  const agent = record.agent ? ` (${record.agent})` : "";
+  return `${record.id.slice(0, 8)} ${record.name}${agent} — ${record.branch} @ ${record.path}: ${flags.join(", ")}`;
+}
+
+async function removeWorktreeEntry(options: {
+  id?: string;
+  path?: string;
+  deleteBranch?: boolean;
+}): Promise<{ ok: boolean; text: string; details: Record<string, unknown> }> {
+  const dir = getWorktreeRegistryDir();
+  const records = readWorktreeRecords(dir).filter((record) => !record.removedAt);
+  const id = options.id?.trim();
+  const path = options.path?.trim();
+  if (!id && !path) {
+    return { ok: false, text: "Provide the id or path of a memo-subagents worktree.", details: { error: "missing target" } };
+  }
+  const matches = records.filter((record) =>
+    id ? record.id === id || (id.length >= 4 && record.id.startsWith(id)) : samePath(record.path, path!),
+  );
+  if (matches.length !== 1) {
+    const text = matches.length === 0
+      ? `No memo-subagents worktree matches ${id ? `id "${id}"` : `path ${path}`}. Only worktrees created by subagent are managed here.`
+      : `Ambiguous id "${id}": ${matches.map((record) => record.id).join(", ")}`;
+    return { ok: false, text, details: { error: text } };
+  }
+  const record = matches[0];
+  const inUse = isWorktreeInUse(record.path);
+  const state = await getWorktreeState(record);
+  if (!inUse && !state.exists && !state.registered && !state.error) {
+    markWorktreeRecordRemoved(dir, record.id);
+    const text = `Worktree ${record.path} no longer exists; registry record forgotten. Branch ${record.branch} was not touched.`;
+    return { ok: true, text, details: { id: record.id, path: record.path, removed: false, branchDeleted: false } };
+  }
+  const result = await removeWorktree(record, { deleteBranch: options.deleteBranch === true, inUse });
+  if (result.removed) markWorktreeRecordRemoved(dir, record.id);
+  return {
+    ok: result.ok,
+    text: result.messages.join("\n"),
+    details: {
+      id: record.id,
+      path: record.path,
+      branch: record.branch,
+      removed: result.removed,
+      branchDeleted: result.branchDeleted,
+      ...(result.ok ? {} : { error: result.messages[0] }),
+    },
+  };
+}
+
+/**
+ * Resolve the worktree a resumed session must run in. Sessions without a
+ * registry record resume exactly as before (no cd).
+ */
+async function resolveResumeWorktree(
+  sessionPath: string,
+): Promise<{ worktree?: WorktreeInfo; error?: string }> {
+  const record = findWorktreeRecordBySession(getWorktreeRegistryDir(), sessionPath);
+  if (!record) return {};
+  const wrong = `resuming would run in the wrong checkout. Spawn a new subagent instead.`;
+  if (record.removedAt) {
+    return { error: `The worktree ${record.path} of this session was removed; ${wrong}` };
+  }
+  const state = await getWorktreeState(record);
+  if (!state.exists || !state.registered) {
+    return { error: `The worktree ${record.path} of this session no longer exists; ${wrong}` };
+  }
+  const info = worktreeInfoFromRecord(record);
+  if (!existsSync(info.cwd)) info.cwd = info.path;
+  return { worktree: info };
+}
+
 export const __test__ = {
   borderLine,
   getShellReadyDelayMs,
@@ -1132,6 +1422,14 @@ export const __test__ = {
   resolveResultPresentation,
   resolveResumeLaunchBehavior,
   buildResumeCommand,
+  validateWorktreeParams,
+  confirmDirtyWorktreeSource,
+  insertBeforeSessionRef,
+  extractWorktreeBlock,
+  formatWorktreeBadge,
+  listWorktreeEntries,
+  removeWorktreeEntry,
+  resolveResumeWorktree,
   runningSubagents,
   formatElapsed,
 };
@@ -1151,7 +1449,51 @@ function startWidgetRefresh() {
  *
  * Call watchSubagent() on the returned object to observe completion.
  */
+type LaunchContext = Parameters<typeof launchSubagentInner>[1];
+
+interface LaunchState {
+  worktree?: WorktreeInfo;
+  surface?: string;
+}
+
+/**
+ * Launch wrapper: when a worktree was created and the launch then fails
+ * (pane creation, script), close the new pane and roll the worktree back.
+ */
 async function launchSubagent(
+  params: typeof SubagentParams.static,
+  ctx: LaunchContext,
+  parentThinking: ThinkingLevel,
+  options?: { surface?: string; worktreePlan?: WorktreePlan },
+): Promise<RunningSubagent> {
+  const state: LaunchState = {};
+  try {
+    return await launchSubagentInner(params, ctx, parentThinking, options, state);
+  } catch (error) {
+    if (!state.worktree) throw error;
+    if (state.surface && !options?.surface) {
+      try {
+        closePane(state.surface);
+      } catch {}
+    }
+    const rollback = await rollbackWorktree(state.worktree);
+    const note = rollback.errors.length > 0
+      ? `worktree rollback incomplete: ${rollback.errors.join("; ")}`
+      : `worktree ${state.worktree.path} and branch ${state.worktree.branch} rolled back`;
+    throw new Error(`${error instanceof Error ? error.message : String(error)} (${note})`);
+  }
+}
+
+function resolveWorktreePaths(cwd: string) {
+  const localAgentDir = join(cwd, ".pi", "agent");
+  return {
+    effectiveCwd: cwd,
+    localAgentDir,
+    effectiveAgentDir: existsSync(localAgentDir) ? localAgentDir : getAgentConfigDir(),
+  };
+}
+
+async function launchSubagentInner(
   params: typeof SubagentParams.static,
   ctx: {
     sessionManager: { getSessionFile(): string | null; getSessionId(): string; getSessionDir(): string };
@@ -1165,10 +1507,12 @@ async function launchSubagent(
     };
   },
   parentThinking: ThinkingLevel,
-  options?: { surface?: string },
+  options: { surface?: string; worktreePlan?: WorktreePlan } | undefined,
+  launchState: LaunchState,
 ): Promise<RunningSubagent> {
   const startTime = Date.now();
-  const id = randomBytes(12).toString("hex");
+  // A worktree plan reserves the id up front so path/branch names match it.
+  const id = options?.worktreePlan?.id ?? randomBytes(12).toString("hex");
 
   const agentDefs = params.agent ? loadAgentDefaults(params.agent) : null;
   if (!ctx.model) throw new Error("Subagent launch requires a resolved parent model");
@@ -1190,7 +1534,20 @@ async function launchSubagent(
   const sessionId = ctx.sessionManager.getSessionId();
   const artifactDir = getArtifactDir(ctx.sessionManager.getSessionDir(), sessionId);
 
-  const { effectiveCwd, localAgentDir, effectiveAgentDir } = resolveSubagentPaths(params, agentDefs);
+  const resolvedPaths = resolveSubagentPaths(params, agentDefs);
+
+  const cliId = agentDefs?.cli ?? "pi";
+  const driver = getHarnessDriver(cliId);
+  driver.validateRuntimePlan?.(runtimePlan, parentThinking);
+
+  // Optional worktree: created after runtime validation and before the pane.
+  if (options?.worktreePlan) {
+    launchState.worktree = await createWorktree(options.worktreePlan);
+  }
+  const worktree = launchState.worktree;
+  const { effectiveCwd, localAgentDir, effectiveAgentDir } = worktree
+    ? resolveWorktreePaths(worktree.cwd)
+    : resolvedPaths;
   const targetCwdForSession = effectiveCwd ?? ctx.cwd;
   const sessionDir = getDefaultSessionDirFor(targetCwdForSession, effectiveAgentDir);
 
@@ -1206,12 +1563,9 @@ async function launchSubagent(
   ].join("-");
   const subagentSessionFile = join(sessionDir, `${timestamp}_${uuid}.jsonl`);
 
-  const cliId = agentDefs?.cli ?? "pi";
-  const driver = getHarnessDriver(cliId);
-  driver.validateRuntimePlan?.(runtimePlan, parentThinking);
-
   const surfacePreCreated = !!options?.surface;
-  const surface = options?.surface ?? createSubagentPane(params.name);
+  const surface = options?.surface ?? createSubagentPane(params.name, worktree?.cwd);
+  launchState.surface = surface;
   if (params.task) {
     setPaneTask(surface, params.task);
   }
@@ -1253,7 +1607,9 @@ async function launchSubagent(
   const effectiveModel = driver.formatModel(runtimePlan);
 
   const built = driver.buildCommand({
-    params: { ...params, id },
+    params: worktree
+      ? { ...params, id, task: `${params.task}\n\n${worktreeTaskNote(worktree)}` }
+      : { ...params, id },
     agentDefs,
     runtimePlan,
     effectiveModel,
@@ -1314,9 +1670,33 @@ async function launchSubagent(
     lifecycle: !driver.hasActivitySnapshots
       ? markProcessRunning(createLifecycle(startTime), Date.now())
       : createLifecycle(startTime),
+    ...(worktree ? { worktree } : {}),
   };
 
   runningSubagents.set(id, running);
+  if (worktree) {
+    try {
+      writeWorktreeRecord(getWorktreeRegistryDir(), {
+        id: worktree.id,
+        name: params.name,
+        ...(params.agent ? { agent: params.agent } : {}),
+        repo: worktree.repo,
+        sourceCwd: worktree.sourceCwd,
+        path: worktree.path,
+        cwd: worktree.cwd,
+        branch: worktree.branch,
+        base: worktree.base,
+        sessionFile: running.sessionFile,
+        parentSession: sessionFile,
+        createdAt: worktree.createdAt,
+      });
+    } catch (error) {
+      worktree.warnings.push(
+        `Could not write the worktree registry record (${error instanceof Error ? error.message : String(error)}); ` +
+          "subagent_resume and subagent_worktrees will not know this worktree.",
+      );
+    }
+  }
   return running;
 }
 
@@ -1565,6 +1945,14 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           };
         }
 
+        const worktreeParamError = validateWorktreeParams(params);
+        if (worktreeParamError) {
+          return {
+            content: [{ type: "text", text: `Error: ${worktreeParamError}` }],
+            details: { error: worktreeParamError },
+          };
+        }
+
         // Validate prerequisites
         if (!isTerminalAvailable()) {
           return muxUnavailableResult();
@@ -1582,6 +1970,38 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           };
         }
 
+        // Optional worktree: plan (no side effects) and ask about a dirty source.
+        let worktreePlan: WorktreePlan | undefined;
+        if (params.worktree === true) {
+          try {
+            const agentDefs = params.agent ? loadAgentDefaults(params.agent) : null;
+            const sourceCwd = resolveSubagentPaths(params, agentDefs).effectiveCwd ?? ctx.cwd;
+            worktreePlan = await planWorktree({
+              sourceCwd,
+              id: randomBytes(12).toString("hex"),
+              name: params.name,
+              branch: params.worktreeBranch,
+              base: params.worktreeBase,
+              config: loadWorktreeConfig(),
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            return {
+              content: [{ type: "text", text: `Error: ${message}. No subagent was started.` }],
+              details: { error: message },
+            };
+          }
+          if (!(await confirmDirtyWorktreeSource(worktreePlan, ctx as DirtySourcePromptContext))) {
+            const message =
+              `Cancelled by the user: the source checkout has uncommitted changes. ` +
+              `No worktree or subagent was created.`;
+            return {
+              content: [{ type: "text", text: message }],
+              details: { error: "worktree cancelled (dirty source)", worktreeCancelled: true },
+            };
+          }
+        }
+
         // Launch the subagent (creates pane, sends command)
         const parentThinking = pi.getThinkingLevel();
         if (
@@ -1595,7 +2015,12 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         ) {
           throw new Error(`Unsupported parent thinking level: ${parentThinking}`);
         }
-        const running = await launchSubagent(params, ctx, parentThinking);
+        const running = await launchSubagent(
+          params,
+          ctx,
+          parentThinking,
+          worktreePlan ? { worktreePlan } : undefined,
+        );
 
         // Create a separate AbortController for the watcher
         // (the tool's signal completes when we return)
@@ -1608,7 +2033,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
         // Fire-and-forget: start watching in background
         watchSubagent(running, watcherAbort.signal)
-          .then((result) => {
+          .then(async (result) => {
             if (!shouldDeliverSubagentCompletion(running)) {
               running.lifecycle = markDelivery(running.lifecycle, "suppressed");
               runningSubagents.delete(running.id);
@@ -1619,6 +2044,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             runningSubagents.delete(running.id);
             updateWidget();
             const completionApi = selectCompletionApi(pi, runtime.pi);
+            // Only worktree children await git state; others deliver synchronously as before.
+            const worktreeReport = running.worktree
+              ? await describeWorktreeForResult(running.worktree)
+              : undefined;
 
             if (result.ping) {
               // Subagent is requesting help — steer a ping message with session path for resume
@@ -1626,13 +2055,14 @@ export default function subagentsExtension(pi: ExtensionAPI) {
               completionApi.sendMessage(
                 {
                   customType: "subagent_ping",
-                  content: `Sub-agent "${result.ping.name}" needs help (${formatElapsed(result.elapsed)}):\n\n${result.ping.message}${sessionRef}`,
+                  content: `Sub-agent "${result.ping.name}" needs help (${formatElapsed(result.elapsed)}):\n\n${result.ping.message}${worktreeReport ? `\n\n${worktreeReport.text}` : ""}${sessionRef}`,
                   display: true,
                   details: {
                     name: result.ping.name,
                     message: result.ping.message,
                     agent: running.agent,
                     sessionFile: result.sessionFile,
+                    ...(worktreeReport ? { worktree: worktreeReport.details } : {}),
                   },
                 },
                 { triggerTurn: true, deliverAs: "steer" },
@@ -1641,9 +2071,12 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             }
 
             const basePresentation = resolveResultPresentation(result, running.name);
-            const presentation = running.runtimePlan?.runtimeMismatch
+            const runtimePresentation = running.runtimePlan?.runtimeMismatch
               ? `${basePresentation}\n\nRuntime warning: ${running.runtimePlan.runtimeMismatch}`
               : basePresentation;
+            const presentation = worktreeReport
+              ? insertBeforeSessionRef(runtimePresentation, worktreeReport.text)
+              : runtimePresentation;
 
             completionApi.sendMessage(
               {
@@ -1660,6 +2093,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
                   ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
                   ...(result.claudeSessionId ? { claudeSessionId: result.claudeSessionId } : {}),
                   ...(running.runtimePlan ? { runtimePlan: running.runtimePlan } : {}),
+                  ...(worktreeReport ? { worktree: worktreeReport.details } : {}),
                 },
               },
               { triggerTurn: true, deliverAs: "steer" },
@@ -1678,9 +2112,14 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             selectCompletionApi(pi, runtime.pi).sendMessage(
               {
                 customType: "subagent_result",
-                content: `Sub-agent "${running.name}" error: ${err?.message ?? String(err)}`,
+                content: `Sub-agent "${running.name}" error: ${err?.message ?? String(err)}${running.worktree ? `\n\n${worktreeLines(running.worktree)}` : ""}`,
                 display: true,
-                details: { name: running.name, task: running.task, error: err?.message },
+                details: {
+                  name: running.name,
+                  task: running.task,
+                  error: err?.message,
+                  ...(running.worktree ? { worktree: worktreeDetails(running.worktree) } : {}),
+                },
               },
               { triggerTurn: true, deliverAs: "steer" },
             );
@@ -1695,7 +2134,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
                 `Sub-agent "${params.name}" launched and is now running in the background. ` +
                 `Do NOT generate or assume any results — you have no idea what the sub-agent will do or produce. ` +
                 `The results will be delivered to you automatically as a steer message when the sub-agent finishes. ` +
-                `Until then, move on to other work or tell the user you're waiting.`,
+                `Until then, move on to other work or tell the user you're waiting.` +
+                (running.worktree ? `\n\n${worktreeLines(running.worktree)}` : ""),
             },
           ],
           details: {
@@ -1708,6 +2148,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             model: running.runtimePlan?.model,
             thinking: running.runtimePlan?.thinking,
             runtimePlan: running.runtimePlan,
+            ...(running.worktree ? { worktree: worktreeDetails(running.worktree) } : {}),
             status: "started",
           },
         };
@@ -1723,11 +2164,13 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         const cwdHint = typeof partialArgs.cwd === "string" && partialArgs.cwd
           ? theme.fg("dim", ` in ${partialArgs.cwd}`)
           : "";
+        const worktreeHint = partialArgs.worktree === true ? theme.fg("dim", " in worktree") : "";
         let text =
           "▸ " +
           theme.fg("toolTitle", theme.bold(name)) +
           agent +
-          cwdHint;
+          cwdHint +
+          worktreeHint;
 
         // Show a one-line task preview. renderCall is called repeatedly as the
         // LLM generates tool arguments, so args.task grows token by token.
@@ -1756,11 +2199,12 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           const runtime = details?.model
             ? ` — ${details.model}${details.thinking ? ` · ${details.thinking}` : ""}`
             : " — started";
+          const worktree = details?.worktree?.branch ? ` · ⎇ ${details.worktree.branch}` : "";
           return new Text(
             theme.fg("accent", "▸") +
               " " +
               theme.fg("toolTitle", theme.bold(name)) +
-              theme.fg("dim", runtime),
+              theme.fg("dim", runtime + worktree),
             0,
             0,
           );
@@ -1965,10 +2409,20 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           };
         }
 
+        // Sessions created in a memo worktree must resume there (or not at all).
+        const resumeWorktree = await resolveResumeWorktree(params.sessionPath);
+        if (resumeWorktree.error) {
+          return {
+            content: [{ type: "text", text: `Error: ${resumeWorktree.error}` }],
+            details: { error: resumeWorktree.error },
+          };
+        }
+        const worktree = resumeWorktree.worktree;
+
         // Record entry count before resuming so we can extract new messages
         const entryCountBefore = getNewEntries(params.sessionPath, 0).length;
 
-        const surface = createSubagentPane(name);
+        const surface = createSubagentPane(name, worktree?.cwd);
         if (params.message) {
           setPaneTask(surface, params.message);
         }
@@ -2003,6 +2457,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           activityFile,
           autoExit,
           resumeMsgFile,
+          ...(worktree ? { cwd: worktree.cwd } : {}),
         });
         const launchScriptFile = join(
           artifactDir,
@@ -2038,6 +2493,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           interactive,
           runtimePlan: undefined,
           lifecycle: createLifecycle(startTime),
+          ...(worktree ? { worktree } : {}),
         };
         runningSubagents.set(id, running);
         startWidgetRefresh();
@@ -2048,7 +2504,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         running.abortController = watcherAbort;
 
         watchSubagent(running, watcherAbort.signal)
-          .then((result) => {
+          .then(async (result) => {
             if (!shouldDeliverSubagentCompletion(running)) {
               running.lifecycle = markDelivery(running.lifecycle, "suppressed");
               runningSubagents.delete(running.id);
@@ -2059,18 +2515,22 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             runningSubagents.delete(running.id);
             updateWidget();
             const completionApi = selectCompletionApi(pi, runtime.pi);
+            const worktreeReport = running.worktree
+              ? await describeWorktreeForResult(running.worktree)
+              : undefined;
 
             if (result.ping) {
               const sessionRef = `\n\nSession: ${params.sessionPath}\nResume: pi --session ${params.sessionPath}`;
               completionApi.sendMessage(
                 {
                   customType: "subagent_ping",
-                  content: `Sub-agent "${result.ping.name}" needs help (${formatElapsed(result.elapsed)}):\n\n${result.ping.message}${sessionRef}`,
+                  content: `Sub-agent "${result.ping.name}" needs help (${formatElapsed(result.elapsed)}):\n\n${result.ping.message}${worktreeReport ? `\n\n${worktreeReport.text}` : ""}${sessionRef}`,
                   display: true,
                   details: {
                     name: result.ping.name,
                     message: result.ping.message,
                     sessionFile: params.sessionPath,
+                    ...(worktreeReport ? { worktree: worktreeReport.details } : {}),
                   },
                 },
                 { triggerTurn: true, deliverAs: "steer" },
@@ -2089,9 +2549,12 @@ export default function subagentsExtension(pi: ExtensionAPI) {
               { ...result, summary, sessionFile: params.sessionPath },
               name,
             );
-            const presentation = running.runtimePlan?.runtimeMismatch
+            const runtimePresentation = running.runtimePlan?.runtimeMismatch
               ? `${basePresentation}\n\nRuntime warning: ${running.runtimePlan.runtimeMismatch}`
               : basePresentation;
+            const presentation = worktreeReport
+              ? insertBeforeSessionRef(runtimePresentation, worktreeReport.text)
+              : runtimePresentation;
 
             completionApi.sendMessage(
               {
@@ -2106,6 +2569,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
                   sessionFile: params.sessionPath,
                   ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
                   ...(running.runtimePlan ? { runtimePlan: running.runtimePlan } : {}),
+                  ...(worktreeReport ? { worktree: worktreeReport.details } : {}),
                 },
               },
               { triggerTurn: true, deliverAs: "steer" },
@@ -2133,17 +2597,93 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           });
 
         return {
-          content: [{ type: "text", text: `Session "${name}" resumed.` }],
+          content: [
+            {
+              type: "text",
+              text: `Session "${name}" resumed.${worktree ? `\n\n${worktreeLines(worktree)}` : ""}`,
+            },
+          ],
           details: {
             id,
             name,
             sessionPath: params.sessionPath,
             launchScriptFile,
+            ...(worktree ? { worktree: worktreeDetails(worktree) } : {}),
             status: "started",
           },
         };
       },
     });
+
+  // ── subagent_worktrees tool ──
+  if (shouldRegister("subagent_worktrees"))
+    pi.registerTool({
+      name: "subagent_worktrees",
+      label: "Subagent Worktrees",
+      description:
+        "List or remove git worktrees created by subagent (worktree: true). " +
+        "list: registry records cross-checked with git (branch, commits ahead of base, dirty, in use). " +
+        "remove: git worktree remove without --force; refuses worktrees that are in use, locked, dirty, have untracked files or an operation in progress. " +
+        "deleteBranch uses git branch -d, which keeps unmerged branches. Never merges.",
+      promptSnippet:
+        "List or remove git worktrees created by subagent (worktree: true). Removal is never forced; deleteBranch uses git branch -d.",
+      parameters: Type.Object({
+        action: Type.Union([Type.Literal("list"), Type.Literal("remove")], {
+          description: "list or remove",
+        }),
+        id: Type.Optional(Type.String({ description: "remove: worktree id (from list or subagent details.worktree.id; unique prefix allowed)" })),
+        path: Type.Optional(Type.String({ description: "remove: worktree path (alternative to id)" })),
+        deleteBranch: Type.Optional(
+          Type.Boolean({ description: "remove: also delete the branch with git branch -d (kept if not merged). Default false." }),
+        ),
+        all: Type.Optional(
+          Type.Boolean({ description: "list: include every repository (default: only the repository of the current directory)" }),
+        ),
+      }),
+
+      async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+        if (params.action === "remove") {
+          const result = await removeWorktreeEntry(params);
+          return { content: [{ type: "text", text: result.text }], details: { action: "remove", ...result.details } };
+        }
+        const entries = await listWorktreeEntries({ cwd: ctx.cwd, all: params.all });
+        const text = entries.length === 0
+          ? "No memo-subagents worktrees found."
+          : entries.map(formatWorktreeEntry).join("\n");
+        return {
+          content: [{ type: "text", text }],
+          details: {
+            action: "list",
+            worktrees: entries.map(({ record, state, inUse }) => ({ ...record, state, inUse })),
+          },
+        };
+      },
+    });
+
+  pi.registerCommand("subagent-worktrees", {
+    description: "List and remove git worktrees created by subagents",
+    handler: async (_args, ctx) => {
+      if (!ctx.hasUI) return;
+      const entries = await listWorktreeEntries({ cwd: ctx.cwd });
+      if (entries.length === 0) {
+        ctx.ui.notify("No memo-subagents worktrees for this repository", "info");
+        return;
+      }
+      const labels = entries.map(formatWorktreeEntry);
+      const selected = await ctx.ui.select("Subagent worktrees", labels);
+      if (!selected) return;
+      const entry = entries[labels.indexOf(selected)];
+      if (!entry) return;
+      const keep = "Remove worktree (keep branch)";
+      const drop = "Remove worktree and delete branch if merged (git branch -d)";
+      const action = await ctx.ui.select(`${entry.record.branch} @ ${entry.record.path}`, [keep, drop, "Cancel"]);
+      if (action !== keep && action !== drop) return;
+      const confirmed = await ctx.ui.confirm("Remove worktree?", `${entry.record.path}\n(never forced)`);
+      if (!confirmed) return;
+      const result = await removeWorktreeEntry({ id: entry.record.id, deleteBranch: action === drop });
+      ctx.ui.notify(result.text, result.ok ? "info" : "warning");
+    },
+  });
 
   // User-only layout selector: no model turn and no changes to child lifecycle.
   const selectSubagentView = async (args: string, ctx: ExtensionContext) => {
@@ -2262,8 +2802,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         const header = `${icon} ${theme.fg("toolTitle", theme.bold(name))}${agentTag} ${theme.fg("dim", "—")} ${status} ${theme.fg("dim", `(${elapsed})`)}`;
         const rawContent = typeof message.content === "string" ? message.content : "";
 
-        // Clean summary (remove session ref and leading label for display)
-        const summary = rawContent
+        // Clean summary (remove session ref, worktree block and leading label for display)
+        const worktreeBlock = details.worktree ? extractWorktreeBlock(rawContent) : undefined;
+        const summary = (worktreeBlock ? rawContent.replace(worktreeBlock, "") : rawContent)
           .replace(/\n\nSession: .+\nResume: .+$/, "")
           .replace(`Sub-agent "${name}" completed (${elapsed}).\n\n`, "")
           .replace(`Sub-agent "${name}" failed (exit code ${exitCode}).\n\n`, "")
@@ -2284,6 +2825,12 @@ export default function subagentsExtension(pi: ExtensionAPI) {
               contentLines.push(line.slice(0, width - 6));
             }
           }
+          if (worktreeBlock) {
+            contentLines.push("");
+            for (const line of worktreeBlock.trim().split("\n")) {
+              contentLines.push(theme.fg("dim", line.slice(0, width - 6)));
+            }
+          }
           if (details.sessionFile) {
             contentLines.push("");
             contentLines.push(theme.fg("dim", `Session: ${details.sessionFile}`));
@@ -2300,6 +2847,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             if (totalLines > 5) {
               contentLines.push(theme.fg("muted", `… ${totalLines - 5} more lines`));
             }
+          }
+          if (details.worktree?.branch) {
+            contentLines.push(theme.fg("dim", formatWorktreeBadge(details.worktree).slice(0, width - 6)));
           }
           contentLines.push(theme.fg("muted", keyHint("app.tools.expand", "to expand")));
         }
@@ -2360,6 +2910,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         if (options.expanded) {
           contentLines.push("");
           contentLines.push(details.message ?? "");
+          if (details.worktree?.branch) {
+            contentLines.push("");
+            contentLines.push(theme.fg("dim", formatWorktreeBadge(details.worktree)));
+          }
           if (details.sessionFile) {
             contentLines.push("");
             contentLines.push(theme.fg("dim", `Session: ${details.sessionFile}`));
