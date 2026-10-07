@@ -93,6 +93,7 @@ import {
   type PresenceEntry,
 } from "./runtime/presence.ts";
 import { RuntimeError } from "./runtime/index.ts";
+import { validBashAllowEntry } from "./runtime/protocol.ts";
 import type { AgentHandle, LaunchSpec, Observation } from "./runtime/index.ts";
 import {
   subagentRuntime,
@@ -219,8 +220,13 @@ interface AgentDefaults {
   skills?: string;
   thinking?: string;
   denyTools?: string;
-  /** `bash: readonly` limits bash to one plain read-only command per call (runtime policy). */
-  bash?: "readonly";
+  /**
+   * Raw `bash` value, validated at launch (`resolveAgentBash`): `full` (default), `readonly` (one plain
+   * read-only command per call) or `none` (bash denied).
+   */
+  bash?: string;
+  /** Raw `bash-allow`: comma-separated extra command prefixes on top of `readonly` (e.g. `npm test`). */
+  bashAllow?: string;
   spawning?: boolean;
   autoExit?: boolean;
   interactive?: boolean;
@@ -268,6 +274,9 @@ function resolveDenyTools(agentDefs: AgentDefaults | null): Set<string> {
     for (const t of SPAWNING_TOOLS) denied.add(t);
   }
 
+  // bash: none → bash is a denied tool
+  if (agentDefs.bash?.trim().toLowerCase() === "none") denied.add("bash");
+
   // deny-tools: explicit list
   if (agentDefs.denyTools) {
     for (const t of agentDefs.denyTools
@@ -279,6 +288,36 @@ function resolveDenyTools(agentDefs: AgentDefaults | null): Set<string> {
   }
 
   return denied;
+}
+
+type AgentBashMode = "full" | "readonly" | "none";
+
+/**
+ * Bash policy of an agent definition. `bash-allow` without `bash` implies `readonly`; unknown values,
+ * `bash-allow` with `full`/`none` and non-plain entries are errors (raised before any worktree or pane).
+ */
+function resolveAgentBash(agentDefs: AgentDefaults | null): { mode: AgentBashMode; allow: string[] } {
+  const raw = agentDefs?.bash?.trim().toLowerCase();
+  const isMode = (value: string): value is AgentBashMode =>
+    value === "full" || value === "readonly" || value === "none";
+  if (raw !== undefined && !isMode(raw))
+    throw new Error(
+      `Unsupported \`bash: ${agentDefs?.bash}\` in the agent definition: use full (default), readonly or none.`,
+    );
+  const allow = splitList(agentDefs?.bashAllow).map((entry) => entry.split(/[ \t]+/).join(" "));
+  if (agentDefs?.bashAllow !== undefined && allow.length === 0)
+    throw new Error("`bash-allow` in the agent definition lists no command.");
+  const mode: AgentBashMode = raw !== undefined && isMode(raw) ? raw : allow.length > 0 ? "readonly" : "full";
+  if (allow.length > 0 && mode !== "readonly")
+    throw new Error(
+      `\`bash-allow\` adds commands on top of \`bash: readonly\` and cannot be used with \`bash: ${mode}\`.`,
+    );
+  const invalid = allow.filter((entry) => !validBashAllowEntry(entry));
+  if (invalid.length > 0)
+    throw new Error(
+      `Invalid \`bash-allow\` entries (plain words only, no pipes, redirections, quotes, globs, $ or #): ${invalid.join(", ")}`,
+    );
+  return { mode, allow };
 }
 
 /** Only pi agents are offered to the model; a definition with another `cli` would be rejected at spawn. */
@@ -338,7 +377,8 @@ function parseAgentDefinition(content: string, fallbackName: string): AgentDefin
     skills: getFrontmatterValue(frontmatter, "skill") ?? getFrontmatterValue(frontmatter, "skills"),
     thinking: getFrontmatterValue(frontmatter, "thinking"),
     denyTools: getFrontmatterValue(frontmatter, "deny-tools"),
-    bash: getFrontmatterValue(frontmatter, "bash")?.toLowerCase() === "readonly" ? "readonly" : undefined,
+    bash: getFrontmatterValue(frontmatter, "bash"),
+    bashAllow: getFrontmatterValue(frontmatter, "bash-allow"),
     spawning: parseOptionalBoolean(getFrontmatterValue(frontmatter, "spawning")),
     autoExit: parseOptionalBoolean(getFrontmatterValue(frontmatter, "auto-exit")),
     interactive: parseOptionalBoolean(getFrontmatterValue(frontmatter, "interactive")),
@@ -1414,6 +1454,7 @@ export const __test__ = {
   renderWidgetLines,
   renderPresenceGroupLines,
   isPiAgent,
+  resolveAgentBash,
   loadAgentDefaults,
   discoverAgentDefinitions,
   buildAvailableAgentCatalog,
@@ -1624,6 +1665,13 @@ async function launchSubagentInner(
         "Remove the `cli` field from the agent definition.",
     );
   }
+  // Bash policy (full/readonly/none, bash-allow): invalid values are refused before any worktree or pane.
+  let bash: ReturnType<typeof resolveAgentBash>;
+  try {
+    bash = resolveAgentBash(agentDefs);
+  } catch (error) {
+    throw new Error(`Agent "${params.agent}": ${error instanceof Error ? error.message : String(error)}`);
+  }
 
   // Optional worktree: created after runtime validation and before the pane.
   if (options?.worktreePlan) {
@@ -1703,7 +1751,10 @@ async function launchSubagentInner(
     isolation: "profile",
     agentDir: effectiveAgentDir,
     ...subagentToolPolicy(params.tools ?? agentDefs?.tools, denySet),
-    ...(agentDefs?.bash === "readonly" ? { bash: "readonly" as const } : {}),
+    // Read-only memo subagents are user-driven: other plain commands are asked in the child's pane.
+    ...(bash.mode === "readonly"
+      ? { bash: "readonly" as const, bashAllow: bash.allow, bashAsk: true }
+      : {}),
     userInput: "allowed",
     exit: effectiveAutoExit ? "auto" : "tool",
     skills: splitList(params.skills ?? agentDefs?.skills),

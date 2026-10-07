@@ -66,7 +66,18 @@ The default surface is `selector` (`PI_SUBAGENT_SURFACE`): the first child opens
 | `worktreeBranch` | string | New branch name (requires `worktree: true`). Default `memo/<name>-<id8>`. |
 | `worktreeBase` | string | Start commit-ish (requires `worktree: true`). Default the source `HEAD`. |
 
-Agent frontmatter supports `name`, `description`, `model`, `thinking`, `tools`, `skills`, `session-mode` (`standalone` / `lineage-only` / `fork`), `spawning`, `deny-tools`, `bash` (`readonly`: one plain read-only command per bash call), `auto-exit`, `interactive`, `system-prompt` (`append` / `replace`), `cwd` and `disable-model-invocation`, as upstream ([reference](https://github.com/0xRichardH/pi-herdr-subagents/blob/v0.2.0/README.md#frontmatter-reference)). `worktree` is **not** read from frontmatter in this version.
+Agent frontmatter supports `name`, `description`, `model`, `thinking`, `tools`, `skills`, `session-mode` (`standalone` / `lineage-only` / `fork`), `spawning`, `deny-tools`, `bash`, `bash-allow` (see below), `auto-exit`, `interactive`, `system-prompt` (`append` / `replace`), `cwd` and `disable-model-invocation`, as upstream ([reference](https://github.com/0xRichardH/pi-herdr-subagents/blob/v0.2.0/README.md#frontmatter-reference)). `worktree` is **not** read from frontmatter in this version.
+
+Bash levels per agent:
+
+| Frontmatter | Effect |
+|---|---|
+| `bash: full` (default) | unrestricted bash |
+| `bash: readonly` | one plain read-only command per call (`git log`, `rg`, `cat`, …) |
+| `bash: none` | no bash (`bash` is added to the denied tools) |
+| `bash-allow: npm test, npm run check` | extra commands on top of `readonly`, matched as an exact word prefix of one plain command (no pipes, redirections, quotes, `$`, globs or comments). Without `bash` it implies `readonly`; with `bash: full` or `none` the launch fails |
+
+With `bash: readonly` (or `bash-allow`) a plain command outside the read-only list and `bash-allow` is **asked** in the subagent's pane: `Rifiuta` (first, the default), `Permetti una volta`, `Permetti sempre in questa sessione dell'agente`. "Always" covers commands starting with the same first two words (or the same single word) and lasts only for that subagent process; nothing is written to disk or to the agent definition. Without a UI, on cancel or abort, and for commands with shell grammar the command is blocked without asking. An unknown `bash` value or an invalid `bash-allow` fails the launch before any worktree or pane is created.
 
 memo-subagents launches **only pi** children: the upstream drivers for other CLIs (Claude Code, Codex, OpenCode, Grok, generic `command` templates) and the Claude Code plugin hook were removed. A definition with `cli:` other than `pi` is rejected at spawn time.
 

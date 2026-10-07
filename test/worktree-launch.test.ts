@@ -323,8 +323,80 @@ describe("subagent worktree launch", () => {
     try {
       const { tools } = setup();
       const result = await tools.get("subagent").execute("t", { name: "ro", task: "t", agent: "ro-test" }, undefined, undefined, ctx(repo));
-      assert.equal(launched(result.details).bash, "readonly");
+      const spec = launched(result.details);
+      assert.equal(spec.bash, "readonly");
+      assert.deepEqual(spec.bashAllow, []);
+      // memo subagents are user-driven: commands outside the lists are asked in the child's pane.
+      assert.equal(spec.bashAsk, true);
+      assert.equal(spec.userInput, "allowed");
       __test__.runningSubagents.get(result.details.id)?.abortController?.abort();
+    } finally {
+      rmSync(join(agentDir, "agents"), { recursive: true, force: true });
+    }
+  });
+
+  it("frontmatter `bash: full|none` and `bash-allow` become runtime policy", async () => {
+    const repo = makeRepo();
+    mkdirSync(join(agentDir, "agents"), { recursive: true });
+    const define = (name: string, fields: string) =>
+      writeFileSync(join(agentDir, "agents", `${name}.md`), `---\nname: ${name}\n${fields}---\nRole.\n`);
+    define("full-test", "bash: full\n");
+    define("none-test", "bash: none\ntools: read, bash\n");
+    define("allow-test", "bash-allow: npm test, npm  run check , gh issue view\n");
+    define("allow-ro-test", "bash: READONLY\nbash-allow: make\n");
+    try {
+      const { tools } = setup();
+      const run = async (agent: string) => {
+        const result = await tools.get("subagent").execute("t", { name: agent, task: "t", agent }, undefined, undefined, ctx(repo));
+        __test__.runningSubagents.get(result.details.id)?.abortController?.abort();
+        return launched(result.details);
+      };
+      const full = await run("full-test");
+      assert.equal(full.bash, undefined);
+      assert.equal(full.bashAsk, undefined);
+      assert.ok(!full.denyTools?.includes("bash"));
+      const none = await run("none-test");
+      assert.equal(none.bash, undefined);
+      assert.ok(none.denyTools?.includes("bash"));
+      assert.match(none.env?.PI_DENY_TOOLS ?? "", /\bbash\b/);
+      // bash-allow without bash implies readonly.
+      const allow = await run("allow-test");
+      assert.equal(allow.bash, "readonly");
+      assert.deepEqual(allow.bashAllow, ["npm test", "npm run check", "gh issue view"]);
+      assert.equal(allow.bashAsk, true);
+      const allowRo = await run("allow-ro-test");
+      assert.equal(allowRo.bash, "readonly");
+      assert.deepEqual(allowRo.bashAllow, ["make"]);
+    } finally {
+      rmSync(join(agentDir, "agents"), { recursive: true, force: true });
+    }
+  });
+
+  it("invalid bash frontmatter is refused before any worktree or launch", async () => {
+    const repo = makeRepo();
+    mkdirSync(join(agentDir, "agents"), { recursive: true });
+    const cases: [string, string, RegExp][] = [
+      ["bad-mode", "bash: write\n", /Agent "bad-mode": Unsupported `bash: write`.*full \(default\), readonly or none/],
+      ["allow-full", "bash: full\nbash-allow: npm test\n", /`bash-allow`.*cannot be used with `bash: full`/],
+      ["allow-none", "bash: none\nbash-allow: npm test\n", /cannot be used with `bash: none`/],
+      ["allow-pipe", "bash-allow: npm test | cat\n", /Invalid `bash-allow` entries.*npm test \| cat/],
+      ["allow-dollar", "bash-allow: rm $HOME\n", /Invalid `bash-allow` entries/],
+      ["allow-empty", "bash-allow: ,\n", /lists no command/],
+    ];
+    try {
+      const { tools } = setup();
+      const panes = panesCreated();
+      for (const [name, fields, error] of cases) {
+        writeFileSync(join(agentDir, "agents", `${name}.md`), `---\nname: ${name}\n${fields}---\nRole.\n`);
+        await assert.rejects(
+          tools.get("subagent").execute("t", { name, task: "t", agent: name, worktree: true }, undefined, undefined, ctx(repo)),
+          error,
+          name,
+        );
+      }
+      assert.equal(panesCreated(), panes);
+      assert.ok(!existsSync(join(dirname(repo), `${basename(repo)}-memo-worktrees`)));
+      assert.equal(sh(repo, "worktree", "list").split("\n").length, 1);
     } finally {
       rmSync(join(agentDir, "agents"), { recursive: true, force: true });
     }

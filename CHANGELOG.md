@@ -9,7 +9,9 @@
 ### Added
 
 - The `subagent` tool, `subagent_resume`, `/iterate` and `/subagent <agent>` launch through the agent runtime: profile children with exact identities, seeded/resumed session files in the usual session directory, `subagent_done`/`caller_ping`/auto exit recorded by the child, pane closed only after a proven end, interrupts as correlated requests, pane selector moves observed by the runtime. A session already open in a running subagent cannot be resumed twice. Resume runs in the session's own cwd and keeps its model while available. A crash (no exit record, no orderly pi shutdown) is reported as an error; an uncertain launch is reported with "do not relaunch". Runtime state lives in a private per-user directory under the system temp dir.
-- Agent frontmatter `bash: readonly` (read-only bash policy of the runtime).
+- Agent frontmatter `bash: full | readonly | none` (default `full`; `none` denies the bash tool) and `bash-allow` (comma-separated extra command prefixes on top of `readonly`; alone it implies `readonly`). Unknown values, `bash-allow` with `full`/`none` and non-plain entries fail the launch before any worktree or pane.
+- Read-only memo subagents ask the user in their pane before running a plain bash command outside the read-only list and `bash-allow`: deny (default) / allow once / allow always for that subagent process (same first two words). No UI, cancel, abort or shell grammar → blocked.
+- Runtime policy `bashAllow` (exact word prefixes allowed on top of `bash: "readonly"`) and `bashAsk` (only with `bash: "readonly"` and `userInput: "allowed"`: ask instead of block). Workflow children (`takeover`) never ask; boot records without the fields keep their meaning.
 - Runtime options for generic subagents: `isolation: "profile"` (normal profile, optional allowlist, `denyTools`, per-child `agentDir` and `env`), `session: { kind: "file" }` (seeded or resumed sessions), `skills`, `userInput: "allowed"`, exit policies `auto`/`tool` with `subagent_done`/`caller_ping` and an `exit` record, `move` (pane selector) and `activity`. Boot records of 0.2.0 keep their meaning.
 
 ## 0.2.0 — 2026-10-08
