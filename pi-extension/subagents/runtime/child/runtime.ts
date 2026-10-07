@@ -291,6 +291,11 @@ export class ChildRuntime {
         (!validTask(existing, task, "request") || existing.tool !== tool)
       )
         throw new Error(`${tool} request identity changed`);
+      // A once-per-task request is answered once: a call with other arguments never reuses its result.
+      if (existing && JSON.stringify(existing.params) !== JSON.stringify(params))
+        throw new Error(
+          `${tool} was already requested for this task with different arguments`,
+        );
       if (!existing)
         await publish(path, record(task, "request", { requestId, tool, params }));
       const deadline =

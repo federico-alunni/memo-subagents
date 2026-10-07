@@ -10,12 +10,17 @@ import childExtension, {
 function fakePi() {
   const tools: { name: string; parameters: any }[] = [];
   const events: string[] = [];
+  const handlers = new Map<string, (...args: any[]) => any>();
   return {
     tools,
     events,
+    handlers,
     api: {
       registerTool: (tool: any) => tools.push(tool),
-      on: (event: string) => events.push(event),
+      on: (event: string, handler: (...args: any[]) => any) => {
+        events.push(event);
+        handlers.set(event, handler);
+      },
     } as any,
   };
 }
@@ -57,4 +62,38 @@ test("child extension registers declared delegated tools and question from boot,
   const bare = fakePi();
   childExtension(bare.api);
   assert.deepEqual(bare.tools, []);
+});
+
+test("child refuses to start when its private identity or policy does not match boot.json", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "memo-runtime-child-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const saved = Object.fromEntries(Object.values(CHILD_ENV).map((k) => [k, process.env[k]]));
+  t.after(() => {
+    for (const [k, v] of Object.entries(saved))
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+  });
+  const policy = { tools: ["read"], bash: "unrestricted", question: false, delegatedTools: [] };
+  const boot = { scope: "s", agentId: "a", attempt: 1, nonce: "n", sessionId: "x", paneId: "p", cwd: dir, protocolDir: dir, model: "p/m", effort: "low", policy };
+  await writeFile(join(dir, "boot.json"), JSON.stringify(boot));
+  const env = { [CHILD_ENV.protocolDir]: dir, [CHILD_ENV.nonce]: "n", [CHILD_ENV.scope]: "s", [CHILD_ENV.agentId]: "a", [CHILD_ENV.attempt]: "1" };
+  for (const [key, wrong] of [
+    [CHILD_ENV.nonce, "other"],
+    [CHILD_ENV.scope, "other"],
+    [CHILD_ENV.agentId, "other"],
+    [CHILD_ENV.attempt, "2"],
+  ]) {
+    Object.assign(process.env, env, { [key]: wrong });
+    const pi = fakePi();
+    childExtension(pi.api);
+    await assert.rejects(pi.handlers.get("session_start")!({}, {}), /boot mismatch/, key);
+  }
+  // Policy changed after the extension registered its tools.
+  Object.assign(process.env, env);
+  const pi = fakePi();
+  childExtension(pi.api);
+  await writeFile(join(dir, "boot.json"), JSON.stringify({ ...boot, policy: { ...policy, tools: ["read", "bash"] } }));
+  await assert.rejects(pi.handlers.get("session_start")!({}, {}), /boot mismatch/);
+  delete process.env[CHILD_ENV.nonce];
+  await assert.rejects(pi.handlers.get("session_start")!({}, {}), /private identity/);
 });

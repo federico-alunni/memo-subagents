@@ -82,6 +82,11 @@ export interface ChildPolicy {
   question: boolean;
   delegatedTools: DelegatedToolSpec[];
 }
+export interface DisplaySpec {
+  label: string;
+  group?: string;
+  agentsPanelName?: string;
+}
 export interface Boot extends Identity {
   labels?: Labels;
   cwd: string;
@@ -89,6 +94,9 @@ export interface Boot extends Identity {
   model: string;
   effort: string;
   policy: ChildPolicy;
+  /** Display only (widget rows rebuilt after a cold restart of the parent). */
+  display?: DisplaySpec;
+  launchedAt?: number;
 }
 export interface TaskCommand extends TaskIdentity {
   kind: "task";
@@ -143,6 +151,12 @@ export function sameTask(a: TaskIdentity, b: TaskIdentity): boolean {
   return (
     sameAgent(a, b) && a.taskId === b.taskId && a.taskToken === b.taskToken
   );
+}
+/** Labels are part of the owned identity: a handle with other labels is not this agent. */
+export function sameLabels(a: Labels | undefined, b: Labels | undefined): boolean {
+  const canonical = (labels: Labels | undefined) =>
+    JSON.stringify(Object.entries(labels ?? {}).sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0)));
+  return canonical(a) === canonical(b);
 }
 export function taskKey(taskId: string): string {
   return createHash("sha256").update(taskId).digest("hex");
@@ -254,12 +268,36 @@ export function validTask(
     sameTask(record, task)
   );
 }
+/** pi built-in tools: a delegated tool may never shadow one of them. */
+export const BUILTIN_TOOLS: readonly string[] = [
+  "read",
+  "bash",
+  "edit",
+  "write",
+  "grep",
+  "find",
+  "ls",
+];
 /** Validate a child policy received from a launch spec or a boot record. */
 export function validPolicy(policy: ChildPolicy | undefined): policy is ChildPolicy {
+  if (
+    !policy ||
+    !Array.isArray(policy.tools) ||
+    !Array.isArray(policy.delegatedTools)
+  )
+    return false;
+  const delegated = policy.delegatedTools.map((d) => d?.name);
   return (
-    !!policy &&
-    Array.isArray(policy.tools) &&
     policy.tools.every((t) => typeof t === "string" && /^[A-Za-z0-9_-]+$/.test(t)) &&
+    // `question` exists only through the policy flag.
+    !policy.tools.includes("question") &&
+    new Set(delegated).size === delegated.length &&
+    delegated.every(
+      (name) =>
+        name !== "question" &&
+        !BUILTIN_TOOLS.includes(name) &&
+        !policy.tools.includes(name),
+    ) &&
     (policy.bash === "unrestricted" || policy.bash === "readonly") &&
     typeof policy.question === "boolean" &&
     Array.isArray(policy.delegatedTools) &&
@@ -271,6 +309,7 @@ export function validPolicy(policy: ChildPolicy | undefined): policy is ChildPol
         typeof d.description === "string" &&
         !!d.parameters &&
         typeof d.parameters === "object" &&
+        !Array.isArray(d.parameters) &&
         (d.once === undefined || d.once === "per-task") &&
         (d.timeoutMs === undefined ||
           (Number.isSafeInteger(d.timeoutMs) && d.timeoutMs > 0)),

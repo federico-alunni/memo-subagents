@@ -1,8 +1,9 @@
 # Agent runtime (`memo-subagents/runtime`)
 
 A library for **code** (not for the model) that launches and controls pi children in Herdr panes with exact
-identities and durable evidence. It is the single agent-launching infrastructure: the memo `subagent` tool and
-other packages (pi-issue-round) are clients of it.
+identities and durable evidence. It is the single agent-launching infrastructure for other packages
+(pi-issue-round). The memo `subagent` tool still launches through its own pi driver and will move onto this runtime
+next; until then both share the widget (see [Presence](#presence-widget)).
 
 ```ts
 import { AgentRuntime, RuntimeError } from "memo-subagents/runtime";
@@ -77,7 +78,7 @@ interface LaunchSpec {
   scope: string;              // e.g. a round id; with agentId+attempt identifies the attempt
   agentId: string;
   attempt: number;            // positive integer
-  labels?: Record<string, string | number>; // opaque (e.g. role, issue): stored in boot and handle, never interpreted
+  labels?: Record<string, string | number>; // opaque (e.g. role, issue): stored in boot and handle, part of the owned identity
   taskId: string;
   prompt: string;             // private file input; never part of the shell command
   cwd: string;
@@ -88,7 +89,7 @@ interface LaunchSpec {
   bash?: "unrestricted" | "readonly"; // readonly: one plain argv from an explicit read-only allowlist
   question?: boolean;         // enables the `question` tool (asks the human in the child's pane)
   delegatedTools?: DelegatedToolSpec[];
-  appendSystemPrompt?: string[]; // files passed with --append-system-prompt
+  appendSystemPrompt?: string[]; // absolute, readable files passed with --append-system-prompt
   placement?: "split-right" | "split-down" | "tab" | "worktree"; // default "tab"
   display: {
     label: string;            // widget row / tab label
@@ -103,7 +104,7 @@ interface DelegatedToolSpec {
   description: string;
   parameters: object;          // JSON Schema of the arguments
   once?: "per-task";           // deterministic requestId `${taskToken}-${name}`: at most one request per task
-  timeoutMs?: number;          // default 300000; afterwards the child gets an "outcome uncertain" error, never a retry
+  timeoutMs?: number;          // default 300000; afterwards the child gets an "outcome uncertain" error
 }
 ```
 
@@ -111,6 +112,18 @@ interface DelegatedToolSpec {
   workspace (`herdr worktree open`); a clean Herdr refusal falls back to a tab. The runtime never creates git
   worktrees.
 - `tools` never implicitly includes delegated tools or `question`: they are added when declared/enabled.
+  `question` cannot be listed in `tools`; delegated tool names must be unique and may not reuse a `tools` entry,
+  `question` or a pi built-in (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`).
+- **Delegated tool arguments are untrusted model input.** The runtime only checks that the tool was declared and
+  that the request belongs to the current task; the client validates `params` (e.g. `params.taskId === h.taskId`)
+  and answers with an error result when they are wrong.
+- `once: "per-task"` gives one request per task: a repeated call with the same arguments acquires the same answer,
+  a call with other arguments fails in the child. Without `once`, every tool call is a new request (id
+  `${taskToken}-${name}-${toolCallId}`): after an "outcome uncertain" timeout the model may call again, so such
+  tools must be idempotent or deduplicated by the client.
+- `unsupported` errors create nothing: the attempt directory is allocated only after every validation (policy,
+  files, extensions, environment, pi CLI flags).
+- `labels` are compared with `boot.json` on every ownership check: a handle with other labels is not this agent.
 - Launch requires the pi CLI to advertise `--session-id --session-dir --no-extensions --no-skills
   --no-prompt-templates --no-approve` before any pane is created.
 
@@ -129,7 +142,7 @@ class AgentRuntime {
   interrupt(h: AgentHandle): Promise<void>;
   stop(h: AgentHandle): Promise<void>;
   close(h: AgentHandle): Promise<void>;
-  inspectShutdown(h: AgentHandle): Promise<{ acknowledged: boolean; exited: boolean; takenOver: boolean }>;
+  inspectShutdown(h: AgentHandle): Promise<{ acknowledged: boolean; exited: boolean; pidReused: boolean; takenOver: boolean }>;
   focus(h: AgentHandle, target: "child" | "parent"): Promise<boolean>;
   annotate(h: AgentHandle, note: { status?: string; active?: boolean }): void; // display only
   forget(h: AgentHandle): void;                                                 // display only
@@ -148,6 +161,7 @@ class AgentRuntime {
 | `interrupt` | Writes a correlated request; the child aborts once and acknowledges. Not proof: wait for `settled` with `interrupted`. |
 | `stop` | Refuses active tasks: interrupt and observe settlement first. Timeout → `cleanup_uncertain` (pane retained). |
 | `close` | After `stop`. Checks shell/tty/occupant, closes only that pane, verifies `pane_not_found`. |
+| `inspectShutdown` | Reconciliation evidence: exact `shutdown-ack`, exact child gone (`exited` is true when the PID is free **or** reused by another process; `pidReused` tells which), user takeover. `ps` failures → `cleanup_uncertain`. |
 | `focus` | Display only, split placements: moves focus between caller and child if the layout still matches. |
 
 Error codes (`RuntimeError.code`): `unsupported`, `launch_uncertain`, `launch_failed`, `dispatch_uncertain`,
@@ -167,8 +181,11 @@ interface AgentHandle {
 }
 ```
 
-Persist handles verbatim. Helpers for reconciliation: `sameAgent`, `sameTask`, `validTask`, `taskKey`,
-`readProcessTerminal`, `processIdentity`.
+Persist handles verbatim. Clients never read protocol files directly; ask for a helper instead.
+
+Other exports: `sameAgent`, `sameTask`, `validTask`, `taskKey`, `onceRequestId(taskToken, tool)`,
+`THINKING_LEVELS`, `nodeRunner`, `readProcessTerminal`, `processIdentity`, `terminalName`,
+`hostCompositionFromEnv`, `treeDisplayName(label, depth)`, `presence`, `presenceActive` and the types.
 
 ## Child side
 
@@ -187,7 +204,8 @@ read-only bash guard; registers the declared delegated tools and, if enabled, `q
 `launch-NNNN-<phase>.json` (launch phases), `boot.json`, `ready.json`, `task.json` (current, replaced),
 `<key>.dispatch.json`, `<key>.accepted.json`, `<key>.settled.json` (key = sha256(taskId)),
 `<key>.request.json` / `<key>.response.json` (key = sha256(requestId)), `interrupt.json` / `interrupt-ack.json`,
-`shutdown.json` / `shutdown-ack.json`, `takeover.json`, `question.json`, `prompts/`, `sessions/`.
+`shutdown.json` / `shutdown-ack.json`, `takeover.json`, `question.json`, `sessions/`. The prompt lives only in
+`task.json` and the immutable `<key>.dispatch.json`. `boot.json` also keeps the policy, labels and display data.
 
 ## Presence (widget)
 
@@ -195,7 +213,12 @@ Every agent launched by any `AgentRuntime` in the process appears in the memo-su
 (`Symbol.for("memo-subagents/runtime-presence")`) is display-only and shared even if the module is loaded twice.
 The runtime updates rows itself (launch, observe/watch, dispatch, stop, close); clients add workflow state with
 `annotate` (e.g. `{ status: "in verifica", active: false }`) and can retire a row early with `forget`.
+After a cold restart, observing a persisted handle of a live agent rebuilds its row from `boot.json`; a superseded
+handle (before `dispatch`) never repaints the row, and a closed agent is not resurrected.
 Rows are grouped by `display.group`. Rows of other clients are not selectable in the pane selector.
+
+Clients change rows only through `annotate`/`forget`; `presence()` is for display (`list`, `get`, `subscribe`).
+Its `upsert`/`update`/`remove` are runtime internals.
 
 ```ts
 interface PresenceEntry {
@@ -203,5 +226,5 @@ interface PresenceEntry {
   paneId?: string; startedAt: number; state: Observation["kind"] | "launching" | "launch-uncertain";
   status?: string; active?: boolean; questionPending?: boolean; updatedAt: number;
 }
-function presence(): { list(): PresenceEntry[]; subscribe(listener: () => void): () => void };
+function presence(): { list(): PresenceEntry[]; get(key: string): PresenceEntry | undefined; subscribe(listener: () => void): () => void /* + runtime internals */ };
 ```

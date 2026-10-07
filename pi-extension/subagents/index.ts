@@ -288,6 +288,12 @@ function resolveDenyTools(agentDefs: AgentDefaults | null): Set<string> {
   return denied;
 }
 
+/** Only pi agents are offered to the model; a definition with another `cli` would be rejected at spawn. */
+function isPiAgent(agent: AgentDefaults): boolean {
+  const cli = agent.cli?.trim().toLowerCase();
+  return !cli || cli === "pi";
+}
+
 /** Resolve the global agent config directory, respecting PI_CODING_AGENT_DIR. */
 function getAgentConfigDir(): string {
   return process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
@@ -1450,6 +1456,7 @@ export const __test__ = {
   renderSubagentWidgetLines,
   renderWidgetLines,
   renderPresenceGroupLines,
+  isPiAgent,
   loadAgentDefaults,
   discoverAgentDefinitions,
   buildAvailableAgentCatalog,
@@ -1884,7 +1891,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     runtime.latestCtx = ctx;
     runtime.modelCatalog = buildAuthenticatedModelCatalog(wrapPiModelRegistry(ctx.modelRegistry));
     runtime.agentCatalog = buildAvailableAgentCatalog(
-      discoverAgentDefinitions().filter((agent) => !agent.disableModelInvocation),
+      discoverAgentDefinitions().filter((agent) => !agent.disableModelInvocation && isPiAgent(agent)),
     );
     const refreshedGuidelines = buildSubagentRoutingGuidelines(
       runtime.modelCatalog,
@@ -2306,7 +2313,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       parameters: Type.Object({}),
 
       async execute() {
-        const list = discoverAgentDefinitions().filter((agent) => !agent.disableModelInvocation);
+        const list = discoverAgentDefinitions().filter((agent) => !agent.disableModelInvocation && isPiAgent(agent));
 
         if (list.length === 0) {
           return {

@@ -15,6 +15,7 @@ import {
   questionFile,
   sameAgent,
   sameTask,
+  sameLabels,
   record,
   validTask,
   validPolicy,
@@ -322,6 +323,7 @@ export class AgentRuntime {
       !boot ||
       !sameAgent(h, ready) ||
       !sameAgent(h, boot) ||
+      !sameLabels(h.labels, boot.labels) ||
       ready.pid !== h.pid ||
       ready.sessionPath !== h.sessionPath ||
       ready.cwd !== h.cwd
@@ -384,14 +386,7 @@ export class AgentRuntime {
       question: input.question === true,
       delegatedTools: [...(input.delegatedTools ?? [])],
     };
-    if (
-      !validPolicy(policy) ||
-      new Set(policy.delegatedTools.map((d) => d.name)).size !==
-        policy.delegatedTools.length ||
-      policy.delegatedTools.some(
-        (d) => policy.tools.includes(d.name) || d.name === "question",
-      )
-    )
+    if (!validPolicy(policy))
       throw new RuntimeError(
         "unsupported",
         "Invalid tool policy (names, bash policy, delegated tool specs or name clashes)",
@@ -424,7 +419,6 @@ export class AgentRuntime {
       this.root,
       taskKey(`${input.scope}\0${input.agentId}\0${input.attempt}`),
     );
-    await mkdir(protocolDir, { mode: 0o700 }); // Exclusive attempt allocation; an uncertain spawn must never replay.
     const extension =
       this.config.childExtension ??
       fileURLToPath(new URL("./child/extension.ts", import.meta.url));
@@ -485,6 +479,8 @@ export class AgentRuntime {
           "unsupported",
           `Pi CLI lacks required ${flag}; no child launched`,
         );
+    // Exclusive attempt allocation, only after every `unsupported` check: an uncertain spawn must never replay.
+    await mkdir(protocolDir, { mode: 0o700 });
     let paneId: string | undefined;
     let phase = "parent";
     let readinessTimedOut = false;
@@ -809,6 +805,8 @@ export class AgentRuntime {
         model: input.model,
         effort: input.thinking,
         policy,
+        display: { ...input.display },
+        launchedAt: Date.now(),
       };
       const task: TaskCommand = {
         scope: boot.scope,
@@ -1072,17 +1070,28 @@ export class AgentRuntime {
     );
   }
   /** Shutdown evidence for reconciliation: exact ack, exact PID gone, user takeover. */
-  async inspectShutdown(
-    h: AgentHandle,
-  ): Promise<{ acknowledged: boolean; exited: boolean; takenOver: boolean }> {
+  async inspectShutdown(h: AgentHandle): Promise<{
+    acknowledged: boolean;
+    exited: boolean;
+    pidReused: boolean;
+    takenOver: boolean;
+  }> {
     this.checkHandle(h);
-    const ack = await json<ChildRecord>(join(h.protocolDir, "shutdown-ack.json"));
-    const current = await this.process(h.pid);
-    return {
-      acknowledged: validTask(ack, h, "shutdown-ack"),
-      exited: current === undefined,
-      takenOver: !!(await json(join(h.protocolDir, "takeover.json"))),
-    };
+    try {
+      const ack = await json<ChildRecord>(
+        join(h.protocolDir, "shutdown-ack.json"),
+      );
+      const current = await this.process(h.pid);
+      return {
+        acknowledged: validTask(ack, h, "shutdown-ack"),
+        // The exact child is gone when its PID is free or now belongs to another process.
+        exited: current !== h.processIdentity,
+        pidReused: current !== undefined && current !== h.processIdentity,
+        takenOver: !!(await json(join(h.protocolDir, "takeover.json"))),
+      };
+    } catch (error) {
+      throw new RuntimeError("cleanup_uncertain", String(error));
+    }
   }
   /** Display only: workflow status of the agent row in the memo-subagents widget. */
   annotate(h: AgentHandle, note: { status?: string; active?: boolean }): void {
@@ -1097,12 +1106,35 @@ export class AgentRuntime {
   }
   async observe(h: AgentHandle): Promise<Observation> {
     const observation = await this.observeOnce(h);
-    // Display only; the presence row never feeds back into control.
-    presence().update(h.protocolDir, {
-      state: observation.kind as PresenceState,
-      questionPending: observation.question?.pending === true,
-    });
+    await this.reflectPresence(h, observation).catch(() => {});
     return observation;
+  }
+  /** Display only; the presence row never feeds back into control. */
+  private async reflectPresence(h: AgentHandle, o: Observation): Promise<void> {
+    // A superseded handle (before dispatch) must not repaint the agent's single row.
+    const current = await json<TaskCommand>(join(h.protocolDir, "task.json"));
+    if (!current || !sameTask(current, h)) return;
+    const registry = presence();
+    if (!registry.get(h.protocolDir)) {
+      // Rebuild the row in a new process (cold restart) for a live agent only.
+      if (!["starting", "active", "settled", "taken-over"].includes(o.kind)) return;
+      const boot = await json<Boot>(join(h.protocolDir, "boot.json"));
+      if (!boot?.display?.label || !sameAgent(boot, h)) return;
+      registry.upsert({
+        key: h.protocolDir,
+        ...(boot.display.group ? { group: boot.display.group } : {}),
+        label: boot.display.label,
+        model: boot.model,
+        thinking: boot.effort,
+        paneId: h.paneId,
+        startedAt: boot.launchedAt ?? Date.now(),
+        state: o.kind as PresenceState,
+      });
+    }
+    registry.update(h.protocolDir, {
+      state: o.kind as PresenceState,
+      questionPending: o.question?.pending === true,
+    });
   }
   private async observeOnce(h: AgentHandle): Promise<Observation> {
     this.checkHandle(h);

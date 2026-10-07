@@ -70,7 +70,8 @@ memo-subagents launches **only pi** children: the upstream drivers for other CLI
 `memo-subagents/runtime` is the library behind agent launching: exact pane/process identities, durable evidence,
 long-lived children with correlated tasks, delegated tools, read-only bash policy, proven shutdown. Other packages
 (pi-issue-round) launch their agents through it instead of their own transport, and every runtime agent appears in
-the same widget, grouped by client. Contract: [docs/runtime.md](docs/runtime.md).
+the same widget, grouped by client. The `subagent` tool itself still uses its own pi driver and will move onto the
+runtime next. Contract: [docs/runtime.md](docs/runtime.md).
 
 ## Worktrees
 

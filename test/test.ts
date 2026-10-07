@@ -1397,6 +1397,12 @@ describe("subagent discovery", () => {
     });
   });
 
+  it("offers only pi agents to the model", () => {
+    assert.equal(testApi.isPiAgent({}), true);
+    assert.equal(testApi.isPiAgent({ cli: " PI " }), true);
+    assert.equal(testApi.isPiAgent({ cli: "claude" }), false);
+  });
+
   it("strips surrounding quotes from a quoted frontmatter value", async () => {
     await withIsolatedAgentEnv(async ({ projectAgentsDir }) => {
       writeAgentFile(

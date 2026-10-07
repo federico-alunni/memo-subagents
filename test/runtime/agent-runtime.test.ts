@@ -1019,7 +1019,7 @@ test("reusable merger receives two correlated tasks, rejects stale/duplicate evi
   assert.equal(f.fake.shutdowns, 0);
 });
 
-test("merger bridge validates assignment, delivers correlated immutable result, then cleanly reuses session and shuts down after last task", async (t) => {
+test("merger bridge: only declared tools, params reach the parent untrusted, correlated immutable result, then session reuse and shutdown", async (t) => {
   const f = await fixture(t);
   const h = await f.transport.launch({ ...f.input, ...MERGER });
   await assert.rejects(
@@ -1053,6 +1053,8 @@ test("merger bridge validates assignment, delivers correlated immutable result, 
   assert.equal(request.tool, "ir_integrate");
   assert.equal(request.taskId, h.taskId);
   assert.deepEqual(request.params, { taskId: h.taskId });
+  // Assignment checks belong to the parent: params are untrusted model input.
+  assert.equal((request.params as { taskId: string }).taskId === h.taskId, true);
   assert.equal(request.requestId, `${h.taskToken}-ir_integrate`);
   assert.equal(await f.transport.hasResponse(h, request.requestId!), false);
   await assert.rejects(
@@ -1336,6 +1338,10 @@ test("invalid tool policies are refused before any pane is created", async (t) =
     { delegatedTools: [{ ...INTEGRATE, name: "question" }] },
     { delegatedTools: [{ ...INTEGRATE, once: "always" as any }] },
     { appendSystemPrompt: ["relative.md"] },
+    { tools: ["read", "question"] },
+    { delegatedTools: [{ ...INTEGRATE, name: "bash" }] },
+    { delegatedTools: [{ ...INTEGRATE, name: "write" }], tools: ["read"] },
+    { delegatedTools: [{ ...INTEGRATE, parameters: [] as any }] },
     { thinking: "extreme" as any },
     { display: { label: "" } },
   ];
@@ -1443,14 +1449,16 @@ test("system prompts, labels and per-call delegated tools reach the child unchan
   await f.transport.respond(h, request.requestId!, { ok: 1 });
   assert.deepEqual(await first, { ok: 1 });
   const missing = await fixture(t);
+  const absent = join(missing.root, "absent.md");
   await assert.rejects(
-    missing.transport.launch({
-      ...missing.input,
-      appendSystemPrompt: [join(missing.root, "absent.md")],
-    }),
+    missing.transport.launch({ ...missing.input, appendSystemPrompt: [absent] }),
     errorCode("unsupported"),
   );
   assert.equal(missing.fake.createCount, 0);
+  // `unsupported` creates nothing: the same attempt can still be launched.
+  await writeFile(absent, "late prompt");
+  await missing.transport.launch({ ...missing.input, appendSystemPrompt: [absent] });
+  assert.equal(missing.fake.createCount, 1);
 });
 
 test("inspectShutdown reports exact ack, exit and takeover for reconciliation", async (t) => {
@@ -1459,15 +1467,31 @@ test("inspectShutdown reports exact ack, exit and takeover for reconciliation", 
   assert.deepEqual(await f.transport.inspectShutdown(h), {
     acknowledged: false,
     exited: false,
+    pidReused: false,
     takenOver: false,
   });
-  await f.fake.settle();
-  await f.transport.stop(h);
+  // A reused PID is not the exact child: reported as exited and reused, never "still running".
+  f.fake.processIdentity = "Wed Oct 7 00:00:00 2026 unrelated";
   assert.deepEqual(await f.transport.inspectShutdown(h), {
+    acknowledged: false,
+    exited: true,
+    pidReused: true,
+    takenOver: false,
+  });
+  const g = await fixture(t);
+  const gh = await g.transport.launch(g.input);
+  await g.fake.settle();
+  await g.transport.stop(gh);
+  assert.deepEqual(await g.transport.inspectShutdown(gh), {
     acknowledged: true,
     exited: true,
+    pidReused: false,
     takenOver: false,
   });
+  g.fake.onCall = (call) => {
+    if (call.executable === "ps") return { exitCode: 2, stdout: "", stderr: "ps broken" };
+  };
+  await assert.rejects(g.transport.inspectShutdown(gh), errorCode("cleanup_uncertain"));
 });
 
 test("presence: one display row per agent, updated by the runtime and annotated by the client", async (t) => {
@@ -1522,4 +1546,69 @@ test("presence: one display row per agent, updated by the runtime and annotated 
   assert.equal(uncertain.length, 1);
   assert.equal(uncertain[0].state, "launch-uncertain");
   u.transport.forget({ protocolDir: uncertain[0].key } as any);
+});
+
+test("once-per-task delegated tools never reuse a result for different arguments", async (t) => {
+  const f = await fixture(t);
+  const h = await f.transport.launch({ ...f.input, ...MERGER });
+  const first = f.fake.runtime!.delegate("ir_integrate", { taskId: h.taskId }, "c1");
+  await new Promise((r) => setTimeout(r, 50));
+  const [request] = await f.transport.drainRequests(h);
+  await f.transport.respond(h, request.requestId!, { passed: true });
+  assert.deepEqual(await first, { passed: true });
+  // Same arguments: the single per-task answer is acquired again, no new request.
+  assert.deepEqual(
+    await f.fake.runtime!.delegate("ir_integrate", { taskId: h.taskId }, "c2"),
+    { passed: true },
+  );
+  await assert.rejects(
+    f.fake.runtime!.delegate("ir_integrate", { taskId: "other" }, "c3"),
+    /already requested for this task with different arguments/,
+  );
+  assert.equal((await f.transport.drainRequests(h)).length, 1);
+});
+
+test("labels are part of the owned identity", async (t) => {
+  const f = await fixture(t);
+  const h = await f.transport.launch({ ...f.input, labels: { role: "worker", issue: 4 } });
+  await f.transport.interrupt({ ...h, labels: { issue: 4, role: "worker" } });
+  await assert.rejects(
+    f.transport.interrupt({ ...h, labels: { role: "merger", issue: 4 } }),
+    errorCode("cleanup_blocked"),
+  );
+  await assert.rejects(
+    f.transport.interrupt({ ...h, labels: undefined }),
+    errorCode("cleanup_blocked"),
+  );
+});
+
+test("presence: rows are rebuilt after a cold restart and never repainted by a superseded handle", async (t) => {
+  const f = await fixture(t);
+  const rows = () => presence().list().filter((r) => r.key.startsWith(f.stateDir));
+  const h = await f.transport.launch({
+    ...f.input,
+    display: { label: "#9 worker", group: "Issue Round" },
+  });
+  // A new process has an empty registry: observing the persisted handle restores the row.
+  presence().remove(h.protocolDir);
+  const cold = new AgentRuntime(f.config);
+  t.after(() => cold.dispose());
+  assert.equal((await cold.observe(h)).kind, "active");
+  assert.equal(rows().length, 1);
+  assert.equal(rows()[0].label, "#9 worker");
+  assert.equal(rows()[0].group, "Issue Round");
+  assert.equal(rows()[0].thinking, "high");
+  await f.fake.settle();
+  const next = await f.transport.dispatch(h, { taskId: "task-2", prompt: "next" });
+  await f.fake.runtime!.tick();
+  assert.equal((await f.transport.observe(next)).kind, "active");
+  assert.equal((await f.transport.observe(h)).kind, "changed");
+  assert.equal(rows()[0].state, "active");
+  // A closed agent is not resurrected by a later observation.
+  await f.fake.settle();
+  await f.transport.stop(next);
+  await f.transport.close(next);
+  assert.equal(rows().length, 0);
+  await f.transport.observe(next);
+  assert.equal(rows().length, 0);
 });
