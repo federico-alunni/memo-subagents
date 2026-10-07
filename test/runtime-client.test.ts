@@ -52,6 +52,7 @@ describe("subagent supervision on the agent runtime", () => {
       async observe() { return obs("unavailable", { exited: true }); },
       async close() { throw new Error("Pane has a different occupant"); },
       forget() { calls.push("forget"); },
+      activity() { return { ok: true, activity: { latestEvent: "session_shutdown" } }; },
     };
     const outcome = await superviseSubagent({
       runtime: runtime as any, handle: () => ({}) as any, signal: new AbortController().signal, intervalMs: 1,
@@ -59,6 +60,34 @@ describe("subagent supervision on the agent runtime", () => {
     assert.equal(outcome.closed, false);
     assert.match(outcome.closeError ?? "", /different occupant/);
     assert.deepEqual(calls, ["forget"]);
+  });
+
+  it("a process that ended without exit record or orderly shutdown is a crash, not a success", async () => {
+    const outcome = await superviseSubagent({
+      runtime: {
+        async observe() { return obs("unavailable", { exited: true }); },
+        async close() {},
+        activity() { return { ok: true, activity: { latestEvent: "tool_call" } }; },
+      } as any,
+      handle: () => ({}) as any, signal: new AbortController().signal, intervalMs: 1,
+    });
+    assert.deepEqual(outcome.end, { kind: "crashed" });
+  });
+
+  it("a pane that no longer matches its handle ends the supervision once the exact process is gone", async () => {
+    let alive = true;
+    let ticks = 0;
+    const outcome = await superviseSubagent({
+      runtime: {
+        async observe() { if (++ticks === 3) alive = false; return obs("changed", { exit: alive ? undefined : exit("done") }); },
+        async inspectShutdown() { return { acknowledged: !alive, exited: !alive, pidReused: false, takenOver: false }; },
+        async close() {},
+        activity() { return { ok: false }; },
+      } as any,
+      handle: () => ({}) as any, signal: new AbortController().signal, intervalMs: 1,
+    });
+    assert.equal(outcome.end.kind, "done");
+    assert.equal(ticks, 3);
   });
 
   it("a pane closed by the user needs no close; cancelling retires only a settled child", async () => {

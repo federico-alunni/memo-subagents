@@ -208,7 +208,7 @@ export function writeSubagentActivityFile(activityFile: string, activity: Subage
   const tempFile = join(dir, `${activity.runningChildId}.json.${process.pid}.${activity.sequence}.tmp`);
 
   try {
-    writeFileSync(tempFile, `${JSON.stringify(activity)}\n`, "utf8");
+    writeFileSync(tempFile, `${JSON.stringify(activity)}\n`, { encoding: "utf8", mode: 0o600 });
     renameSync(tempFile, activityFile);
   } catch (error) {
     try {

@@ -2,7 +2,7 @@
 // Ported from pi-issue-round's child extension (same author, MIT) and made role-agnostic.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import {
@@ -42,6 +42,45 @@ export function childToolCall(
   }
 }
 
+type SendUserMessage = (
+  text: string,
+  options: { expandPromptTemplates: boolean; deliverAs?: "followUp" },
+) => void;
+
+/**
+ * One task = `/skill:<name>` messages, then the prompt, in one run. `/skill:` is expanded by pi only with
+ * expandPromptTemplates. Only the first message starts the run; the others are queued as follow-ups once
+ * pi reports the run started (agent_start): sent back to back, a follow-up could find pi still idle and
+ * start a competing prompt ("Agent is already processing").
+ */
+export function createTaskDelivery(sendUserMessage: SendUserMessage) {
+  let pending: { text: string; expand: boolean }[] = [];
+  return {
+    send(prompt: string, skills: string[] = []): void {
+      const [first, ...rest] = [
+        ...skills.map((skill) => ({ text: `/skill:${skill}`, expand: true })),
+        { text: prompt, expand: false },
+      ];
+      pending = rest;
+      sendUserMessage(first.text, { expandPromptTemplates: first.expand });
+    },
+    agentStarted(): void {
+      const queued = pending;
+      pending = [];
+      for (const message of queued)
+        sendUserMessage(message.text, { expandPromptTemplates: message.expand, deliverAs: "followUp" });
+    },
+  };
+}
+
+function realCwd(cwd: string): string {
+  try {
+    return realpathSync(cwd);
+  } catch {
+    return cwd;
+  }
+}
+
 /** Boot policy read synchronously at load time: delegated tools must be registered before session_start. */
 function bootPolicy(): ChildPolicy | undefined {
   const dir = process.env[CHILD_ENV.protocolDir];
@@ -65,7 +104,9 @@ export default function childExtension(pi: ExtensionAPI): void {
     runningChildId: process.env[CHILD_ENV.nonce],
     activityFile: protocolDir ? join(protocolDir, "activity.json") : undefined,
   });
-  const widget = declared
+  const delivery = createTaskDelivery((text, options) => pi.sendUserMessage(text, options));
+  // Identity widget (and its Ctrl+J) only for user-driven children: workflow children keep pi's keys.
+  const widget = declared?.userInput === "allowed"
     ? installIdentityWidget(pi, () =>
         boot ? { label: boot.display?.label, denied: boot.policy.denyTools } : undefined,
       )
@@ -210,22 +251,15 @@ export default function childExtension(pi: ExtensionAPI): void {
     if (!sessionPath)
       throw new Error("Runtime children require persistent sessions");
     runtime = new ChildRuntime(boot, {
-      cwd: ctx.cwd,
+      // pi may report a session's cwd with symlinks (e.g. /tmp on macOS); identity uses the real path.
+      cwd: realCwd(ctx.cwd),
       pid: process.pid,
       sessionId: ctx.sessionManager.getSessionId(),
       sessionPath,
       model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "",
       effort: pi.getThinkingLevel(),
       isIdle: () => ctx.isIdle(),
-      sendPrompt: (prompt, skills = []) => {
-        // `/skill:<name>` is expanded by pi only with expandPromptTemplates; later messages queue as follow-ups.
-        [...skills.map((skill) => `/skill:${skill}`), prompt].forEach((text, index) =>
-          pi.sendUserMessage(text, {
-            expandPromptTemplates: index < skills.length,
-            ...(index > 0 ? { deliverAs: "followUp" as const } : {}),
-          }),
-        );
-      },
+      sendPrompt: (prompt, skills = []) => delivery.send(prompt, skills),
       abort: () => ctx.abort(),
       shutdown: () => ctx.shutdown(),
     });
@@ -261,7 +295,10 @@ export default function childExtension(pi: ExtensionAPI): void {
     if (boot && event.level !== boot.effort) await takeover();
   });
   pi.on("before_agent_start", () => recorder.beforeAgentStart());
-  pi.on("agent_start", () => recorder.agentStart());
+  pi.on("agent_start", () => {
+    recorder.agentStart();
+    delivery.agentStarted();
+  });
   pi.on("turn_start", (event) => recorder.turnStart((event as any).turnIndex));
   pi.on("turn_end", (event) => recorder.turnEnd((event as any).turnIndex));
   pi.on("before_provider_request", () => recorder.beforeProviderRequest());

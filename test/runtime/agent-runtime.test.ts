@@ -1806,7 +1806,7 @@ test("userInput allowed: a user who quits pi ends the child and its pane can be 
 
 test("move: the observed tab becomes the handle identity; old handles are refused", async (t) => {
   const f = await fixture(t);
-  const h = await f.transport.launch({ ...f.input, ...GENERIC });
+  const h = await f.transport.launch(f.input);
   let tab = "tab-1";
   let lose = false;
   let fail = false;
@@ -1910,4 +1910,14 @@ test("move beside a pane can name the target tab", async (t) => {
   const same = await f.transport.move(h, { split: { targetPane: "master-pane", tab: "tab-1", ratio: 0.5 } });
   assert.deepEqual(args.slice(3, 9), ["--tab", "tab-1", "--target-pane", "master-pane", "--split", "right"]);
   assert.equal(same.tabId, "tab-1");
+});
+
+test("a user-driven child may be moved to another tab by the user; a workflow child may not", async (t) => {
+  for (const userDriven of [true, false]) {
+    const f = await fixture(t);
+    const h = await f.transport.launch(userDriven ? { ...f.input, ...GENERIC } : f.input);
+    const base = f.fake.pane.bind(f.fake);
+    f.fake.pane = () => ({ ...base(), tab_id: "tab-moved-by-user" });
+    assert.equal((await f.transport.observe(h)).kind, userDriven ? "active" : "changed");
+  }
 });

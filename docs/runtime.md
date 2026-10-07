@@ -97,6 +97,7 @@ interface LaunchSpec {
   question?: boolean;         // enables the `question` tool (asks the human in the child's pane)
   delegatedTools?: DelegatedToolSpec[];
   appendSystemPrompt?: string[]; // absolute, readable files passed with --append-system-prompt
+  systemPrompt?: string;      // absolute, readable file passed with --system-prompt (replaces pi's prompt)
   placement?: "split-right" | "split-down" | "tab" | "worktree"; // default "tab"
   display: {
     label: string;            // widget row / tab label
@@ -132,6 +133,11 @@ interface DelegatedToolSpec {
 - `unsupported` errors create nothing: the attempt directory is allocated only after every validation (policy,
   files, extensions, environment, pi CLI flags).
 - `labels` are compared with `boot.json` on every ownership check: a handle with other labels is not this agent.
+- Tool names (allowlist, deny list, delegated tools) are plain names `[A-Za-z0-9_-]`; patterns are not accepted.
+- An empty task (no prompt, no skills — e.g. resuming a session without a message) sends nothing: it is accepted
+  and settled at once with `success`, and the user drives the child.
+- Skills are sent as `/skill:<name>` messages; the first message starts the run and the others (more skills, then
+  the prompt) are queued as follow-ups once pi reports the run started, so the whole task is one run.
 - Launch requires the pi CLI to advertise `--session-id --session-dir --no-extensions --no-skills
   --no-prompt-templates --no-approve` before any pane is created.
 
@@ -154,6 +160,8 @@ interface DelegatedToolSpec {
 
 `session: { kind: "file", path }` opens an existing session (resume) or one seeded by the caller (lineage/fork) with
 `--session`; its header `id` becomes the handle's `sessionId` and the child must report exactly that file.
+pi runs a session in its header's `cwd`: launch the child with that cwd. Identity compares real paths (the child
+resolves symlinks in its cwd).
 The runtime never starts two children on purpose on the same file: preventing it is the caller's job.
 
 ## API
@@ -173,7 +181,7 @@ class AgentRuntime {
   close(h: AgentHandle): Promise<void>;
   inspectShutdown(h: AgentHandle): Promise<{ acknowledged: boolean; exited: boolean; pidReused: boolean; takenOver: boolean }>;
   focus(h: AgentHandle, target: "child" | "parent"): Promise<boolean>;
-  move(h: AgentHandle, to: { newTab: { label: string } } | { split: { targetPane: string; direction?: "right" | "down"; ratio?: number } }): Promise<AgentHandle>;
+  move(h: AgentHandle, to: { newTab: { label: string } } | { split: { targetPane: string; tab?: string; direction?: "right" | "down"; ratio?: number } }): Promise<AgentHandle>;
   activity(h: AgentHandle): ActivityReadResult; // display-only phase/tool/provider snapshot
   annotate(h: AgentHandle, note: { status?: string; active?: boolean }): void; // display only
   forget(h: AgentHandle): void;                                                 // display only
@@ -221,14 +229,22 @@ Other exports: `sameAgent`, `sameTask`, `validTask`, `taskKey`, `onceRequestId(t
 
 ## Child side
 
-Children run `pi --session-id <id> --session-dir <attempt>/sessions --model <m> --thinking <t> -ne -e <runtime child
-extension> [-e host…] -ns -np --no-approve --no-themes --tools <allowlist> [--append-system-prompt <file>…]` with
-`PI_CODING_AGENT_DIR=<agentDir>` and `MEMO_RUNTIME_PROTOCOL_DIR / _NONCE / _SCOPE / _AGENT_ID / _ATTEMPT`.
+Isolated children run `pi --session-id <id> --session-dir <attempt>/sessions --model <m> --thinking <t> -ne -e <runtime
+child extension> [-e host…] -ns -np --no-approve --no-themes --tools <allowlist> [--system-prompt <file>]
+[--append-system-prompt <file>…]`. Profile children run `pi (--session <file> | --session-id … --session-dir …)
+--model <m> --thinking <t> -e <runtime child extension> [-e host…] [--tools <allowlist>] [--system-prompt …]
+[--append-system-prompt …]` and load their profile normally. Both get `PI_CODING_AGENT_DIR=<agentDir>`, the host and
+per-launch environment and `MEMO_RUNTIME_PROTOCOL_DIR / _NONCE / _SCOPE / _AGENT_ID / _ATTEMPT`.
 
 The child extension: verifies boot identity, model, thinking, session and cwd; publishes `ready`; accepts each task
 exactly once; publishes `settled` only on `agent_settled` (provider errors and aborts stay distinct; no assistant
 outcome is an error); handles interrupt/shutdown requests; records takeover; enforces the tool allowlist and the
-read-only bash guard; registers the declared delegated tools and, if enabled, `question`.
+read-only bash guard; registers the declared delegated tools and, if enabled, `question` and the exit tools; writes
+display-only activity snapshots (0600). User-driven children (`userInput: "allowed"`) also get an identity widget
+(label, tools, denied tools; Ctrl+J toggles the list); workflow children keep pi's own Ctrl+J.
+
+For user-driven children the pane's **tab** is not identity: the user may move the pane (pane, terminal, workspace,
+shell and process must still match). For workflow children any tab change outside `move` is `changed`.
 
 ## Evidence layout
 

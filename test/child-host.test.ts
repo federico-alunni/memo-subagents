@@ -77,7 +77,7 @@ describe("memo-subagents host child composition", () => {
     assert.deepEqual(config.hostExtensions, ["/host/cpa ext"]);
     assert.deepEqual(config.hostEnv, { CPA_PROXY_CONFIG: "/host/config.yaml" });
     assert.match(config.stateDir, /memo-subagents-/);
-    assert.equal(config.startupTimeoutMs, 60000);
+    assert.equal(config.startupTimeoutMs, 120000);
     const bare = withEnv({}, () => subagentRuntimeConfig());
     assert.deepEqual(bare.hostExtensions, []);
     assert.deepEqual(bare.hostEnv, {});

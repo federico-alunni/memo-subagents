@@ -98,3 +98,25 @@ test("child refuses to start when its private identity or policy does not match 
   delete process.env[CHILD_ENV.nonce];
   await assert.rejects(pi.handlers.get("session_start")!({}, {}), /private identity/);
 });
+
+test("skills and prompt are one run: follow-ups are queued only after the run started", async () => {
+  const { createTaskDelivery } = await import("../../pi-extension/subagents/runtime/child/extension.ts");
+  const sent: [string, object][] = [];
+  const delivery = createTaskDelivery((text, options) => sent.push([text, options]));
+  delivery.send("Do the task", ["pdf-tools", "review"]);
+  assert.deepEqual(sent, [["/skill:pdf-tools", { expandPromptTemplates: true }]]);
+  delivery.agentStarted();
+  assert.deepEqual(sent.slice(1), [
+    ["/skill:review", { expandPromptTemplates: true, deliverAs: "followUp" }],
+    ["Do the task", { expandPromptTemplates: false, deliverAs: "followUp" }],
+  ]);
+  // Later runs (user turns) send nothing more.
+  delivery.agentStarted();
+  assert.equal(sent.length, 3);
+  // Without skills the prompt is the only message, never expanded.
+  const plain: [string, object][] = [];
+  const single = createTaskDelivery((text, options) => plain.push([text, options]));
+  single.send("$1 /skill:x literal");
+  single.agentStarted();
+  assert.deepEqual(plain, [["$1 /skill:x literal", { expandPromptTemplates: false }]]);
+});

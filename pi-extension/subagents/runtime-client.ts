@@ -27,8 +27,9 @@ export function subagentRuntimeConfig(): RuntimeConfig {
   return {
     stateDir: subagentStateDir(),
     ...hostCompositionFromEnv(),
-    // A profile child loads every extension of the user's profile before it reports ready.
-    startupTimeoutMs: 60000,
+    // A profile child loads every extension of the user's profile (and may ask the user, e.g. project
+    // trust in a new worktree) before it reports ready.
+    startupTimeoutMs: 120000,
   };
 }
 
@@ -52,6 +53,8 @@ export type SupervisedEnd =
   | { kind: "error"; errorMessage: string; exit: ChildRecord }
   /** The user quit pi in the child pane, or closed the pane. */
   | { kind: "ended"; reason: "user-quit" | "pane-closed" }
+  /** The child process ended without an exit record or an orderly pi shutdown (crash, kill). */
+  | { kind: "crashed" }
   /** The parent session stopped supervising (quit, cancel). */
   | { kind: "cancelled" };
 
@@ -62,15 +65,18 @@ export interface SupervisedOutcome {
   closeError?: string;
 }
 
+function exitEnd(exit: ChildRecord): SupervisedEnd {
+  if (exit.reason === "ping") return { kind: "ping", message: exit.message ?? "", exit };
+  if (exit.reason === "error")
+    return { kind: "error", errorMessage: exit.error || "Subagent run failed", exit };
+  return { kind: "done", exit };
+}
+
 /** Map one observation to the end of the subagent, or undefined while it is still running. */
 export function subagentEnd(o: Observation): SupervisedEnd | undefined {
   const exit = o.exit;
-  if (exit && (o.kind === "stopped" || o.kind === "missing" || (o.kind === "unavailable" && o.exited))) {
-    if (exit.reason === "ping") return { kind: "ping", message: exit.message ?? "", exit };
-    if (exit.reason === "error")
-      return { kind: "error", errorMessage: exit.error || "Subagent run failed", exit };
-    return { kind: "done", exit };
-  }
+  if (exit && (o.kind === "stopped" || o.kind === "missing" || (o.kind === "unavailable" && o.exited)))
+    return exitEnd(exit);
   if (exit) return undefined; // exiting: wait for the observed process exit
   if (o.kind === "unavailable" && o.exited) return { kind: "ended", reason: "user-quit" };
   if (o.kind === "stopped") return { kind: "ended", reason: "user-quit" };
@@ -98,6 +104,21 @@ export async function superviseSubagent(options: {
     if (signal.aborted) break;
     options.onObservation?.(o, handle);
     end = subagentEnd(o);
+    if (!end && o.kind === "changed") {
+      // The pane no longer matches the handle (e.g. moved outside the runtime): never loop forever,
+      // end the supervision once the exact child process is gone.
+      try {
+        const shutdown = await runtime.inspectShutdown(handle);
+        if (shutdown.exited) end = o.exit ? exitEnd(o.exit) : { kind: "ended", reason: "user-quit" };
+      } catch {
+        // Unobservable now; try again on the next tick.
+      }
+    }
+    if (end?.kind === "ended" && end.reason === "user-quit") {
+      // A user who quits pi leaves an orderly session_shutdown in the activity; a crash does not.
+      const activity = runtime.activity(handle);
+      if (!(activity.ok && activity.activity.latestEvent === "session_shutdown")) end = { kind: "crashed" };
+    }
     if (end) break;
     await new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, interval);

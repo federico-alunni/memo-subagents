@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import {
   readdirSync,
   readFileSync,
+  realpathSync,
   writeFileSync,
   existsSync,
   mkdirSync,
@@ -218,6 +219,8 @@ interface AgentDefaults {
   skills?: string;
   thinking?: string;
   denyTools?: string;
+  /** `bash: readonly` limits bash to one plain read-only command per call (runtime policy). */
+  bash?: "readonly";
   spawning?: boolean;
   autoExit?: boolean;
   interactive?: boolean;
@@ -335,6 +338,7 @@ function parseAgentDefinition(content: string, fallbackName: string): AgentDefin
     skills: getFrontmatterValue(frontmatter, "skill") ?? getFrontmatterValue(frontmatter, "skills"),
     thinking: getFrontmatterValue(frontmatter, "thinking"),
     denyTools: getFrontmatterValue(frontmatter, "deny-tools"),
+    bash: getFrontmatterValue(frontmatter, "bash")?.toLowerCase() === "readonly" ? "readonly" : undefined,
     spawning: parseOptionalBoolean(getFrontmatterValue(frontmatter, "spawning")),
     autoExit: parseOptionalBoolean(getFrontmatterValue(frontmatter, "auto-exit")),
     interactive: parseOptionalBoolean(getFrontmatterValue(frontmatter, "interactive")),
@@ -1466,7 +1470,7 @@ async function launchSubagent(
   params: typeof SubagentParams.static,
   ctx: LaunchContext,
   parentThinking: ThinkingLevel,
-  options?: { surface?: string; worktreePlan?: WorktreePlan },
+  options?: { worktreePlan?: WorktreePlan },
 ): Promise<RunningSubagent> {
   const state: LaunchState = {};
   try {
@@ -1475,8 +1479,10 @@ async function launchSubagent(
     if (!state.worktree) throw error;
     // An uncertain launch may have a child running in the worktree: keep it (and the pane) for inspection.
     if (error instanceof RuntimeError && error.code === "launch_uncertain") {
-      throw new Error(
-        `${error.message} (launch outcome uncertain: worktree ${state.worktree.path} and any pane were kept for inspection)`,
+      throw new RuntimeError(
+        "launch_uncertain",
+        `${error.message} (worktree ${state.worktree.path} and any pane were kept for inspection)`,
+        error.evidence,
       );
     }
     const rollback = await rollbackWorktree(state.worktree);
@@ -1494,6 +1500,24 @@ function slugName(name: string): string {
     .replace(/\s+/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "") || "subagent";
+}
+
+function realPathOr(path: string): string {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
+}
+
+/** The cwd recorded in a session header, when it still exists. */
+function sessionHeaderCwd(sessionFile: string): string | undefined {
+  try {
+    const header = JSON.parse(readFileSync(sessionFile, "utf8").split("\n", 1)[0]);
+    return typeof header?.cwd === "string" && existsSync(header.cwd) ? header.cwd : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function surfaceMode(): "selector" | "split" | "tab" {
@@ -1565,7 +1589,7 @@ async function launchSubagentInner(
     };
   },
   parentThinking: ThinkingLevel,
-  options: { surface?: string; worktreePlan?: WorktreePlan } | undefined,
+  options: { worktreePlan?: WorktreePlan } | undefined,
   launchState: LaunchState,
 ): Promise<RunningSubagent> {
   const startTime = Date.now();
@@ -1609,7 +1633,8 @@ async function launchSubagentInner(
   const { effectiveCwd, effectiveAgentDir } = worktree
     ? resolveWorktreePaths(worktree.cwd)
     : resolvedPaths;
-  const targetCwdForSession = effectiveCwd ?? ctx.cwd;
+  // Real path: the child's session header, its pi cwd and the runtime identity must agree.
+  const targetCwdForSession = realPathOr(effectiveCwd ?? ctx.cwd);
   const sessionDir = getDefaultSessionDirFor(targetCwdForSession, effectiveAgentDir);
 
   // Generate a deterministic session file path for this subagent.
@@ -1678,6 +1703,7 @@ async function launchSubagentInner(
     isolation: "profile",
     agentDir: effectiveAgentDir,
     ...subagentToolPolicy(params.tools ?? agentDefs?.tools, denySet),
+    ...(agentDefs?.bash === "readonly" ? { bash: "readonly" as const } : {}),
     userInput: "allowed",
     exit: effectiveAutoExit ? "auto" : "tool",
     skills: splitList(params.skills ?? agentDefs?.skills),
@@ -1775,6 +1801,8 @@ function completionFromOutcome(outcome: SupervisedOutcome, name: string): Comple
   if (end.kind === "ping") return { reason: "ping", exitCode: 0, ping: { name, message: end.message } };
   if (end.kind === "error") return { reason: "error", exitCode: 1, errorMessage: end.errorMessage };
   if (end.kind === "cancelled") return { reason: "error", exitCode: 1, errorMessage: "Subagent cancelled." };
+  if (end.kind === "crashed")
+    return { reason: "error", exitCode: 1, errorMessage: "Subagent process exited unexpectedly (no orderly shutdown recorded)" };
   return { reason: "done", exitCode: 0 };
 }
 
@@ -2044,12 +2072,28 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         ) {
           throw new Error(`Unsupported parent thinking level: ${parentThinking}`);
         }
-        const running = await launchSubagent(
-          params,
-          ctx,
-          parentThinking,
-          worktreePlan ? { worktreePlan } : undefined,
-        );
+        let running: RunningSubagent;
+        try {
+          running = await launchSubagent(
+            params,
+            ctx,
+            parentThinking,
+            worktreePlan ? { worktreePlan } : undefined,
+          );
+        } catch (error) {
+          if (!(error instanceof RuntimeError && error.code === "launch_uncertain")) throw error;
+          // The task is already in the child's private task file: the child may still start and run it.
+          const paneId = (error.evidence as { paneId?: string } | undefined)?.paneId;
+          const message =
+            `Launch outcome uncertain for sub-agent "${params.name}": ${error.message}. ` +
+            `Do NOT launch it again: the child may still start and run the task` +
+            (paneId ? ` in Herdr pane ${paneId}` : "") +
+            ` (e.g. waiting for a project trust or startup prompt). Ask the user to check that pane.`;
+          return {
+            content: [{ type: "text" as const, text: message }],
+            details: { error: "launch uncertain", uncertain: true, ...(paneId ? { paneId } : {}) },
+          };
+        }
 
         // Create a separate AbortController for the watcher
         // (the tool's signal completes when we return)
@@ -2262,6 +2306,20 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       }),
 
       async execute(_toolCallId, params) {
+        // Runtime children: the correlated request must be accepted before the interrupt is reported.
+        const resolved = resolveInterruptTarget(params);
+        if (!("error" in resolved) && resolved.running.handle) {
+          try {
+            await subagentRuntime().interrupt(resolved.running.handle);
+          } catch (error) {
+            const message = `Failed to interrupt subagent "${resolved.running.name}": ${error instanceof Error ? error.message : String(error)}`;
+            return {
+              content: [{ type: "text" as const, text: message }],
+              details: { error: message, id: resolved.running.id, name: resolved.running.name },
+            };
+          }
+          return handleSubagentInterrupt(params, () => {});
+        }
         return handleSubagentInterrupt(params);
       },
 
@@ -2459,10 +2517,16 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         // Record entry count before resuming so we can extract new messages
         const entryCountBefore = getNewEntries(params.sessionPath, 0).length;
 
-        // The resumed child keeps the session's own model/thinking (as `pi --session` would).
+        // The resumed child keeps the session's own model/thinking (as `pi --session` would) when that
+        // model is still available; otherwise the parent's model (pi would fall back too).
         const observed = findObservedSessionRuntime(getNewEntries(params.sessionPath, 0));
         const parentThinking = pi.getThinkingLevel();
-        const model = observed.provider && observed.modelId
+        const sessionModel = observed.provider && observed.modelId
+          ? ctx.modelRegistry.find(observed.provider, observed.modelId)
+          : undefined;
+        const sessionModelUsable = !!sessionModel &&
+          (ctx.modelRegistry.hasConfiguredAuth?.(sessionModel) ?? true);
+        const model = sessionModelUsable
           ? `${observed.provider}/${observed.modelId}`
           : ctx.model
             ? `${ctx.model.provider}/${ctx.model.id}`
@@ -2473,10 +2537,11 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             details: { error: "unknown model" },
           };
         }
-        const thinking = (THINKING_LEVELS as readonly string[]).includes(observed.thinking ?? "")
+        const thinking = sessionModelUsable && (THINKING_LEVELS as readonly string[]).includes(observed.thinking ?? "")
           ? (observed.thinking as ThinkingLevel)
           : (parentThinking as ThinkingLevel);
-        const resumeCwd = worktree?.cwd ?? ctx.cwd;
+        // pi runs a resumed session in its header's cwd: the child must be launched there.
+        const resumeCwd = realPathOr(worktree?.cwd ?? sessionHeaderCwd(params.sessionPath) ?? ctx.cwd);
         const localAgentDir = join(resumeCwd, ".pi", "agent");
         const reservation = surfaceMode() === "selector" ? paneSelector.reserve() : undefined;
         let handle: AgentHandle;

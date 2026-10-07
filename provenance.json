@@ -51,7 +51,7 @@
     },
     {
       "path": "pi-extension/subagents/activity.ts",
-      "sha256": "cdb0571ddd2f3636b74d547385187aea50be2ef1d97779ad993d7ebf10f8369c",
+      "sha256": "e6dd461cdea7c7e928cbf9348489658e5d88c6ff435d4adbdee7235f694eeca0",
       "upstreamV020Sha256": "56d33889b5250f333309c6d10847dcb2123ba74bf5b1ae1a694f255b4d034905",
       "installedNpmSha256": "56d33889b5250f333309c6d10847dcb2123ba74bf5b1ae1a694f255b4d034905",
       "localPackageSha256": "56d33889b5250f333309c6d10847dcb2123ba74bf5b1ae1a694f255b4d034905",
@@ -87,7 +87,7 @@
     },
     {
       "path": "pi-extension/subagents/index.ts",
-      "sha256": "f274093fc6759066c1f2107a90307903a93daa9ebdf7c26f3aa9c3732f2c58f9",
+      "sha256": "811046931e12bf7f7848c8243b4614d9241c8e70556ae2ccfb764fe0a3d6433f",
       "upstreamV020Sha256": "73a9ea0ab5ecd0cc13060697e00f8e9ca70fc95251090611e3bbea73be46fe93",
       "installedNpmSha256": "73a9ea0ab5ecd0cc13060697e00f8e9ca70fc95251090611e3bbea73be46fe93",
       "localPackageSha256": "d6917cb3a443fd32e2cedc9fca529d9ebc995903512b584cf4dc8de669ba61b4",
@@ -123,7 +123,7 @@
     },
     {
       "path": "pi-extension/subagents/runtime-client.ts",
-      "sha256": "280c052d9df63690eabe6471f9f3dcc9f4193e39848cd66f7801e86c6cda0804",
+      "sha256": "dee36d05315dbe0d96384308310d6a3741af4ace58cb1b259504ac764de3c061",
       "upstreamV020Sha256": null,
       "installedNpmSha256": null,
       "localPackageSha256": null,
@@ -141,7 +141,7 @@
     },
     {
       "path": "pi-extension/subagents/runtime/agent-runtime.ts",
-      "sha256": "b3303feadf7eb82f2d4250a659fcb7226df94f7e6fb46198d270372354d0abc1",
+      "sha256": "b18c2c2dd45477615c030f520d0b3d3eceda0dd153c38a84e6ac31f2b7f8e41c",
       "upstreamV020Sha256": null,
       "installedNpmSha256": null,
       "localPackageSha256": null,
@@ -159,7 +159,7 @@
     },
     {
       "path": "pi-extension/subagents/runtime/child/extension.ts",
-      "sha256": "95e094678e506957353fec6a821831c1f9a9cc1c85f377be8000c0ea48e96c12",
+      "sha256": "ab3519a8d77e9eeea5e0a535bd849079dda2f972075bfbcde619088c97175b0a",
       "upstreamV020Sha256": null,
       "installedNpmSha256": null,
       "localPackageSha256": null,

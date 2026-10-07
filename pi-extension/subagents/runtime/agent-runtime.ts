@@ -296,13 +296,27 @@ export class AgentRuntime {
   private async process(pid: number): Promise<string | undefined> {
     return processIdentity(this.runner, pid);
   }
+  private userDrivenCache = new Map<string, boolean>();
+  /** Children with userInput "allowed" belong to the user too: they may move the pane to another tab. */
+  private async userDriven(h: AgentHandle): Promise<boolean> {
+    const cached = this.userDrivenCache.get(h.protocolDir);
+    if (cached !== undefined) return cached;
+    const boot = await json<Boot>(join(h.protocolDir, "boot.json")).catch(() => undefined);
+    const allowed =
+      !!boot && sameAgent(boot, h) && normalizePolicy(boot.policy)?.userInput === "allowed";
+    this.userDrivenCache.set(h.protocolDir, allowed);
+    return allowed;
+  }
   private async pane(h: AgentHandle): Promise<Pane> {
     const pane = (await this.herdr(["pane", "get", h.paneId])).pane as Pane;
+    // The tab is identity for workflow children; a user-driven child's pane may be moved by the user
+    // (pane, terminal, workspace, shell and process identity still have to match exactly).
+    const tabOk = pane?.tab_id === h.tabId || (await this.userDriven(h));
     if (
       !pane ||
       pane.pane_id !== h.paneId ||
       pane.terminal_id !== h.terminalId ||
-      pane.tab_id !== h.tabId ||
+      !tabOk ||
       pane.workspace_id !== h.workspaceId
     )
       throw new RuntimeError(
@@ -1532,9 +1546,7 @@ export class AgentRuntime {
       );
       // A user-driven child (userInput "allowed") may also end because the user quit pi:
       // its exact exit is enough. Workflow children need the orderly acknowledgement.
-      const boot = await json<Boot>(join(h.protocolDir, "boot.json"));
-      const userMayQuit =
-        !!boot && sameAgent(boot, h) && normalizePolicy(boot.policy)?.userInput === "allowed";
+      const userMayQuit = await this.userDriven(h);
       if (
         (!validTask(ack, h, "shutdown-ack") && !userMayQuit) ||
         (await this.process(h.pid)) !== undefined

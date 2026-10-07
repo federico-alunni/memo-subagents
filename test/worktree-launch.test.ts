@@ -267,6 +267,69 @@ describe("subagent worktree launch", () => {
     rmSync(join(agentDir, "agents"), { recursive: true, force: true });
   });
 
+  it("resume runs in the session's own cwd with its model when still available, else the parent's", async () => {
+    const { tools } = setup();
+    const project = join(root, "elsewhere");
+    mkdirSync(project, { recursive: true });
+    const session = join(root, "elsewhere.jsonl");
+    writeFileSync(
+      session,
+      [
+        JSON.stringify({ type: "session", version: 3, id: "e", cwd: project }),
+        JSON.stringify({ type: "model_change", provider: "fake", modelId: "parent" }),
+        JSON.stringify({ type: "thinking_level_change", thinkingLevel: "low" }),
+      ].join("\n") + "\n",
+    );
+    const resumed = await tools.get("subagent_resume").execute("t", { sessionPath: session }, undefined, undefined, ctx(root));
+    const spec = launched(resumed.details);
+    assert.equal(spec.cwd, project);
+    assert.equal(spec.model, "fake/parent");
+    __test__.runningSubagents.get(resumed.details.id)?.abortController?.abort();
+    // A session model that is no longer available falls back to the parent's model and thinking.
+    const gone = join(root, "gone.jsonl");
+    writeFileSync(
+      gone,
+      [
+        JSON.stringify({ type: "session", version: 3, id: "g", cwd: join(root, "deleted-dir") }),
+        JSON.stringify({ type: "model_change", provider: "other", modelId: "retired" }),
+      ].join("\n") + "\n",
+    );
+    const noFind = ctx(root);
+    noFind.modelRegistry.find = (provider: string) => (provider === "fake" ? { provider: "fake", id: "parent" } : undefined) as any;
+    const fallback = await tools.get("subagent_resume").execute("t", { sessionPath: gone }, undefined, undefined, noFind);
+    const fallbackSpec = launched(fallback.details);
+    assert.equal(fallbackSpec.model, "fake/parent");
+    assert.equal(fallbackSpec.thinking, "high");
+    assert.equal(fallbackSpec.cwd, root); // header cwd no longer exists
+    __test__.runningSubagents.get(fallback.details.id)?.abortController?.abort();
+  });
+
+  it("a symlinked cwd is resolved before the session header is written", async () => {
+    const repo = makeRepo();
+    const link = join(root, `link-${repoCounter}`);
+    execFileSync("ln", ["-s", repo, link]);
+    const { tools } = setup();
+    const result = await tools.get("subagent").execute("t", { name: "sym", task: "t", cwd: link }, undefined, undefined, ctx(root));
+    const spec = launched(result.details);
+    assert.equal(spec.cwd, repo);
+    assert.equal(JSON.parse(readFileSync(result.details.sessionFile, "utf8").split("\n")[0]).cwd, repo);
+    __test__.runningSubagents.get(result.details.id)?.abortController?.abort();
+  });
+
+  it("an agent with `bash: readonly` gets the read-only bash policy", async () => {
+    const repo = makeRepo();
+    mkdirSync(join(agentDir, "agents"), { recursive: true });
+    writeFileSync(join(agentDir, "agents", "ro-test.md"), "---\nname: ro-test\nbash: readonly\n---\nRead only.\n");
+    try {
+      const { tools } = setup();
+      const result = await tools.get("subagent").execute("t", { name: "ro", task: "t", agent: "ro-test" }, undefined, undefined, ctx(repo));
+      assert.equal(launched(result.details).bash, "readonly");
+      __test__.runningSubagents.get(result.details.id)?.abortController?.abort();
+    } finally {
+      rmSync(join(agentDir, "agents"), { recursive: true, force: true });
+    }
+  });
+
   it("rejects worktreeBranch/worktreeBase without worktree: true", async () => {
     const { tools } = setup();
     for (const extra of [{ worktreeBranch: "x" }, { worktreeBase: "HEAD" }, { worktree: false, worktreeBranch: "x" }]) {
@@ -450,11 +513,11 @@ describe("subagent worktree launch", () => {
       );
       assert.equal(worktrees(), 1);
       assert.equal(sh(repo, "branch", "--list", "memo/*"), "");
-      fake.failLaunch = new RuntimeError("launch_uncertain", "child readiness timed out");
-      await assert.rejects(
-        tools.get("subagent").execute("t", { name: "unsure", task: "t", worktree: true }, undefined, undefined, ctx(repo)),
-        /kept for inspection/,
-      );
+      fake.failLaunch = new RuntimeError("launch_uncertain", "child readiness timed out", { paneId: "w1:p9" });
+      const unsure = await tools.get("subagent").execute("t", { name: "unsure", task: "t", worktree: true }, undefined, undefined, ctx(repo));
+      assert.equal(unsure.details.uncertain, true);
+      assert.equal(unsure.details.paneId, "w1:p9");
+      assert.match(unsure.content[0].text, /Do NOT launch it again[\s\S]*kept for inspection|kept for inspection[\s\S]*Do NOT launch it again/);
       assert.equal(worktrees(), 2);
     } finally {
       fake.failLaunch = undefined;

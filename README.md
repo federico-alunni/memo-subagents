@@ -11,7 +11,12 @@ memo-subagents is a derivative of [pi-herdr-subagents](https://github.com/0xRich
 - `subagent({ name, task, agent?, … })` returns immediately; the child runs in its own Herdr pane and its result is **steered back** into the main session when it finishes (`subagent_result`), or when it asks for help (`caller_ping` → `subagent_ping`).
 - No bundled agents and no `/plan` command: only global (`$PI_CODING_AGENT_DIR/agents`, default `~/.pi/agent/agents`) and project (`.pi/agents`) definitions are discovered. Project definitions override global ones with the same name.
 - Live widget above the editor with lifecycle state (`starting`, `active`, `waiting`, `stalled`, `interrupted`, …), model/thinking, the selected pane (`▶`) and the worktree branch (`⎇`).
-- Every child is launched and supervised by the package's agent runtime (`memo-subagents/runtime`): the child's pane, shell, process and session are identified exactly, its end is recorded by the child itself (`subagent_done`, automatic exit after a normal run, `caller_ping`, or the user quitting pi) and its pane is closed only when that end is proven. Stall detection, interrupt, resume and reload survival work as before.
+- Every child is launched and supervised by the package's agent runtime (`memo-subagents/runtime`): the child's pane, shell, process and session are identified exactly, its end is recorded by the child itself (`subagent_done`, automatic exit after a normal run, `caller_ping`, or the user quitting pi) and its pane is closed only when that end is proven. Stall detection, interrupt, resume and reload survival work as before, with these differences:
+  - a child is never force-closed: when the parent session quits, settled idle children are stopped and closed, busy ones keep their pane;
+  - a child that ends without an orderly exit (crash, kill) is reported as an error, not as a success;
+  - a launch whose outcome is uncertain (e.g. the child waits for a project trust prompt for longer than 120 s) is reported as such: do not relaunch, check the pane;
+  - resume runs in the session's own cwd and keeps its model when it is still available;
+  - agent tool names must be plain names (no patterns).
 
 ## Install
 
@@ -61,7 +66,7 @@ The default surface is `selector` (`PI_SUBAGENT_SURFACE`): the first child opens
 | `worktreeBranch` | string | New branch name (requires `worktree: true`). Default `memo/<name>-<id8>`. |
 | `worktreeBase` | string | Start commit-ish (requires `worktree: true`). Default the source `HEAD`. |
 
-Agent frontmatter supports `name`, `description`, `model`, `thinking`, `tools`, `skills`, `session-mode` (`standalone` / `lineage-only` / `fork`), `spawning`, `deny-tools`, `auto-exit`, `interactive`, `system-prompt` (`append` / `replace`), `cwd` and `disable-model-invocation`, as upstream ([reference](https://github.com/0xRichardH/pi-herdr-subagents/blob/v0.2.0/README.md#frontmatter-reference)). `worktree` is **not** read from frontmatter in this version.
+Agent frontmatter supports `name`, `description`, `model`, `thinking`, `tools`, `skills`, `session-mode` (`standalone` / `lineage-only` / `fork`), `spawning`, `deny-tools`, `bash` (`readonly`: one plain read-only command per bash call), `auto-exit`, `interactive`, `system-prompt` (`append` / `replace`), `cwd` and `disable-model-invocation`, as upstream ([reference](https://github.com/0xRichardH/pi-herdr-subagents/blob/v0.2.0/README.md#frontmatter-reference)). `worktree` is **not** read from frontmatter in this version.
 
 memo-subagents launches **only pi** children: the upstream drivers for other CLIs (Claude Code, Codex, OpenCode, Grok, generic `command` templates) and the Claude Code plugin hook were removed. A definition with `cli:` other than `pi` is rejected at spawn time.
 
