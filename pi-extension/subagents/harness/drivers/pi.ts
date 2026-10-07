@@ -6,21 +6,7 @@ import type {
   BuiltHarnessCommand,
 } from "../types.ts";
 import type { ResolvedRuntimePlan } from "../../runtime-routing.ts";
-
-/** pi-issue-round patch: IR_CHILD_EXTENSIONS is ':'-separated absolute paths. */
-export function hostChildExtensions(env: NodeJS.ProcessEnv = process.env): string[] {
-  return (env.IR_CHILD_EXTENSIONS ?? "").split(":").filter((p) => p.startsWith("/"));
-}
-/** pi-issue-round patch: IR_CHILD_ENV is comma-separated names forwarded from this process. */
-export function hostChildEnv(env: NodeJS.ProcessEnv = process.env): [string, string][] {
-  const out: [string, string][] = [];
-  for (const raw of (env.IR_CHILD_ENV ?? "").split(",")) {
-    const name = raw.trim();
-    if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && !name.startsWith("PI_") && env[name] !== undefined)
-      out.push([name, env[name]!]);
-  }
-  return out;
-}
+import { hostChildEnvAssignments, hostChildExtensionArgs } from "../../child-host.ts";
 
 const SUBAGENT_CONTROL_TOOLS = ["caller_ping", "subagent_done"] as const;
 
@@ -100,8 +86,8 @@ export class PiHarnessDriver implements HarnessDriver {
 
     const subagentDonePath = join(subagentsDir, "subagent-done.ts");
     parts.push("-e", shellQuote(subagentDonePath));
-    // pi-issue-round patch: host-owned extensions (e.g. the CPA provider) for profiles without packages.
-    for (const extension of hostChildExtensions()) parts.push("-e", shellQuote(extension));
+    // memo-subagents host composition: MEMO_SUBAGENTS_CHILD_EXTENSIONS (see child-host.ts).
+    parts.push(...hostChildExtensionArgs(shellQuote));
 
     if (effectiveModel) {
       parts.push("--model", shellQuote(effectiveModel));
@@ -138,8 +124,8 @@ export class PiHarnessDriver implements HarnessDriver {
       envParts.push(`PI_CODING_AGENT_DIR=${shellQuote(process.env.PI_CODING_AGENT_DIR)}`);
     }
 
-    // pi-issue-round patch: forward host-listed variables; the Herdr pane does not inherit this process env.
-    for (const [name, value] of hostChildEnv()) envParts.push(`${name}=${shellQuote(value)}`);
+    // memo-subagents host composition: MEMO_SUBAGENTS_CHILD_ENV; the Herdr pane does not inherit this process env.
+    envParts.push(...hostChildEnvAssignments(shellQuote));
     if (denySet && denySet.size > 0) {
       envParts.push(`PI_DENY_TOOLS=${shellQuote([...denySet].join(","))}`);
     }

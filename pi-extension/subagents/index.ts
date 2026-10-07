@@ -42,6 +42,7 @@ import {
   buildPiPromptArgs,
 } from "./harness/index.ts";
 import { loadModelConfig, resolveModelDefault, type ModelConfig } from "./model-config.ts";
+import { hostChildEnvAssignments, hostChildExtensionArgs } from "./child-host.ts";
 
 import {
   findLastAssistantMessage,
@@ -1063,6 +1064,53 @@ function resolveResumeLaunchBehavior(params: { autoExit?: boolean }): { autoExit
   return { autoExit, interactive: !autoExit };
 }
 
+/**
+ * Build the shell command used by subagent_resume.
+ *
+ * Applies the same host composition as fresh pi launches
+ * (MEMO_SUBAGENTS_CHILD_EXTENSIONS / MEMO_SUBAGENTS_CHILD_ENV, see child-host.ts)
+ * so a resumed child keeps host-provided extensions such as model providers.
+ * `cwd` is only set when the session belongs to a memo worktree.
+ */
+function buildResumeCommand(opts: {
+  sessionPath: string;
+  name: string;
+  id: string;
+  activityFile: string;
+  autoExit: boolean;
+  resumeMsgFile?: string;
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+}): string {
+  const env = opts.env ?? process.env;
+  const parts = ["pi", "--session", shellQuote(opts.sessionPath)];
+
+  // Load subagent-done extension so the agent can self-terminate if needed
+  const subagentDonePath = join(SUBAGENTS_DIR, "subagent-done.ts");
+  parts.push("-e", shellQuote(subagentDonePath));
+  // memo-subagents host composition (same order as the pi driver).
+  parts.push(...hostChildExtensionArgs(shellQuote, env));
+  if (opts.resumeMsgFile) parts.push(shellQuote(`@${opts.resumeMsgFile}`));
+
+  // Build env prefix — propagate PI_CODING_AGENT_DIR for config isolation
+  const resumeEnvParts: string[] = [];
+  if (env.PI_CODING_AGENT_DIR) {
+    resumeEnvParts.push(`PI_CODING_AGENT_DIR=${shellQuote(env.PI_CODING_AGENT_DIR)}`);
+  }
+  resumeEnvParts.push(...hostChildEnvAssignments(shellQuote, env));
+  resumeEnvParts.push(`PI_SUBAGENT_NAME=${shellQuote(opts.name)}`);
+  resumeEnvParts.push(`PI_SUBAGENT_SESSION=${shellQuote(opts.sessionPath)}`);
+  resumeEnvParts.push(`PI_SUBAGENT_ID=${shellQuote(opts.id)}`);
+  resumeEnvParts.push(`PI_SUBAGENT_ACTIVITY_FILE=${shellQuote(opts.activityFile)}`);
+  if (opts.autoExit) {
+    resumeEnvParts.push(`PI_SUBAGENT_AUTO_EXIT=1`);
+  }
+  const resumeEnvPrefix = resumeEnvParts.join(" ") + " ";
+  const cdPrefix = opts.cwd ? `cd ${shellQuote(opts.cwd)} && ` : "";
+
+  return `${cdPrefix}${resumeEnvPrefix}${parts.join(" ")}; echo '__SUBAGENT_DONE_'$?'__'`;
+}
+
 export const __test__ = {
   borderLine,
   getShellReadyDelayMs,
@@ -1083,6 +1131,7 @@ export const __test__ = {
   handleSubagentInterrupt,
   resolveResultPresentation,
   resolveResumeLaunchBehavior,
+  buildResumeCommand,
   runningSubagents,
   formatElapsed,
 };
@@ -1925,13 +1974,6 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         }
         await new Promise<void>((resolve) => setTimeout(resolve, getShellReadyDelayMs()));
 
-        // Build pi resume command
-        const parts = ["pi", "--session", shellQuote(params.sessionPath)];
-
-        // Load subagent-done extension so the agent can self-terminate if needed
-        const subagentDonePath = join(SUBAGENTS_DIR, "subagent-done.ts");
-        parts.push("-e", shellQuote(subagentDonePath));
-
         const sessionId = ctx.sessionManager.getSessionId();
         const artifactDir = getArtifactDir(ctx.sessionManager.getSessionDir(), sessionId);
         const activityFile = getSubagentActivityFile(artifactDir, id);
@@ -1952,24 +1994,16 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           );
           mkdirSync(dirname(resumeMsgFile), { recursive: true });
           writeFileSync(resumeMsgFile, params.message, "utf8");
-          parts.push(shellQuote(`@${resumeMsgFile}`));
         }
 
-        // Build env prefix — propagate PI_CODING_AGENT_DIR for config isolation
-        const resumeEnvParts: string[] = [];
-        if (process.env.PI_CODING_AGENT_DIR) {
-          resumeEnvParts.push(`PI_CODING_AGENT_DIR=${shellQuote(process.env.PI_CODING_AGENT_DIR)}`);
-        }
-        resumeEnvParts.push(`PI_SUBAGENT_NAME=${shellQuote(name)}`);
-        resumeEnvParts.push(`PI_SUBAGENT_SESSION=${shellQuote(params.sessionPath)}`);
-        resumeEnvParts.push(`PI_SUBAGENT_ID=${shellQuote(id)}`);
-        resumeEnvParts.push(`PI_SUBAGENT_ACTIVITY_FILE=${shellQuote(activityFile)}`);
-        if (autoExit) {
-          resumeEnvParts.push(`PI_SUBAGENT_AUTO_EXIT=1`);
-        }
-        const resumeEnvPrefix = resumeEnvParts.join(" ") + " ";
-
-        const command = `${resumeEnvPrefix}${parts.join(" ")}; echo '__SUBAGENT_DONE_'$?'__'`;
+        const command = buildResumeCommand({
+          sessionPath: params.sessionPath,
+          name,
+          id,
+          activityFile,
+          autoExit,
+          resumeMsgFile,
+        });
         const launchScriptFile = join(
           artifactDir,
           "subagent-scripts",
