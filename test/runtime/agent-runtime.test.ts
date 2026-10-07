@@ -1341,7 +1341,7 @@ test("invalid tool policies are refused before any pane is created", async (t) =
     { delegatedTools: [{ ...INTEGRATE, name: "question" }] },
     { delegatedTools: [{ ...INTEGRATE, once: "always" as any }] },
     { appendSystemPrompt: ["relative.md"] },
-    { tools: ["read", "question"] },
+    { tools: ["read", "question"], question: true },
     { delegatedTools: [{ ...INTEGRATE, name: "bash" }] },
     { delegatedTools: [{ ...INTEGRATE, name: "write" }], tools: ["read"] },
     { delegatedTools: [{ ...INTEGRATE, parameters: [] as any }] },
@@ -1669,7 +1669,8 @@ test("tool policy without allowlist: profile tools allowed, deny and runtime-onl
   assert.equal(childToolCall(policy, "some_extension_tool", {}), undefined);
   assert.equal(childToolCall(policy, "bash", { command: "npm test" }), undefined);
   assert.equal(childToolCall(policy, "write", {})?.block, true);
-  assert.equal(childToolCall(policy, "question", {})?.block, true);
+  // The profile's own question tool is not the runtime's.
+  assert.equal(childToolCall(policy, "question", {}), undefined);
   assert.equal(childToolCall(policy, "subagent_done", {}), undefined);
   assert.equal(childToolCall({ ...policy, exit: "parent" as const }, "caller_ping", {})?.block, true);
 });
@@ -1872,4 +1873,41 @@ test("boot records of 0.2.0 (without the new policy fields) keep their meaning",
     userInput: "takeover",
     exit: "parent",
   });
+});
+
+test("an empty task (resume without message) sends nothing and settles; the user drives", async (t) => {
+  const f = await fixture(t);
+  const file = join(f.root, "old.jsonl");
+  await writeFile(file, JSON.stringify({ type: "session", version: 3, id: "old-id", cwd: f.cwd }) + "\n");
+  const h = await f.transport.launch({ ...f.input, ...GENERIC, prompt: "", session: { kind: "file", path: file } });
+  assert.deepEqual(f.fake.prompts, []);
+  const o = await f.transport.observe(h);
+  assert.equal(o.kind, "settled");
+  assert.equal(o.completion?.status, "success");
+});
+
+test("a replacing system prompt is passed with --system-prompt", async (t) => {
+  const f = await fixture(t);
+  const prompt = join(f.root, "identity.md");
+  await writeFile(prompt, "You are a scout.");
+  await f.transport.launch({ ...f.input, ...GENERIC, systemPrompt: prompt });
+  const run = f.fake.calls.find((c) => c.argv[1] === "run")!.argv[3];
+  assert.ok(run.includes(`'--system-prompt' '${prompt}'`));
+  const g = await fixture(t);
+  await assert.rejects(g.transport.launch({ ...g.input, systemPrompt: "relative.md" }), errorCode("unsupported"));
+});
+
+test("move beside a pane can name the target tab", async (t) => {
+  const f = await fixture(t);
+  const h = await f.transport.launch({ ...f.input, ...GENERIC });
+  let args: string[] = [];
+  f.fake.onCall = (call) => {
+    if (call.argv[1] !== "move") return;
+    args = call.argv;
+    return f.fake.result({ move_result: { changed: true } });
+  };
+  // Same tab after the move: an answered move without change is still observed as is.
+  const same = await f.transport.move(h, { split: { targetPane: "master-pane", tab: "tab-1", ratio: 0.5 } });
+  assert.deepEqual(args.slice(3, 9), ["--tab", "tab-1", "--target-pane", "master-pane", "--split", "right"]);
+  assert.equal(same.tabId, "tab-1");
 });

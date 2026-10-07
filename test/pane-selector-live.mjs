@@ -10,7 +10,17 @@ const parent = created.root_pane.pane_id;
 try {
   const state = { owned: new Map() };
   const selector = new PaneSelector(state, run, () => parent);
-  const ids = Array.from({ length: 10 }, (_, index) => selector.create(`Smoke ${index + 1}`, '/tmp'));
+  // Panes are created as the agent runtime would: reserve the placement, create there, adopt.
+  const ids = Array.from({ length: 10 }, (_, index) => {
+    const name = `Smoke ${index + 1}`;
+    const reservation = selector.reserve();
+    const result = reservation.placement === 'split-right'
+      ? run(['pane', 'split', parent, '--direction', 'right', '--cwd', '/tmp', '--no-focus'])
+      : run(['tab', 'create', '--workspace', workspace, '--label', name, '--cwd', '/tmp', '--no-focus']);
+    const id = (result.pane ?? result.root_pane).pane_id;
+    selector.adopt(reservation, id, name);
+    return id;
+  });
   const identities = new Map(ids.map(id => [id, run(['pane', 'get', id]).pane.terminal_id]));
   let layout = run(['pane', 'layout', '--pane', parent]).layout;
   assert.equal(layout.panes.length, 2);
@@ -18,7 +28,7 @@ try {
   assert.equal(selector.visible(), ids[0]);
   assert.equal(run(['pane', 'current']).pane.pane_id, focusedBefore);
   for (const id of [ids[9], ids[4], ids[0]]) {
-    selector.select(id);
+    await selector.select(id);
     layout = run(['pane', 'layout', '--pane', parent]).layout;
     assert.equal(layout.panes.length, 2);
     assert.equal(layout.splits.length, 1);
@@ -30,7 +40,7 @@ try {
   run(['pane', 'close', ids[0]]);
   selector.forget(ids[0]);
   assert.equal(run(['pane', 'layout', '--pane', parent]).layout.panes.length, 1);
-  selector.select(ids[1]);
+  await selector.select(ids[1]);
   assert.equal(selector.visible(), ids[1]);
   console.log('PASS: 10 shells, one split, selection changes, terminal IDs preserved, focus unchanged, completion cleanup.');
 } finally {

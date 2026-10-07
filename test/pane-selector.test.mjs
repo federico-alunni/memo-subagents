@@ -19,13 +19,6 @@ function fixture() {
       return { pane: { ...pane } };
     }
     if (args[1] === 'layout') return { layout: { zoomed, panes: [...panes.values()].filter(p => p.tab_id === 'w1:t0') } };
-    if (args[1] === 'rename') return {};
-    if (args[1] === 'split' || args[1] === 'create') {
-      const id = `w1:p${next++}`;
-      const pane = { pane_id: id, tab_id: args[1] === 'split' ? 'w1:t0' : `w1:t${next}`, workspace_id: 'w1' };
-      panes.set(id, pane);
-      return args[1] === 'split' ? { pane } : { root_pane: pane };
-    }
     if (args[1] === 'move') {
       const pane = panes.get(args[2]);
       if (!pane) throw new Error('pane_not_found');
@@ -37,99 +30,135 @@ function fixture() {
     throw new Error(`Unexpected command ${args}`);
   };
   const selector = new PaneSelector(state, run, () => 'w1:p0');
-  return { selector, panes, commands, state, fail: () => { failDisplay = true; }, uncertain: () => { uncertainDisplay = true; }, zoom: () => { zoomed = true; } };
+  // A launch through the agent runtime: reserve the placement, create the pane there, adopt it.
+  const launch = (name) => {
+    const reservation = selector.reserve();
+    const id = `w1:p${next++}`;
+    panes.set(id, { pane_id: id, tab_id: reservation.placement === 'split-right' ? 'w1:t0' : `w1:t${next}`, workspace_id: 'w1' });
+    selector.adopt(reservation, id, name);
+    return id;
+  };
+  return { selector, launch, panes, commands, state, fail: () => { failDisplay = true; }, uncertain: () => { uncertainDisplay = true; }, zoom: () => { zoomed = true; } };
 }
 
-test('10 simultaneous spawn requests create exactly one split; background agents never replace selection', async () => {
+test('10 simultaneous launches reserve exactly one split; background agents never replace selection', () => {
   const f = fixture();
-  const ids = await Promise.all(Array.from({ length: 10 }, (_, i) => Promise.resolve().then(() => f.selector.create(`Agent ${i}`, '/tmp'))));
-  assert.equal(f.commands.filter(c => c[1] === 'split').length, 1);
-  assert.equal(f.commands.filter(c => c[1] === 'create').length, 9);
-  assert.equal(f.selector.visible(), ids[0]);
-  assert.equal(f.state.selected, ids[0]);
-  assert.equal(f.panes.size, 11);
-  for (const c of f.commands.filter(c => ['split', 'create'].includes(c[1]))) assert.ok(c.includes('--no-focus'));
+  const reservations = Array.from({ length: 10 }, () => f.selector.reserve());
+  assert.equal(reservations.filter(r => r.placement === 'split-right').length, 1);
+  assert.equal(reservations[0].placement, 'split-right');
+  reservations.forEach((r, i) => f.selector.adopt(r, `id${i}`, `Agent ${i}`));
+  assert.equal(f.state.selected, 'id0');
+  assert.equal(f.state.reservedSplit, undefined);
+  assert.equal(f.state.owned.size, 10);
 });
 
-test('selection parks previous terminal without closing or changing IDs; repeat selection is a no-op', () => {
+test('a failed launch releases its split reservation', () => {
   const f = fixture();
-  const a = f.selector.create('A', '/tmp');
-  const b = f.selector.create('B', '/tmp');
-  f.selector.select(b);
+  const first = f.selector.reserve();
+  assert.equal(f.selector.reserve().placement, 'tab');
+  f.selector.release(first);
+  assert.equal(f.selector.reserve().placement, 'split-right');
+});
+
+test('selection parks previous terminal without closing or changing IDs; repeat selection is a no-op', async () => {
+  const f = fixture();
+  const a = f.launch('A');
+  const b = f.launch('B');
+  await f.selector.select(b);
   assert.equal(f.selector.visible(), b);
   assert.equal(f.panes.size, 3);
   assert.notEqual(f.panes.get(a).tab_id, 'w1:t0');
   assert.equal(f.panes.get(b).tab_id, 'w1:t0');
   const moves = f.commands.filter(c => c[1] === 'move').length;
-  f.selector.select(b);
+  await f.selector.select(b);
   assert.equal(f.commands.filter(c => c[1] === 'move').length, moves);
-  f.selector.select(a);
+  await f.selector.select(a);
   assert.equal(f.selector.visible(), a);
   assert.ok(!f.commands.some(c => c[1] === 'close'));
 });
 
-test('failed display restores previous terminal; both child terminals remain alive', () => {
+test('an injected mover (the agent runtime) receives every move', async () => {
   const f = fixture();
-  const a = f.selector.create('A', '/tmp');
-  const b = f.selector.create('B', '/tmp');
+  const a = f.launch('A');
+  const b = f.launch('B');
+  const moves = [];
+  await f.selector.select(b, async (paneId, to) => {
+    moves.push([paneId, to]);
+    f.panes.get(paneId).tab_id = 'newTab' in to ? 'w1:parked' : to.split.tab;
+  });
+  assert.deepEqual(moves, [
+    [a, { newTab: { label: 'A' } }],
+    [b, { split: { targetPane: 'w1:p0', tab: 'w1:t0', direction: 'right', ratio: 0.5 } }],
+  ]);
+  assert.equal(f.state.selected, b);
+  assert.ok(!f.commands.some(c => c[1] === 'move'));
+});
+
+test('failed display restores previous terminal; both child terminals remain alive', async () => {
+  const f = fixture();
+  const a = f.launch('A');
+  const b = f.launch('B');
   f.fail();
-  assert.throws(() => f.selector.select(b), /display failed/);
+  await assert.rejects(f.selector.select(b), /display failed/);
   assert.equal(f.selector.visible(), a);
   assert.equal(f.state.selected, a);
   assert.equal(f.panes.size, 3);
 });
 
-test('lost response after successful move reconciles without duplicate moves or rollback', () => {
+test('lost response after successful move reconciles without duplicate moves or rollback', async () => {
   const f = fixture();
-  f.selector.create('A', '/tmp');
-  const b = f.selector.create('B', '/tmp');
+  f.launch('A');
+  const b = f.launch('B');
   f.uncertain();
-  f.selector.select(b);
+  await f.selector.select(b);
   assert.equal(f.selector.visible(), b);
   assert.equal(f.commands.filter(c => c[1] === 'move').length, 2);
 });
 
-test('unowned panes, cross-workspace targets, zoom and unrelated splits are protected', () => {
+test('unowned panes, cross-workspace targets, zoom and unrelated splits are protected', async () => {
   const f = fixture();
-  assert.throws(() => f.selector.select('other'), /Only this session/);
-  f.selector.create('A', '/tmp');
-  const b = f.selector.create('B', '/tmp');
+  await assert.rejects(f.selector.select('other'), /Only this session/);
+  f.launch('A');
+  const b = f.launch('B');
   f.panes.get(b).workspace_id = 'w2';
-  assert.throws(() => f.selector.select(b), /another workspace/);
+  await assert.rejects(f.selector.select(b), /another workspace/);
   f.panes.get(b).workspace_id = 'w1';
   f.panes.set('other', { pane_id: 'other', tab_id: 'w1:t0', workspace_id: 'w1' });
-  assert.throws(() => f.selector.select(b), /other splits/);
+  await assert.rejects(f.selector.select(b), /other splits/);
   f.panes.delete('other');
   f.zoom();
-  assert.throws(() => f.selector.select(b), /Unzoom/);
+  await assert.rejects(f.selector.select(b), /Unzoom/);
   assert.equal(f.commands.filter(c => c[1] === 'move').length, 0);
 });
 
-test('completed child is forgotten; next spawn does not unexpectedly change current selection', () => {
+test('completed child is forgotten; next launch does not unexpectedly change current selection', async () => {
   const f = fixture();
-  const a = f.selector.create('A', '/tmp');
-  const b = f.selector.create('B', '/tmp');
+  const a = f.launch('A');
+  const b = f.launch('B');
   f.selector.forget(a);
   f.panes.delete(a);
   assert.equal(f.state.selected, undefined);
-  const c = f.selector.create('C', '/tmp');
+  const c = f.launch('C');
   assert.equal(f.panes.get(c).tab_id === 'w1:t0', false);
-  f.selector.select(b);
+  await f.selector.select(b);
   assert.equal(f.selector.visible(), b);
 });
 
 test('existing user split is never overwritten or split again', () => {
   const f = fixture();
   f.panes.set('user', { pane_id: 'user', tab_id: 'w1:t0', workspace_id: 'w1' });
-  const id = f.selector.create('A', '/tmp');
-  assert.notEqual(f.panes.get(id).tab_id, 'w1:t0');
-  assert.equal(f.commands.filter(c => c[1] === 'split').length, 0);
+  assert.equal(f.selector.reserve().placement, 'tab');
+});
+
+test('unknown layout never splits', () => {
+  const selector = new PaneSelector({ owned: new Map() }, () => { throw new Error('herdr down'); }, () => 'w1:p0');
+  assert.equal(selector.reserve().placement, 'tab');
 });
 
 test('state reused after reload retains ownership and selection', () => {
   const f = fixture();
-  const a = f.selector.create('A', '/tmp');
-  const b = f.selector.create('B', '/tmp');
+  const a = f.launch('A');
+  const b = f.launch('B');
   const reloaded = new PaneSelector(f.state, (args) => {
     if (args[1] === 'get') return { pane: f.panes.get(args[2]) };
     if (args[1] === 'layout') return { layout: { panes: [...f.panes.values()].filter(p => p.tab_id === 'w1:t0') } };

@@ -11,7 +11,7 @@ memo-subagents is a derivative of [pi-herdr-subagents](https://github.com/0xRich
 - `subagent({ name, task, agent?, … })` returns immediately; the child runs in its own Herdr pane and its result is **steered back** into the main session when it finishes (`subagent_result`), or when it asks for help (`caller_ping` → `subagent_ping`).
 - No bundled agents and no `/plan` command: only global (`$PI_CODING_AGENT_DIR/agents`, default `~/.pi/agent/agents`) and project (`.pi/agents`) definitions are discovered. Project definitions override global ones with the same name.
 - Live widget above the editor with lifecycle state (`starting`, `active`, `waiting`, `stalled`, `interrupted`, …), model/thinking, the selected pane (`▶`) and the worktree branch (`⎇`).
-- Stall detection, interrupt, resume and reload survival are unchanged from upstream.
+- Every child is launched and supervised by the package's agent runtime (`memo-subagents/runtime`): the child's pane, shell, process and session are identified exactly, its end is recorded by the child itself (`subagent_done`, automatic exit after a normal run, `caller_ping`, or the user quitting pi) and its pane is closed only when that end is proven. Stall detection, interrupt, resume and reload survival work as before.
 
 ## Install
 
@@ -36,7 +36,7 @@ The default surface is `selector` (`PI_SUBAGENT_SURFACE`): the first child opens
 | `subagent` | tool | Spawn a child (async). |
 | `subagents_list` | tool | List discoverable agent definitions. |
 | `subagent_resume` | tool | Resume a child session in a new pane (async). |
-| `subagent_interrupt` | tool | Send Escape to the current turn of a running pi child. |
+| `subagent_interrupt` | tool | Interrupt the current turn of a running child (correlated request; the child stays open). |
 | `subagent_worktrees` | tool | List/remove worktrees created with `worktree: true`. |
 | `/subagent [agent task]` | command | Pick the visible child, or spawn `agent` with `task`. |
 | `/iterate [task]` | command | Fork the session into an interactive child. |
@@ -70,8 +70,8 @@ memo-subagents launches **only pi** children: the upstream drivers for other CLI
 `memo-subagents/runtime` is the library behind agent launching: exact pane/process identities, durable evidence,
 long-lived children with correlated tasks, delegated tools, read-only bash policy, proven shutdown. Other packages
 (pi-issue-round) launch their agents through it instead of their own transport, and every runtime agent appears in
-the same widget, grouped by client. The `subagent` tool itself still uses its own pi driver and will move onto the
-runtime next. Contract: [docs/runtime.md](docs/runtime.md).
+the same widget, grouped by client. The `subagent` tool is a client of the same runtime. Contract:
+[docs/runtime.md](docs/runtime.md).
 
 ## Worktrees
 
@@ -93,16 +93,15 @@ runtime next. Contract: [docs/runtime.md](docs/runtime.md).
 - `models`: default model per agent name (tool argument → frontmatter → `models.agents` → `models.default` → parent).
 - `worktrees` (optional, both keys optional): `root` puts worktrees under `<root>/<repoName>/`; `branchPrefix` changes the generated branch prefix. Unknown keys are rejected.
 
-Environment: `PI_SUBAGENT_SURFACE` (`selector` | `split` | `tab`), `PI_SUBAGENT_SHELL_READY_DELAY_MS`, and the host composition variables `MEMO_SUBAGENTS_CHILD_EXTENSIONS` / `MEMO_SUBAGENTS_CHILD_ENV` ([docs/child-host.md](docs/child-host.md)).
+Environment: `PI_SUBAGENT_SURFACE` (`selector` | `split` | `tab`) and the host composition variables `MEMO_SUBAGENTS_CHILD_EXTENSIONS` / `MEMO_SUBAGENTS_CHILD_ENV` ([docs/child-host.md](docs/child-host.md)).
 
 ## Development
 
 Tests use pi's own host dependencies (no `npm install`; paths in `test/host-aliases.mjs` assume a Homebrew install of `@earendil-works/pi-coding-agent`).
 
 ```bash
-npm test                  # unit + fake-herdr/real-git tests, offline, no model calls
+npm test                  # unit, fake runtime/Herdr and real-git tests, offline, no model calls
 npm run test:live         # pane selector against a real Herdr server (own workspace only)
-PI_TEST_MODEL=provider/model npm run test:integration   # upstream live suite (real pi + Herdr)
 ```
 
 ## License

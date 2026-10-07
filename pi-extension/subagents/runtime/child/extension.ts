@@ -19,6 +19,7 @@ import type { QuestionAnswer } from "./question-dialog.ts";
 import { readonlyBashRejection, readonlyCommand } from "./readonly-bash.ts";
 import { CHILD_ENV } from "./env.ts";
 import { createSubagentActivityRecorder } from "../../activity.ts";
+import { installIdentityWidget } from "./identity-widget.ts";
 
 export { CHILD_ENV };
 
@@ -64,6 +65,11 @@ export default function childExtension(pi: ExtensionAPI): void {
     runningChildId: process.env[CHILD_ENV.nonce],
     activityFile: protocolDir ? join(protocolDir, "activity.json") : undefined,
   });
+  const widget = declared
+    ? installIdentityWidget(pi, () =>
+        boot ? { label: boot.display?.label, denied: boot.policy.denyTools } : undefined,
+      )
+    : undefined;
   if (declared && declared.exit !== "parent") {
     pi.registerTool({
       name: "caller_ping",
@@ -229,6 +235,7 @@ export default function childExtension(pi: ExtensionAPI): void {
         pi.getActiveTools().filter((tool) => !boot!.policy.denyTools.includes(tool)),
     );
     await runtime.start();
+    widget?.show(ctx);
   });
   pi.on("tool_call", (event) => {
     recorder.toolCall(event.toolCallId, event.toolName);

@@ -1,9 +1,9 @@
 # Agent runtime (`memo-subagents/runtime`)
 
 A library for **code** (not for the model) that launches and controls pi children in Herdr panes with exact
-identities and durable evidence. It is the single agent-launching infrastructure for other packages
-(pi-issue-round). The memo `subagent` tool still launches through its own pi driver and will move onto this runtime
-next; until then both share the widget (see [Presence](#presence-widget)).
+identities and durable evidence. It is the single agent-launching infrastructure: the memo `subagent` tool
+(`isolation: "profile"`, `userInput: "allowed"`, exit `auto`/`tool`, seeded session files) and other packages
+(pi-issue-round, isolated workflow agents) are clients of it, and all share the widget (see [Presence](#presence-widget)).
 
 ```ts
 import { AgentRuntime, RuntimeError } from "memo-subagents/runtime";
@@ -119,8 +119,9 @@ interface DelegatedToolSpec {
   workspace (`herdr worktree open`); a clean Herdr refusal falls back to a tab. The runtime never creates git
   worktrees.
 - `tools` never implicitly includes delegated tools or `question`: they are added when declared/enabled.
-  `question` cannot be listed in `tools`; delegated tool names must be unique and may not reuse a `tools` entry,
-  `question` or a pi built-in (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`).
+  `question` cannot be listed in `tools` together with `question: true`; delegated tool names must be unique and
+  may not reuse a `tools` entry, `question`, an exit tool or a pi built-in (`read`, `bash`, `edit`, `write`, `grep`,
+  `find`, `ls`).
 - **Delegated tool arguments are untrusted model input.** The runtime only checks that the tool was declared and
   that the request belongs to the current task; the client validates `params` (e.g. `params.taskId === h.taskId`)
   and answers with an error result when they are wrong.
@@ -145,8 +146,9 @@ interface DelegatedToolSpec {
 - `observe` reports the record as `exit`; after it the agent observes `stopped` and `close` works as usual.
 - `userInput: "allowed"` (user-driven subagents): typing, user bash and model/thinking changes in the child pane do
   not block control, and a child that ended because the user quit pi (no acknowledgement) can still be closed.
-- `question`, `subagent_done` and `caller_ping` exist only through their policy flags; they cannot be listed in
-  `tools`, declared as delegated tools or used without the policy.
+- `subagent_done` and `caller_ping` exist only through the exit policy; they cannot be listed in `tools` or
+  declared as delegated tools. The runtime's `question` exists only through `question: true`; without the flag a
+  `question` entry in `tools` (or no allowlist) refers to a profile's own question tool.
 
 ### Sessions
 

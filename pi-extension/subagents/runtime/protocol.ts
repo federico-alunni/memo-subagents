@@ -327,12 +327,14 @@ export function validPolicy(policy: ChildPolicy | undefined): policy is ChildPol
     return false;
   const tools = policy.tools ?? [];
   const delegated = policy.delegatedTools.map((d) => d?.name);
-  // `question` and the exit tools exist only through their policy flags.
+  // Exit tools exist only through the exit policy; `question` in `tools` means a profile's own
+  // question tool and is ambiguous when the runtime provides one (policy flag).
   const reserved = ["question", ...EXIT_TOOLS];
   return (
     tools.every((t) => typeof t === "string" && TOOL_NAME.test(t)) &&
     policy.denyTools.every((t) => typeof t === "string" && TOOL_NAME.test(t)) &&
-    !tools.some((t) => reserved.includes(t)) &&
+    !tools.some((t) => EXIT_TOOLS.includes(t)) &&
+    !(policy.question === true && tools.includes("question")) &&
     new Set(delegated).size === delegated.length &&
     delegated.every(
       (name) =>
@@ -380,7 +382,7 @@ export function toolAllowed(policy: ChildPolicy, tool: string): boolean {
   if (policy.denyTools.includes(tool)) return false;
   const active = activeTools(policy);
   if (active) return active.includes(tool);
-  // No allowlist: profile tools are allowed, but runtime-only tools must be enabled by the policy.
-  const runtimeOnly = ["question", ...EXIT_TOOLS];
-  return !runtimeOnly.includes(tool) || policyTools(policy).includes(tool);
+  // No allowlist: profile tools (including a profile's own `question`) are allowed; the exit tools
+  // exist only through the exit policy.
+  return !EXIT_TOOLS.includes(tool) || policyTools(policy).includes(tool);
 }

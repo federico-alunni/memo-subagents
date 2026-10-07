@@ -106,6 +106,8 @@ export interface LaunchSpec {
   env?: Record<string, string>;
   /** Absolute files passed with --append-system-prompt. */
   appendSystemPrompt?: string[];
+  /** Absolute file passed with --system-prompt (replaces pi's system prompt). */
+  systemPrompt?: string;
   /** "worktree" opens the existing checkout `cwd` as a Herdr worktree space (falls back to "tab"
    * when Herdr refuses, e.g. older server or a non-Git caller space). Default "tab". */
   placement?: Placement;
@@ -426,7 +428,7 @@ export class AgentRuntime {
     const placement: Placement = input.placement ?? "tab";
     if (!["split-right", "split-down", "tab", "worktree"].includes(placement))
       throw new RuntimeError("unsupported", `Unknown placement: ${placement}`);
-    for (const file of input.appendSystemPrompt ?? [])
+    for (const file of [...(input.appendSystemPrompt ?? []), ...(input.systemPrompt !== undefined ? [input.systemPrompt] : [])])
       if (typeof file !== "string" || !file.startsWith("/"))
         throw new RuntimeError(
           "unsupported",
@@ -490,7 +492,7 @@ export class AgentRuntime {
     } else if (input.session && input.session.kind !== "new")
       throw new RuntimeError("unsupported", "Unknown session kind");
     await readFile(extension, "utf8");
-    for (const file of input.appendSystemPrompt ?? [])
+    for (const file of [...(input.appendSystemPrompt ?? []), ...(input.systemPrompt ? [input.systemPrompt] : [])])
       await readFile(file, "utf8").catch(() => {
         throw new RuntimeError(
           "unsupported",
@@ -912,6 +914,7 @@ export class AgentRuntime {
           ? ["-ns", "-np", "--no-approve", "--no-themes"]
           : []),
         ...(allowlist ? ["--tools", allowlist.join(",")] : []),
+        ...(input.systemPrompt ? ["--system-prompt", input.systemPrompt] : []),
         ...(input.appendSystemPrompt ?? []).flatMap((file) => [
           "--append-system-prompt",
           file,
@@ -1172,7 +1175,7 @@ export class AgentRuntime {
     h: AgentHandle,
     to:
       | { newTab: { label: string } }
-      | { split: { targetPane: string; direction?: "right" | "down"; ratio?: number } },
+      | { split: { targetPane: string; tab?: string; direction?: "right" | "down"; ratio?: number } },
   ): Promise<AgentHandle> {
     return this.guarded(h, async () => {
       await this.ownership(h);
@@ -1183,6 +1186,7 @@ export class AgentRuntime {
               "pane",
               "move",
               h.paneId,
+              ...(to.split.tab ? ["--tab", to.split.tab] : []),
               "--target-pane",
               to.split.targetPane,
               "--split",

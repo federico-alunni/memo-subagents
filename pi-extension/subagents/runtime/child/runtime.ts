@@ -235,6 +235,14 @@ export class ChildRuntime {
         taskFile(this.boot.protocolDir, task.taskId, "accepted"),
         record(task, "accepted"),
       );
+      if (!task.prompt && !task.skills?.length) {
+        // Empty task (e.g. a resumed session without a message): nothing is sent; the user drives.
+        await publish(
+          taskFile(this.boot.protocolDir, task.taskId, "settled"),
+          record(task, "settled", { status: "success", summary: "" }),
+        );
+        return;
+      }
       this.active = task;
       this.latest = undefined;
       this.host.sendPrompt(task.prompt, task.skills);

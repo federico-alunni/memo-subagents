@@ -48,13 +48,6 @@ import {
   getSubagentActivityFile,
   readSubagentActivityFile,
 } from "../pi-extension/subagents/activity.ts";
-import subagentDoneExtension, {
-  shouldMarkUserTookOver,
-  shouldAutoExitOnAgentEnd,
-  findLatestAssistantError,
-  buildCompletionSidecar,
-} from "../pi-extension/subagents/subagent-done.ts";
-import { interpretExitSidecar, waitForCompletion } from "../pi-extension/subagents/completion.ts";
 import {
   createLifecycle,
   lifecycleTransition,
@@ -1201,38 +1194,10 @@ describe("subagent discovery", () => {
     );
   });
 
-  it("buildSubagentToolAllowlist preserves requested tools and adds child control tools", () => {
-    assert.equal(
-      testApi.buildSubagentToolAllowlist("read,bash,web_search"),
-      "read,bash,web_search,caller_ping,subagent_done",
-    );
-  });
 
-  it("buildSubagentToolAllowlist returns null without an explicit tool restriction", () => {
-    assert.equal(testApi.buildSubagentToolAllowlist(undefined), null);
-    assert.equal(testApi.buildSubagentToolAllowlist(""), null);
-  });
 
-  it("buildPiPromptArgs inserts separator for artifact-backed launches with skills", () => {
-    assert.deepEqual(
-      testApi.buildPiPromptArgs({ effectiveSkills: "review,lint", taskDelivery: "artifact", taskArg: "@artifact.md" }),
-      ["", "/skill:review", "/skill:lint", "@artifact.md"],
-    );
-  });
 
-  it("buildPiPromptArgs omits separator for artifact-backed launches without skills", () => {
-    assert.deepEqual(
-      testApi.buildPiPromptArgs({ effectiveSkills: undefined, taskDelivery: "artifact", taskArg: "@artifact.md" }),
-      ["@artifact.md"],
-    );
-  });
 
-  it("buildPiPromptArgs omits separator for direct launches with skills", () => {
-    assert.deepEqual(
-      testApi.buildPiPromptArgs({ effectiveSkills: "review", taskDelivery: "direct", taskArg: "do the task" }),
-      ["/skill:review", "do the task"],
-    );
-  });
 
   it("lists visible agents from discovery", async () => {
     await withIsolatedAgentEnv(async ({ projectAgentsDir }) => {
@@ -1436,157 +1401,6 @@ describe("subagent discovery", () => {
     assert.match(withOverride, /model anthropic\/test-config-model/);
   });
 });
-describe("subagent-done.ts", () => {
-  describe("shouldMarkUserTookOver", () => {
-    it("ignores the initial injected task before the first agent run", () => {
-      assert.equal(shouldMarkUserTookOver(false), false);
-    });
-
-    it("treats later input as manual takeover", () => {
-      assert.equal(shouldMarkUserTookOver(true), true);
-    });
-  });
-
-  describe("shouldAutoExitOnAgentEnd", () => {
-    it("auto-exits after normal completion when there was no takeover", () => {
-      const messages = [{ role: "assistant", stopReason: "stop" }];
-      assert.equal(shouldAutoExitOnAgentEnd(false, messages), true);
-    });
-
-    it("auto-exits after normal completion even when the user sent the prompt", () => {
-      const messages = [{ role: "assistant", stopReason: "stop" }];
-      assert.equal(shouldAutoExitOnAgentEnd(true, messages), true);
-    });
-
-    it("stays open after Escape aborts the run", () => {
-      const messages = [{ role: "assistant", stopReason: "aborted" }];
-      assert.equal(shouldAutoExitOnAgentEnd(false, messages), false);
-    });
-
-    it("still exits when the latest turn ended with stopReason=error", () => {
-      // Auto-exit subagents must shut down on retry-exhaustion errors so the
-      // parent is woken. The error sidecar (written separately) carries the
-      // failure detail; staying open would just strand the worker.
-      const messages = [{ role: "assistant", stopReason: "error", errorMessage: "529 overloaded" }];
-      assert.equal(shouldAutoExitOnAgentEnd(false, messages), true);
-    });
-  });
-
-  describe("auto-exit lifecycle", () => {
-    it("waits for agent_settled and uses the latest agent result", () => {
-      withTempDir((dir) => {
-        const previousAutoExit = process.env.PI_SUBAGENT_AUTO_EXIT;
-        const previousSession = process.env.PI_SUBAGENT_SESSION;
-        const sessionFile = join(dir, "child.jsonl");
-        process.env.PI_SUBAGENT_AUTO_EXIT = "1";
-        process.env.PI_SUBAGENT_SESSION = sessionFile;
-
-        try {
-          const { api, eventHandlers } = createMockExtensionApi();
-          subagentDoneExtension(api);
-          const agentEnd = eventHandlers.get("agent_end")![0];
-          const agentSettled = eventHandlers.get("agent_settled")![0];
-          let shutdowns = 0;
-          const ctx = { shutdown: () => { shutdowns += 1; } };
-
-          agentEnd({ messages: [{ role: "assistant", stopReason: "stop" }] }, ctx);
-          assert.equal(shutdowns, 0, "agent_end must not shut down before Pi settles");
-          assert.equal(existsSync(`${sessionFile}.exit`), false);
-
-          agentEnd({ messages: [{ role: "assistant", stopReason: "error", errorMessage: "latest failure" }] }, ctx);
-          agentSettled({ type: "agent_settled" }, ctx);
-
-          assert.equal(shutdowns, 1);
-          assert.deepEqual(JSON.parse(readFileSync(`${sessionFile}.exit`, "utf8")), {
-            type: "error",
-            errorMessage: "latest failure",
-            stopReason: "error",
-          });
-        } finally {
-          restoreEnvVar("PI_SUBAGENT_AUTO_EXIT", previousAutoExit);
-          restoreEnvVar("PI_SUBAGENT_SESSION", previousSession);
-        }
-      });
-    });
-
-    it("preserves an aborted worker after agent_settled", () => {
-      const previousAutoExit = process.env.PI_SUBAGENT_AUTO_EXIT;
-      process.env.PI_SUBAGENT_AUTO_EXIT = "1";
-      try {
-        const { api, eventHandlers } = createMockExtensionApi();
-        subagentDoneExtension(api);
-        let shutdowns = 0;
-        const ctx = { shutdown: () => { shutdowns += 1; } };
-        eventHandlers.get("agent_end")![0]({
-          messages: [{ role: "assistant", stopReason: "aborted" }],
-        }, ctx);
-        eventHandlers.get("agent_settled")![0]({ type: "agent_settled" }, ctx);
-        assert.equal(shutdowns, 0);
-      } finally {
-        restoreEnvVar("PI_SUBAGENT_AUTO_EXIT", previousAutoExit);
-      }
-    });
-  });
-
-  describe("findLatestAssistantError", () => {
-    it("returns the error info from a stopReason=error message", () => {
-      const messages = [
-        { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "ok" }] },
-        { role: "toolResult", content: [] },
-        { role: "assistant", stopReason: "error", errorMessage: "Anthropic 529 Overloaded" },
-      ];
-      assert.deepEqual(findLatestAssistantError(messages), {
-        errorMessage: "Anthropic 529 Overloaded",
-        stopReason: "error",
-      });
-    });
-
-    it("returns null when the latest assistant turn completed normally", () => {
-      const messages = [
-        { role: "assistant", stopReason: "error", errorMessage: "old failure" },
-        { role: "user", content: [] },
-        { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] },
-      ];
-      assert.equal(findLatestAssistantError(messages), null);
-    });
-
-    it("returns null when the latest assistant turn was aborted by the user", () => {
-      const messages = [{ role: "assistant", stopReason: "aborted" }];
-      assert.equal(findLatestAssistantError(messages), null);
-    });
-
-    it("falls back to a placeholder when stopReason=error has no errorMessage field", () => {
-      const messages = [{ role: "assistant", stopReason: "error" }];
-      const info = findLatestAssistantError(messages);
-      assert.ok(info);
-      assert.equal(info!.stopReason, "error");
-      assert.match(info!.errorMessage, /stopReason=error/);
-    });
-
-    it("returns null when messages is undefined or empty", () => {
-      assert.equal(findLatestAssistantError(undefined), null);
-      assert.equal(findLatestAssistantError([]), null);
-    });
-  });
-
-  describe("buildCompletionSidecar", () => {
-    it("emits done immediately for a normal auto-exit completion", () => {
-      assert.deepEqual(buildCompletionSidecar([
-        { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] },
-      ]), { type: "done" });
-    });
-
-    it("preserves provider errors in the immediate completion sidecar", () => {
-      assert.deepEqual(buildCompletionSidecar([
-        { role: "assistant", stopReason: "error", errorMessage: "provider failed" },
-      ]), {
-        type: "error",
-        errorMessage: "provider failed",
-        stopReason: "error",
-      });
-    });
-  });
-});
 
 describe("lifecycle.ts", () => {
   const activity = (overrides: Record<string, unknown> = {}) => ({
@@ -1764,232 +1578,6 @@ describe("lifecycle.ts", () => {
   });
 });
 
-describe("completion.ts", () => {
-
-  it("decodes ping payloads", () => {
-    assert.deepEqual(
-      interpretExitSidecar({ type: "ping", name: "Worker", message: "need help" }),
-      {
-        reason: "ping",
-        exitCode: 0,
-        ping: { name: "Worker", message: "need help" },
-      },
-    );
-  });
-
-  it("decodes done payloads", () => {
-    assert.deepEqual(interpretExitSidecar({ type: "done" }), {
-      reason: "done",
-      exitCode: 0,
-    });
-  });
-
-  it("decodes error payloads and propagates the message with a non-zero exit code", () => {
-    assert.deepEqual(
-      interpretExitSidecar({
-        type: "error",
-        errorMessage: "Anthropic 529 Overloaded after 3 retries",
-        stopReason: "error",
-      }),
-      {
-        reason: "error",
-        exitCode: 1,
-        errorMessage: "Anthropic 529 Overloaded after 3 retries",
-      },
-    );
-  });
-
-  it("falls back to a placeholder when error payload has no errorMessage", () => {
-    const result = interpretExitSidecar({ type: "error" });
-    assert.equal(result.reason, "error");
-    assert.equal(result.exitCode, 1);
-    assert.match(result.errorMessage ?? "", /no errorMessage/);
-  });
-
-  it("rejects unknown completion sidecar payloads", () => {
-    for (const payload of [{}, null]) {
-      const result = interpretExitSidecar(payload);
-      assert.equal(result.reason, "error");
-      assert.equal(result.exitCode, 1);
-      assert.match(result.errorMessage ?? "", /Invalid subagent completion sidecar/);
-    }
-  });
-
-  it("consumes a sidecar and removes it", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "completion-sidecar-"));
-    const sessionFile = join(dir, "session.jsonl");
-    const exitFile = `${sessionFile}.exit`;
-    writeFileSync(exitFile, JSON.stringify({ type: "ping", name: "Scout", message: "ready" }));
-    try {
-      const result = await waitForCompletion(new AbortController().signal, {
-        intervalMs: 1,
-        sessionFile,
-        readTerminalTail: async () => "",
-      });
-      assert.deepEqual(result, {
-        reason: "ping",
-        exitCode: 0,
-        ping: { name: "Scout", message: "ready" },
-      });
-      assert.equal(existsSync(exitFile), false);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("returns the terminal sentinel exit code", async () => {
-    const result = await waitForCompletion(new AbortController().signal, {
-      intervalMs: 1,
-      readTerminalTail: async () => "output\n__SUBAGENT_DONE_17__\n",
-    });
-    assert.deepEqual(result, { reason: "sentinel", exitCode: 17 });
-  });
-
-  it("returns when an external sentinel file appears", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "completion-sentinel-"));
-    const sentinelFile = join(dir, "done");
-    writeFileSync(sentinelFile, "complete");
-    try {
-      const result = await waitForCompletion(new AbortController().signal, {
-        intervalMs: 1,
-        sentinelFile,
-        readTerminalTail: async () => "",
-      });
-      assert.deepEqual(result, { reason: "sentinel", exitCode: 0 });
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("retries transient terminal read failures and reports ticks", async () => {
-    let reads = 0;
-    let ticks = 0;
-    const result = await waitForCompletion(new AbortController().signal, {
-      intervalMs: 1,
-      readTerminalTail: async () => {
-        reads += 1;
-        if (reads === 1) throw new Error("pane temporarily unavailable");
-        return "__SUBAGENT_DONE_0__";
-      },
-      onTick: () => {
-        ticks += 1;
-      },
-    });
-    assert.deepEqual(result, { reason: "sentinel", exitCode: 0 });
-    assert.equal(reads, 2);
-    assert.equal(ticks, 1);
-  });
-
-  it("returns a failure when the pane explicitly disappears", async () => {
-    const result = await waitForCompletion(new AbortController().signal, {
-      intervalMs: 1,
-      readTerminalTail: async () => { throw new Error("pane read failed"); },
-      inspectPane: async () => ({ kind: "missing", error: "pane_not_found" }),
-      paneDisappearanceGraceMs: 0,
-    });
-    assert.deepEqual(result, {
-      reason: "error",
-      exitCode: 1,
-      errorMessage: "Subagent pane disappeared before completion evidence was recorded.",
-    });
-  });
-
-  it("lets a sidecar win the pane-disappearance race", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "completion-race-"));
-    const sessionFile = join(dir, "child.jsonl");
-    try {
-      const result = await waitForCompletion(new AbortController().signal, {
-        intervalMs: 1,
-        sessionFile,
-        readTerminalTail: async () => "",
-        inspectPane: async () => {
-          writeFileSync(`${sessionFile}.exit`, JSON.stringify({ type: "done" }));
-          return { kind: "missing", error: "pane_not_found" };
-        },
-      });
-      assert.deepEqual(result, { reason: "done", exitCode: 0 });
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("waits briefly for delayed sidecar publication after pane disappearance", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "completion-delayed-race-"));
-    const sessionFile = join(dir, "child.jsonl");
-    const timer = setTimeout(() => {
-      writeFileSync(`${sessionFile}.exit`, JSON.stringify({ type: "done" }));
-    }, 30);
-    try {
-      const result = await waitForCompletion(new AbortController().signal, {
-        intervalMs: 1,
-        sessionFile,
-        readTerminalTail: async () => "",
-        inspectPane: async () => ({ kind: "missing", error: "pane_not_found" }),
-        paneDisappearanceGraceMs: 150,
-      });
-      assert.deepEqual(result, { reason: "done", exitCode: 0 });
-    } finally {
-      clearTimeout(timer);
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("keeps an ambiguous pane read failure retryable while the pane exists", async () => {
-    let reads = 0;
-    const result = await waitForCompletion(new AbortController().signal, {
-      intervalMs: 1,
-      readTerminalTail: async () => {
-        reads += 1;
-        if (reads === 1) throw new Error("socket unavailable");
-        return "__SUBAGENT_DONE_0__";
-      },
-      inspectPane: async () => ({ kind: "present", observedAt: 0, agentStatus: "working" }),
-    });
-    assert.equal(result.exitCode, 0);
-    assert.equal(reads, 2);
-  });
-
-  it("treats presence-check throws as unknown and keeps polling", async () => {
-    let reads = 0;
-    const result = await waitForCompletion(new AbortController().signal, {
-      intervalMs: 1,
-      readTerminalTail: async () => {
-        reads += 1;
-        if (reads === 1) throw new Error("pane read failed");
-        return "__SUBAGENT_DONE_0__";
-      },
-      inspectPane: async () => { throw new Error("herdr list failed"); },
-    });
-    assert.equal(result.exitCode, 0);
-    assert.equal(reads, 2);
-  });
-
-  it("inspects herdr status even when terminal reads succeed", async () => {
-    let reads = 0;
-    const inspections: string[] = [];
-    const result = await waitForCompletion(new AbortController().signal, {
-      intervalMs: 1,
-      readTerminalTail: async () => {
-        reads += 1;
-        return reads === 1 ? "shell output" : "__SUBAGENT_DONE_0__";
-      },
-      inspectPane: async () => ({ kind: "present", observedAt: 2_000, agentStatus: "blocked" }),
-      onPaneInspection: (inspection) => inspections.push(inspection.kind === "present" ? inspection.agentStatus : inspection.kind),
-    });
-    assert.equal(result.exitCode, 0);
-    assert.deepEqual(inspections, ["blocked"]);
-  });
-
-  it("rejects promptly when aborted", async () => {
-    const controller = new AbortController();
-    const completion = waitForCompletion(controller.signal, {
-      intervalMs: 10_000,
-      readTerminalTail: async () => "",
-    });
-    controller.abort();
-    await assert.rejects(completion, /Aborted while waiting for subagent to finish/);
-  });
-});
 
 describe("commands", () => {
   it("/iterate always emits a full-context fork tool call", () => {
@@ -2465,7 +2053,7 @@ describe("subagent interruption", () => {
       throw new Error("mux write failed");
     });
 
-    assert.match(result.error, /Failed to send Escape/);
+    assert.match(result.error, /Failed to interrupt subagent/);
     assert.equal(aborted, false);
     assert.equal("interruptRequested" in running, false);
   });
@@ -2506,7 +2094,7 @@ describe("subagent interruption", () => {
         throw new Error("mux write failed");
       }));
 
-      assert.match(result.content[0].text, /Failed to send Escape/);
+      assert.match(result.content[0].text, /Failed to interrupt subagent/);
       assert.equal(projectLifecycle(runningMap.get("a1").lifecycle, 20_000).kind, "active");
     } finally {
       runningMap.clear();
@@ -2774,37 +2362,6 @@ describe("subagent status renderer", () => {
   });
 });
 
-describe("subagent startup delay", () => {
-  it("defaults to 500ms when no env var is set", () => {
-    const testApi = (subagentsModule as any).__test__;
-    assert.ok(testApi, "expected subagents test helpers to be exported");
-    assert.equal(typeof testApi.getShellReadyDelayMs, "function");
-
-    const original = process.env.PI_SUBAGENT_SHELL_READY_DELAY_MS;
-    delete process.env.PI_SUBAGENT_SHELL_READY_DELAY_MS;
-    try {
-      assert.equal(testApi.getShellReadyDelayMs(), 500);
-    } finally {
-      if (original == null) delete process.env.PI_SUBAGENT_SHELL_READY_DELAY_MS;
-      else process.env.PI_SUBAGENT_SHELL_READY_DELAY_MS = original;
-    }
-  });
-
-  it("uses PI_SUBAGENT_SHELL_READY_DELAY_MS when it is set", () => {
-    const testApi = (subagentsModule as any).__test__;
-    assert.ok(testApi, "expected subagents test helpers to be exported");
-    assert.equal(typeof testApi.getShellReadyDelayMs, "function");
-
-    const original = process.env.PI_SUBAGENT_SHELL_READY_DELAY_MS;
-    process.env.PI_SUBAGENT_SHELL_READY_DELAY_MS = "2500";
-    try {
-      assert.equal(testApi.getShellReadyDelayMs(), 2500);
-    } finally {
-      if (original == null) delete process.env.PI_SUBAGENT_SHELL_READY_DELAY_MS;
-      else process.env.PI_SUBAGENT_SHELL_READY_DELAY_MS = original;
-    }
-  });
-});
 describe("subagents widget rendering", () => {
   it("renders runtime agents of other clients in their own group box, with client status", () => {
     const testApi = (subagentsModule as any).__test__;
@@ -3110,19 +2667,6 @@ describe("herdr.ts", () => {
   });
 
   describe("herdr command construction", () => {
-    it("targets the current workspace when creating a subagent tab", () => {
-      assert.deepEqual(__herdrTest__.buildTabCreateArgs("reviewer", "/repo", "workspace-2"), [
-        "tab",
-        "create",
-        "--workspace",
-        "workspace-2",
-        "--label",
-        "reviewer",
-        "--cwd",
-        "/repo",
-        "--no-focus",
-      ]);
-    });
 
     it("constructs report-metadata arguments with normalized task token", () => {
       assert.deepEqual(
@@ -3139,31 +2683,7 @@ describe("herdr.ts", () => {
       );
     });
 
-    it("names a child as a branch under the caller in the Herdr Agents panel", () => {
-      assert.deepEqual(__herdrTest__.buildPaneTreeArgs("pane-3", "Scout", "pane-1", 1), [
-        "pane",
-        "report-metadata",
-        "pane-3",
-        "--source",
-        "memo-subagents",
-        "--display-agent",
-        "\u2514\u2500 Scout",
-        "--token",
-        "parent=pane-1",
-        "--token",
-        "tree_depth=1",
-      ]);
-      assert.equal(__herdrTest__.treeDisplayName("Reviewer\nx", 3), "\u250a \u250a \u2514\u2500 Reviewer x");
-    });
 
-    it("reads the caller's tree depth from its pane tokens (root when absent)", () => {
-      const pane = (tokens?: Record<string, string>) =>
-        JSON.stringify({ result: { pane: { pane_id: "p", ...(tokens ? { tokens } : {}) } } });
-      assert.equal(__herdrTest__.parsePaneTreeDepth(pane()), 0);
-      assert.equal(__herdrTest__.parsePaneTreeDepth(pane({ tree_depth: "2" })), 2);
-      assert.equal(__herdrTest__.parsePaneTreeDepth(pane({ tree_depth: "x" })), 0);
-      assert.equal(__herdrTest__.parsePaneTreeDepth("not json"), 0);
-    });
 
     it("flattens multi-line and tab-padded tasks into a single line", () => {
       assert.deepEqual(
@@ -3186,35 +2706,8 @@ describe("herdr.ts", () => {
   });
 
   describe("herdr response parsing", () => {
-    it("extracts pane id from a pane split response", () => {
-      const output = JSON.stringify({
-        result: {
-          pane: {
-            pane_id: "1-3",
-            tab_id: "1:2",
-            workspace_id: "1",
-          },
-        },
-      });
-      assert.equal(__herdrTest__.extractHerdrPaneId(output, "pane split"), "1-3");
-    });
 
-    it("extracts root pane id from a tab create response", () => {
-      const output = JSON.stringify({
-        result: {
-          tab: { tab_id: "1:2" },
-          root_pane: { pane_id: "1-2" },
-        },
-      });
-      assert.equal(__herdrTest__.extractHerdrRootPaneId(output, "tab create"), "1-2");
-    });
 
-    it("throws on malformed herdr JSON", () => {
-      assert.throws(
-        () => __herdrTest__.extractHerdrPaneId("not json", "pane split"),
-        /Unexpected herdr pane split output/,
-      );
-    });
 
     it("parses pane-not-found JSON from stderr-shaped errors", () => {
       const result = __herdrTest__.parsePaneGetError({

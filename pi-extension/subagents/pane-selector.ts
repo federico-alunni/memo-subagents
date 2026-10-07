@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 
 export interface PaneRecord {
   pane_id: string;
@@ -8,10 +9,27 @@ export interface PaneRecord {
 export interface SelectorState {
   owned: Map<string, string>;
   selected?: string;
+  /** Token of a launch that reserved the visible split and has not reported its pane yet. */
+  reservedSplit?: string;
 }
 type Run = (args: string[]) => any;
 
-/** Only moves owned panes within the caller's workspace, so watcher IDs stay stable. */
+export type PaneMoveTarget =
+  | { newTab: { label: string } }
+  | { split: { targetPane: string; tab: string; direction: "right"; ratio: number } };
+/** Moves an owned pane; resolves only when the move is observed (the runtime's `move`). */
+export type PaneMover = (paneId: string, to: PaneMoveTarget) => Promise<void>;
+
+export interface PlacementReservation {
+  token: string;
+  placement: "split-right" | "tab";
+}
+
+/**
+ * Decides where subagent panes go and which one is shown beside the main pane. Panes are created and
+ * moved by the agent runtime; this class only reads the layout, reserves the visible split and
+ * asks the mover to move owned panes within the caller's workspace (pane IDs stay stable).
+ */
 export class PaneSelector {
   readonly state: SelectorState;
   private readonly run: Run;
@@ -37,22 +55,43 @@ export class PaneSelector {
     return layout.panes.find((pane: PaneRecord) => this.state.owned.has(pane.pane_id))?.pane_id;
   }
 
-  create(name: string, cwd: string): string {
-    const parent = this.parent();
-    const layout = this.layout(parent);
-    const first = this.state.owned.size === 0 && layout.panes.length === 1 && !layout.zoomed;
-    const result = first
-      ? this.run(["pane", "split", parent.pane_id, "--direction", "right", "--ratio", "0.5", "--cwd", cwd, "--no-focus"])
-      : this.run(["tab", "create", "--workspace", parent.workspace_id, "--label", name, "--cwd", cwd, "--no-focus"]);
-    const pane = first ? result.pane : result.root_pane;
-    if (!pane?.pane_id) throw new Error("Herdr did not return the created pane ID");
-    this.state.owned.set(pane.pane_id, name);
-    if (first) this.state.selected = pane.pane_id;
-    try { this.run(["pane", "rename", pane.pane_id, name]); } catch { /* Cosmetic only. */ }
-    return pane.pane_id;
+  /**
+   * Synchronous placement decision: the first child of a single-pane, unzoomed main tab gets the
+   * visible split (reserved until it reports its pane), every other child a background tab.
+   */
+  reserve(): PlacementReservation {
+    const token = randomUUID();
+    let first = false;
+    try {
+      const parent = this.parent();
+      const layout = this.layout(parent);
+      first =
+        this.state.owned.size === 0 &&
+        !this.state.reservedSplit &&
+        layout.panes.length === 1 &&
+        !layout.zoomed;
+    } catch {
+      first = false; // Unknown layout: never split.
+    }
+    if (first) this.state.reservedSplit = token;
+    return { token, placement: first ? "split-right" : "tab" };
   }
 
-  select(paneId: string): void {
+  /** The launch created its pane: track it, and select it when it took the reserved split. */
+  adopt(reservation: PlacementReservation, paneId: string, name: string): void {
+    this.state.owned.set(paneId, name);
+    if (this.state.reservedSplit === reservation.token) {
+      this.state.reservedSplit = undefined;
+      if (reservation.placement === "split-right") this.state.selected = paneId;
+    }
+  }
+
+  /** The launch failed before creating a pane it could report. */
+  release(reservation: PlacementReservation): void {
+    if (this.state.reservedSplit === reservation.token) this.state.reservedSplit = undefined;
+  }
+
+  async select(paneId: string, move: PaneMover = this.herdrMover()): Promise<void> {
     if (!this.state.owned.has(paneId)) throw new Error("Only this session's subagent panes can be selected");
     const parent = this.parent();
     const target: PaneRecord = this.run(["pane", "get", paneId]).pane;
@@ -65,32 +104,44 @@ export class PaneSelector {
     }
     const previous = siblings[0]?.pane_id;
     if (previous === paneId) { this.state.selected = paneId; return; }
-    let parkedTab: string | undefined;
+    const beside: PaneMoveTarget = {
+      split: { targetPane: parent.pane_id, tab: parent.tab_id, direction: "right", ratio: 0.5 },
+    };
+    let parked = false;
     if (previous) {
-      const moved = this.run(["pane", "move", previous, "--new-tab", "--label", this.state.owned.get(previous)!, "--no-focus"]).move_result;
-      if (!moved?.changed || moved.pane?.pane_id !== previous) throw new Error("Unable to park the visible subagent safely");
-      parkedTab = moved.pane.tab_id;
+      await move(previous, { newTab: { label: this.state.owned.get(previous)! } });
+      parked = true;
       this.state.selected = undefined;
     }
     try {
-      const moved = this.run(["pane", "move", paneId, "--tab", parent.tab_id, "--target-pane", parent.pane_id, "--split", "right", "--ratio", "0.5", "--no-focus"]).move_result;
-      if (!moved?.changed || moved.pane?.pane_id !== paneId) throw new Error("Unable to display the selected subagent safely");
+      await move(paneId, beside);
       this.state.selected = paneId;
     } catch (error) {
-      // Read back before rollback: a failed CLI response does not prove the move failed.
+      // Read back before rollback: a failed answer does not prove the move failed.
       const current = this.layout(parent);
       if (current.panes.some((pane: PaneRecord) => pane.pane_id === paneId)) {
         this.state.selected = paneId;
         return;
       }
-      if (previous && parkedTab && current.panes.length === 1) {
+      if (previous && parked && current.panes.length === 1) {
         try {
-          const moved = this.run(["pane", "move", previous, "--tab", parent.tab_id, "--target-pane", parent.pane_id, "--split", "right", "--ratio", "0.5", "--no-focus"]).move_result;
-          if (moved?.changed && moved.pane?.pane_id === previous) this.state.selected = previous;
+          await move(previous, beside);
+          this.state.selected = previous;
         } catch { /* Keep both terminals alive; the selector can be used again. */ }
       }
       throw error;
     }
+  }
+
+  /** Direct Herdr moves, for panes that are not runtime agents (and tests). */
+  herdrMover(): PaneMover {
+    return async (paneId, to) => {
+      const args = "newTab" in to
+        ? ["pane", "move", paneId, "--new-tab", "--label", to.newTab.label, "--no-focus"]
+        : ["pane", "move", paneId, "--tab", to.split.tab, "--target-pane", to.split.targetPane, "--split", to.split.direction, "--ratio", String(to.split.ratio), "--no-focus"];
+      const moved = this.run(args).move_result;
+      if (!moved?.changed || moved.pane?.pane_id !== paneId) throw new Error("Unable to move the subagent pane safely");
+    };
   }
 
   forget(paneId: string): void {

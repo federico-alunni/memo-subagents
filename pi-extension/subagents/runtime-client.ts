@@ -1,0 +1,128 @@
+// The subagent tool as a client of the agent runtime (docs/runtime.md): one shared AgentRuntime per
+// process, and a supervisor that turns runtime observations into the subagent result.
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  AgentRuntime,
+  hostCompositionFromEnv,
+} from "./runtime/index.ts";
+import type {
+  AgentHandle,
+  ChildRecord,
+  Observation,
+  RuntimeConfig,
+} from "./runtime/index.ts";
+
+const INSTANCE_KEY = Symbol.for("memo-subagents/subagent-runtime");
+
+/**
+ * Private evidence root of generic subagents: per user, outside any project checkout (a child may run in
+ * the home directory). Children do not survive a reboot, and resume never needs old evidence.
+ */
+export function subagentStateDir(): string {
+  return join(tmpdir(), `memo-subagents-${process.getuid?.() ?? "user"}`);
+}
+
+export function subagentRuntimeConfig(): RuntimeConfig {
+  return {
+    stateDir: subagentStateDir(),
+    ...hostCompositionFromEnv(),
+    // A profile child loads every extension of the user's profile before it reports ready.
+    startupTimeoutMs: 60000,
+  };
+}
+
+/** The process-wide runtime of the subagent tool (survives /reload with the running entries). */
+export function subagentRuntime(): AgentRuntime {
+  const store = globalThis as unknown as Record<symbol, AgentRuntime | undefined>;
+  return (store[INSTANCE_KEY] ??= new AgentRuntime(subagentRuntimeConfig()));
+}
+
+/** Test hook: replace the process-wide runtime. */
+export function setSubagentRuntime(runtime: AgentRuntime | undefined): void {
+  (globalThis as unknown as Record<symbol, AgentRuntime | undefined>)[INSTANCE_KEY] = runtime;
+}
+
+export type SupervisedEnd =
+  /** The child ended itself (subagent_done or auto exit after a normal run). */
+  | { kind: "done"; exit: ChildRecord }
+  /** caller_ping: the child asks the parent for help and exited. */
+  | { kind: "ping"; message: string; exit: ChildRecord }
+  /** The run failed (provider error after retries). */
+  | { kind: "error"; errorMessage: string; exit: ChildRecord }
+  /** The user quit pi in the child pane, or closed the pane. */
+  | { kind: "ended"; reason: "user-quit" | "pane-closed" }
+  /** The parent session stopped supervising (quit, cancel). */
+  | { kind: "cancelled" };
+
+export interface SupervisedOutcome {
+  end: SupervisedEnd;
+  /** The child's pane was closed by the runtime after the end (proven). */
+  closed: boolean;
+  closeError?: string;
+}
+
+/** Map one observation to the end of the subagent, or undefined while it is still running. */
+export function subagentEnd(o: Observation): SupervisedEnd | undefined {
+  const exit = o.exit;
+  if (exit && (o.kind === "stopped" || o.kind === "missing" || (o.kind === "unavailable" && o.exited))) {
+    if (exit.reason === "ping") return { kind: "ping", message: exit.message ?? "", exit };
+    if (exit.reason === "error")
+      return { kind: "error", errorMessage: exit.error || "Subagent run failed", exit };
+    return { kind: "done", exit };
+  }
+  if (exit) return undefined; // exiting: wait for the observed process exit
+  if (o.kind === "unavailable" && o.exited) return { kind: "ended", reason: "user-quit" };
+  if (o.kind === "stopped") return { kind: "ended", reason: "user-quit" };
+  if (o.kind === "missing") return { kind: "ended", reason: "pane-closed" };
+  return undefined;
+}
+
+/**
+ * Observe a subagent until it ends, then close its pane through the runtime (never forced).
+ * `handle()` returns the current handle: the pane selector may replace it after a move.
+ */
+export async function superviseSubagent(options: {
+  runtime: AgentRuntime;
+  handle: () => AgentHandle;
+  signal: AbortSignal;
+  intervalMs?: number;
+  onObservation?: (o: Observation, handle: AgentHandle) => void;
+}): Promise<SupervisedOutcome> {
+  const { runtime, signal } = options;
+  const interval = options.intervalMs ?? 1000;
+  let end: SupervisedEnd | undefined;
+  while (!signal.aborted) {
+    const handle = options.handle();
+    const o = await runtime.observe(handle);
+    if (signal.aborted) break;
+    options.onObservation?.(o, handle);
+    end = subagentEnd(o);
+    if (end) break;
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, interval);
+      signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+    });
+  }
+  if (!end) {
+    // Parent stops supervising: retire a settled, idle child cleanly; a busy child keeps its pane.
+    try {
+      await runtime.stop(options.handle());
+      await runtime.close(options.handle());
+    } catch {
+      // Not settled or not owned any more: leave the pane to the user.
+    }
+    return { end: { kind: "cancelled" }, closed: false };
+  }
+  if (end.kind === "ended" && end.reason === "pane-closed") {
+    runtime.forget(options.handle());
+    return { end, closed: true };
+  }
+  try {
+    await runtime.close(options.handle());
+    return { end, closed: true };
+  } catch (error) {
+    runtime.forget(options.handle());
+    return { end, closed: false, closeError: error instanceof Error ? error.message : String(error) };
+  }
+}

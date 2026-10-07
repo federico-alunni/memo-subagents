@@ -7,12 +7,12 @@
  * custom model provider) or to see extra variables declare them here:
  *
  * - `MEMO_SUBAGENTS_CHILD_EXTENSIONS`: ':'-separated absolute extension paths,
- *   each passed to the child as `-e <path>` after `subagent-done.ts`.
+ *   each passed to the child as `-e <path>` after the runtime child extension.
  * - `MEMO_SUBAGENTS_CHILD_ENV`: ','-separated variable names forwarded from
  *   this process into the child command. `PI_*` and `MEMO_SUBAGENTS_*` names
  *   are refused (those are owned by pi and by this package).
  *
- * Applied to both `subagent` launches (pi driver) and `subagent_resume`.
+ * Applied by the agent runtime (hostCompositionFromEnv) to `subagent` launches and `subagent_resume`.
  * No other variable family is read: in particular `IR_CHILD_*` is ignored.
  */
 
@@ -45,20 +45,4 @@ export function hostChildEnv(env: NodeJS.ProcessEnv = process.env): [string, str
     out.push([name, value]);
   }
   return out;
-}
-
-/** `-e <path>` argument pairs (already shell-quoted). */
-export function hostChildExtensionArgs(
-  shellQuote: (value: string) => string,
-  env: NodeJS.ProcessEnv = process.env,
-): string[] {
-  return hostChildExtensions(env).flatMap((extension) => ["-e", shellQuote(extension)]);
-}
-
-/** `NAME=value` assignments (value shell-quoted). */
-export function hostChildEnvAssignments(
-  shellQuote: (value: string) => string,
-  env: NodeJS.ProcessEnv = process.env,
-): string[] {
-  return hostChildEnv(env).map(([name, value]) => `${name}=${shellQuote(value)}`);
 }

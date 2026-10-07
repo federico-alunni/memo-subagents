@@ -1,16 +1,44 @@
-// Launch/resume integration of `worktree: true` against a fake herdr CLI and real git.
+// Launch/resume integration of `worktree: true` against a fake agent runtime and real git.
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import subagentsExtension, { __test__ } from "../pi-extension/subagents/index.ts";
 import { createLifecycle } from "../pi-extension/subagents/lifecycle.ts";
+import { setSubagentRuntime } from "../pi-extension/subagents/runtime-client.ts";
+import { RuntimeError } from "../pi-extension/subagents/runtime/index.ts";
+import type { AgentHandle, LaunchSpec } from "../pi-extension/subagents/runtime/index.ts";
 
-const SUBAGENTS_DIR = join(dirname(fileURLToPath(import.meta.url)), "../pi-extension/subagents");
-const quote = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
+/** Agent runtime stand-in: records launch specs; a child ends when the test says so. */
+class FakeRuntime {
+  specs = new Map<string, LaunchSpec>();
+  ended = new Set<string>();
+  closed: string[] = [];
+  failLaunch?: Error;
+  async launch(spec: LaunchSpec): Promise<AgentHandle> {
+    if (this.failLaunch) throw this.failLaunch;
+    this.specs.set(spec.agentId, spec);
+    return {
+      scope: spec.scope, agentId: spec.agentId, attempt: spec.attempt, taskId: spec.taskId, taskToken: "token",
+      nonce: "nonce", sessionId: "child", sessionPath: spec.session && spec.session.kind === "file" ? spec.session.path : "",
+      paneId: `pane-${spec.agentId}`, terminalId: "t", tabId: "tab", workspaceId: "ws", pid: 1, processIdentity: "p",
+      shellPid: 2, tty: "ttys0", cwd: spec.cwd, protocolDir: `/fake/${spec.agentId}`,
+    };
+  }
+  async observe(h: AgentHandle) {
+    return this.ended.has(h.agentId)
+      ? { kind: "stopped", requests: [], exit: { reason: "done" } }
+      : { kind: "active", requests: [] };
+  }
+  async close(h: AgentHandle) { this.closed.push(h.agentId); }
+  async stop() {}
+  async interrupt() {}
+  activity() { return { ok: false, reason: "missing" }; }
+  forget() {}
+}
+let fake: FakeRuntime;
 
 let root: string;
 let stateDir: string;
@@ -18,14 +46,10 @@ let agentDir: string;
 let parentSession: string;
 const savedEnv: Record<string, string | undefined> = {};
 
+// Display-only Herdr calls (agent status, task metadata) still go to a herdr binary.
 const FAKE_HERDR = `#!/bin/bash
 printf '%s\\n' "$*" >> "$FAKE_HERDR_STATE/log"
 case "$1 $2" in
-  "tab create")
-    if [ -e "$FAKE_HERDR_STATE/fail-create" ]; then echo "boom" >&2; exit 1; fi
-    n=$(cat "$FAKE_HERDR_STATE/n" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$FAKE_HERDR_STATE/n"
-    echo "{\\"result\\":{\\"root_pane\\":{\\"pane_id\\":\\"fake-$n\\"}}}";;
-  "pane read") if [ -e "$FAKE_HERDR_STATE/done-$3" ]; then echo "__SUBAGENT_DONE_0__"; fi;;
   "pane get") echo "{\\"result\\":{\\"pane\\":{\\"pane_id\\":\\"$3\\",\\"agent_status\\":\\"working\\"}}}";;
   *) echo '{"result":{}}';;
 esac
@@ -56,7 +80,6 @@ before(() => {
   setEnv("HERDR_WORKSPACE_ID", "parent-ws");
   setEnv("FAKE_HERDR_STATE", stateDir);
   setEnv("PI_SUBAGENT_SURFACE", "tab");
-  setEnv("PI_SUBAGENT_SHELL_READY_DELAY_MS", "0");
   setEnv("PI_CODING_AGENT_DIR", agentDir);
   for (const name of [
     "PI_SUBAGENT_ID",
@@ -72,6 +95,8 @@ before(() => {
   for (const name of ["GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"]) setEnv(name, "Test");
   for (const name of ["GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"]) setEnv(name, "test@example.com");
 
+  fake = new FakeRuntime();
+  setSubagentRuntime(fake as any);
   parentSession = join(root, "parent-sessions", "parent.jsonl");
   mkdirSync(dirname(parentSession), { recursive: true });
   writeFileSync(parentSession, `${JSON.stringify({ type: "session", version: 3, id: "p", cwd: root })}\n`);
@@ -88,6 +113,7 @@ after(() => {
     if (value === undefined) delete process.env[name];
     else process.env[name] = value;
   }
+  setSubagentRuntime(undefined);
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -150,17 +176,15 @@ function ctx(cwd: string, ui?: { hasUI: boolean; select?: (title: string, option
   };
 }
 
-function launchedCommand(details: any): string {
-  // Script = shebang + "# ..." preamble + command (which may span lines).
-  const lines = readFileSync(details.launchScriptFile, "utf8").replace(/\n$/, "").split("\n");
-  const start = lines.findIndex((line) => !line.startsWith("#"));
-  return lines.slice(start).join("\n");
+function launched(details: any): LaunchSpec {
+  const spec = fake.specs.get(details.id);
+  assert.ok(spec, `launch spec of ${details.id}`);
+  return spec;
 }
 
-/** Number of panes created so far (background watchers also log reads, so count creations only). */
+/** Number of agents launched so far. */
 function panesCreated(): number {
-  const log = existsSync(join(stateDir, "log")) ? readFileSync(join(stateDir, "log"), "utf8") : "";
-  return log.split("\n").filter((line) => line.startsWith("tab create ")).length;
+  return fake.specs.size;
 }
 
 function surfaceOf(id: string): string {
@@ -171,7 +195,8 @@ function surfaceOf(id: string): string {
 
 async function finish(id: string, sent: any[], customType = "subagent_result"): Promise<any> {
   const before = sent.length;
-  writeFileSync(join(stateDir, `done-${surfaceOf(id)}`), "");
+  surfaceOf(id);
+  fake.ended.add(id);
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
     const message = sent.slice(before).find((m) => m.customType === customType);
@@ -186,7 +211,7 @@ function sessionDirFor(cwd: string): string {
 }
 
 describe("subagent worktree launch", () => {
-  it("without worktree the launched command is byte-identical to the upstream format", async () => {
+  it("without worktree the child is a plain profile launch through the agent runtime", async () => {
     const repo = makeRepo();
     const { tools } = setup();
     const result = await tools.get("subagent").execute("t", { name: "plain", task: "do it", fork: true }, undefined, undefined, ctx(repo));
@@ -194,18 +219,52 @@ describe("subagent worktree launch", () => {
     assert.equal(d.status, "started");
     assert.equal(d.worktree, undefined);
     assert.doesNotMatch(result.content[0].text, /Worktree/);
-    const surface = surfaceOf(d.id);
-    const artifactDir = join(dirname(parentSession), "artifacts", "parent-session-id");
-    const expected =
-      `PI_CODING_AGENT_DIR=${quote(agentDir)} PI_SUBAGENT_NAME='plain' PI_SUBAGENT_AUTO_EXIT=1 ` +
-      `PI_SUBAGENT_SESSION=${quote(d.sessionFile)} PI_SUBAGENT_ID=${quote(d.id)} ` +
-      `PI_SUBAGENT_ACTIVITY_FILE=${quote(join(artifactDir, `subagent-activity-${d.id}.json`))} ` +
-      `PI_SUBAGENT_SURFACE=${quote(surface)} ` +
-      `pi --session ${quote(d.sessionFile)} -e ${quote(join(SUBAGENTS_DIR, "subagent-done.ts"))} ` +
-      `--model 'fake/parent' --thinking 'high' 'do it'; echo '__SUBAGENT_DONE_'$?'__'`;
-    assert.equal(launchedCommand(d), expected);
+    const spec = launched(d);
+    assert.equal(spec.isolation, "profile");
+    assert.equal(spec.cwd, repo);
+    assert.equal(spec.agentDir, agentDir);
+    assert.equal(spec.model, "fake/parent");
+    assert.equal(spec.thinking, "high");
+    assert.equal(spec.prompt, "do it");
+    assert.equal(spec.userInput, "allowed");
+    assert.equal(spec.exit, "auto");
+    assert.equal(spec.tools, undefined);
+    assert.equal(spec.placement, "tab");
+    assert.deepEqual(spec.display, { label: "plain" });
+    assert.deepEqual(spec.session, { kind: "file", path: d.sessionFile });
+    assert.deepEqual(spec.env, { PI_SUBAGENT_NAME: "plain", PI_SUBAGENT_ID: d.id });
+    assert.equal(surfaceOf(d.id), `pane-${d.id}`);
     assert.equal(dirname(d.sessionFile), sessionDirFor(repo));
+    // fork: the session file carries the parent lineage.
+    assert.equal(JSON.parse(readFileSync(d.sessionFile, "utf8").split("\n")[0]).parentSession, parentSession);
     assert.ok(!existsSync(join(dirname(repo), `${basename(repo)}-memo-worktrees`)));
+    __test__.runningSubagents.get(d.id)?.abortController?.abort();
+  });
+
+  it("agent definitions become runtime policy (tools, denied tools, skills, interactive exit, system prompt)", async () => {
+    const repo = makeRepo();
+    mkdirSync(join(agentDir, "agents"), { recursive: true });
+    writeFileSync(
+      join(agentDir, "agents", "planner-test.md"),
+      "---\nname: planner-test\ntools: read, bash, caller_ping\nskills: review\nspawning: false\nauto-exit: false\nsystem-prompt: append\n---\nYou plan.\n",
+    );
+    const { tools } = setup();
+    const result = await tools.get("subagent").execute("t", { name: "P", task: "plan", agent: "planner-test" }, undefined, undefined, ctx(repo));
+    const spec = launched(result.details);
+    assert.deepEqual(spec.tools, ["read", "bash"]);
+    assert.ok(spec.denyTools?.includes("subagent"));
+    assert.deepEqual(spec.skills, ["review"]);
+    assert.equal(spec.exit, "tool");
+    assert.equal(readFileSync(spec.appendSystemPrompt![0], "utf8"), "You plan.");
+    assert.match(spec.prompt, /call the subagent_done tool/);
+    assert.equal(spec.env?.PI_SUBAGENT_AGENT, "planner-test");
+    assert.ok(spec.env?.PI_DENY_TOOLS?.includes("subagent"));
+    // Standalone session: header only, no parent lineage.
+    const header = JSON.parse(readFileSync(result.details.sessionFile, "utf8").split("\n")[0]);
+    assert.equal(header.type, "session");
+    assert.equal(header.parentSession, undefined);
+    __test__.runningSubagents.get(result.details.id)?.abortController?.abort();
+    rmSync(join(agentDir, "agents"), { recursive: true, force: true });
   });
 
   it("rejects worktreeBranch/worktreeBase without worktree: true", async () => {
@@ -246,15 +305,13 @@ describe("subagent worktree launch", () => {
     assert.equal(wt.repo, repo);
     assert.match(result.content[0].text, /Worktree: .*memo-worktrees.*branch memo\/wt-test/);
 
-    const command = launchedCommand(d);
-    assert.ok(command.startsWith(`cd ${quote(wt.cwd)} && `), command);
-    assert.match(command, /\[memo-subagents worktree\] You are working in the git worktree/);
-    assert.ok(command.includes(`Do not modify the original checkout ${repo}`));
+    const spec = launched(d);
+    assert.equal(spec.cwd, wt.cwd);
+    assert.match(spec.prompt, /\[memo-subagents worktree\] You are working in the git worktree/);
+    assert.ok(spec.prompt.includes(`Do not modify the original checkout ${repo}`));
     assert.equal(dirname(d.sessionFile), sessionDirFor(wt.cwd));
     const header = JSON.parse(readFileSync(d.sessionFile, "utf8").split("\n")[0]);
     assert.equal(header.cwd, wt.cwd);
-    const log = readFileSync(join(stateDir, "log"), "utf8");
-    assert.ok(log.includes(`tab create --workspace parent-ws --label WT Test --cwd ${wt.cwd} --no-focus`), log);
 
     const running = __test__.runningSubagents.get(d.id)!;
     assert.equal(running.worktree?.branch, wt.branch);
@@ -284,7 +341,11 @@ describe("subagent worktree launch", () => {
     const resumed = await tools.get("subagent_resume").execute("t", { sessionPath: d.sessionFile, name: "Again" }, undefined, undefined, ctx(repo));
     assert.equal(resumed.details.status, "started");
     assert.equal(resumed.details.worktree.path, wt.path);
-    assert.ok(launchedCommand(resumed.details).startsWith(`cd ${quote(wt.cwd)} && PI_CODING_AGENT_DIR=`));
+    const resumeSpec = launched(resumed.details);
+    assert.equal(resumeSpec.cwd, wt.cwd);
+    assert.deepEqual(resumeSpec.session, { kind: "file", path: d.sessionFile });
+    assert.equal(resumeSpec.prompt, "");
+    assert.equal(resumeSpec.exit, "auto");
     const resumedFinal = await finish(resumed.details.id, sent);
     assert.equal(resumedFinal.details.worktree.commitsAhead, 1);
 
@@ -299,13 +360,20 @@ describe("subagent worktree launch", () => {
     assert.equal((await __test__.listWorktreeEntries({ cwd: repo })).length, 0);
   });
 
-  it("resume of a session without a worktree record has no cd", async () => {
+  it("resume of a session without a worktree record runs in the current directory; a live session is refused", async () => {
     const { tools } = setup();
     const session = join(root, "other.jsonl");
     writeFileSync(session, `${JSON.stringify({ type: "session", version: 3, id: "o", cwd: root })}\n`);
-    const resumed = await tools.get("subagent_resume").execute("t", { sessionPath: session }, undefined, undefined, ctx(root));
+    const resumed = await tools.get("subagent_resume").execute("t", { sessionPath: session, message: "go on", autoExit: false }, undefined, undefined, ctx(root));
     assert.equal(resumed.details.worktree, undefined);
-    assert.ok(launchedCommand(resumed.details).startsWith("PI_CODING_AGENT_DIR="));
+    const spec = launched(resumed.details);
+    assert.equal(spec.cwd, root);
+    assert.equal(spec.prompt, "go on");
+    assert.equal(spec.exit, "tool");
+    // The session model is unknown: the parent's model is used.
+    assert.equal(spec.model, "fake/parent");
+    const twice = await tools.get("subagent_resume").execute("t", { sessionPath: session }, undefined, undefined, ctx(root));
+    assert.equal(twice.details.error, "session in use");
     __test__.runningSubagents.get(resumed.details.id)?.abortController?.abort();
   });
 
@@ -346,7 +414,7 @@ describe("subagent worktree launch", () => {
     assert.equal(result.details.status, "started");
     assert.match(result.details.worktree.warnings[0], /NOT included in the worktree/);
     assert.match(result.content[0].text, /Worktree warning: The source checkout has 1 uncommitted/);
-    assert.match(launchedCommand(result.details), /Warning: The source checkout has 1 uncommitted/);
+    assert.match(launched(result.details).prompt, /Warning: The source checkout has 1 uncommitted/);
     assert.ok(!existsSync(join(result.details.worktree.path, "untracked.txt")));
     __test__.runningSubagents.get(result.details.id)?.abortController?.abort();
   });
@@ -365,27 +433,32 @@ describe("subagent worktree launch", () => {
     assert.equal(result.details.status, "started");
     assert.equal(result.details.worktree.branch, "feature/headless");
     assert.match(result.details.worktree.warnings[0], /1 uncommitted/);
-    // Artifact delivery: the note is in the task file.
-    const taskFile = launchedCommand(result.details).match(/'@([^']+)'/)?.[1];
-    assert.ok(taskFile);
-    assert.match(readFileSync(taskFile, "utf8"), /\[memo-subagents worktree\][\s\S]*Warning: The source checkout/);
+    // Wrapped (non-fork) delivery: the note is in the task prompt.
+    assert.match(launched(result.details).prompt, /\[memo-subagents worktree\][\s\S]*Warning: The source checkout/);
     __test__.runningSubagents.get(result.details.id)?.abortController?.abort();
   });
 
-  it("rolls the worktree back when the pane cannot be created", async () => {
+  it("rolls the worktree back when the launch definitely failed, keeps it when uncertain", async () => {
     const repo = makeRepo();
     const { tools } = setup();
-    writeFileSync(join(stateDir, "fail-create"), "");
+    const worktrees = () => sh(repo, "worktree", "list", "--porcelain").split("\n").filter((l) => l.startsWith("worktree ")).length;
+    fake.failLaunch = new RuntimeError("launch_failed", "shell never ready");
     try {
       await assert.rejects(
         tools.get("subagent").execute("t", { name: "fails", task: "t", worktree: true }, undefined, undefined, ctx(repo)),
         /rolled back/,
       );
+      assert.equal(worktrees(), 1);
+      assert.equal(sh(repo, "branch", "--list", "memo/*"), "");
+      fake.failLaunch = new RuntimeError("launch_uncertain", "child readiness timed out");
+      await assert.rejects(
+        tools.get("subagent").execute("t", { name: "unsure", task: "t", worktree: true }, undefined, undefined, ctx(repo)),
+        /kept for inspection/,
+      );
+      assert.equal(worktrees(), 2);
     } finally {
-      rmSync(join(stateDir, "fail-create"));
+      fake.failLaunch = undefined;
     }
-    assert.equal(sh(repo, "worktree", "list", "--porcelain").split("\n").filter((l) => l.startsWith("worktree ")).length, 1);
-    assert.equal(sh(repo, "branch", "--list", "memo/*"), "");
   });
 
   it("spawning: false denies subagent_worktrees", () => {

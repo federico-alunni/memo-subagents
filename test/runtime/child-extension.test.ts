@@ -16,6 +16,7 @@ function fakePi() {
     events,
     handlers,
     api: {
+      registerShortcut: () => {},
       registerTool: (tool: any) => tools.push(tool),
       on: (event: string, handler: (...args: any[]) => any) => {
         events.push(event);

@@ -48,25 +48,6 @@ function parseHerdrJson(value: string): unknown {
   }
 }
 
-function extractHerdrPaneId(output: string, context: string): string {
-  const parsed = parseHerdrJson(output);
-  const paneId = (parsed as { result?: { pane?: { pane_id?: unknown } } })?.result?.pane?.pane_id;
-  if (typeof paneId !== "string" || !paneId) {
-    throw new Error(`Unexpected herdr ${context} output: ${output.trim() || "(empty)"}`);
-  }
-  return paneId;
-}
-
-function extractHerdrRootPaneId(output: string, context: string): string {
-  const parsed = parseHerdrJson(output);
-  const paneId = (parsed as { result?: { root_pane?: { pane_id?: unknown } } })?.result?.root_pane
-    ?.pane_id;
-  if (typeof paneId !== "string" || !paneId) {
-    throw new Error(`Unexpected herdr ${context} output: ${output.trim() || "(empty)"}`);
-  }
-  return paneId;
-}
-
 function herdrExec(args: string[]): string {
   return execFileSync("herdr", args, { encoding: "utf8" });
 }
@@ -75,110 +56,6 @@ async function herdrExecAsync(args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("herdr", args, { encoding: "utf8" });
   return stdout;
 }
-
-function getHerdrParentPaneId(): string {
-  const paneId = process.env.HERDR_PANE_ID;
-  if (!paneId) {
-    throw new Error("HERDR_PANE_ID not set");
-  }
-  return paneId;
-}
-
-function getHerdrCurrentPaneInfo(): {
-  pane_id: string;
-  tab_id: string;
-  workspace_id: string;
-} {
-  const paneId = process.env.HERDR_PANE_ID;
-  const tabId = process.env.HERDR_TAB_ID;
-  const workspaceId = process.env.HERDR_WORKSPACE_ID;
-
-  // Fall back to `herdr pane current` if any identity env var is missing —
-  // older herdr versions may not set all three.
-  if (!paneId || !tabId || !workspaceId) {
-    const output = herdrExec(["pane", "current"]);
-    const parsed = parseHerdrJson(output);
-    const pane = (parsed as { result?: { pane?: unknown } } | null)?.result?.pane as
-      | { pane_id?: string; tab_id?: string; workspace_id?: string }
-      | undefined;
-    if (!pane?.pane_id || !pane?.tab_id || !pane?.workspace_id) {
-      throw new Error(`Unexpected herdr pane current output: ${output.trim() || "(empty)"}`);
-    }
-    return {
-      pane_id: pane.pane_id,
-      tab_id: pane.tab_id,
-      workspace_id: pane.workspace_id,
-    };
-  }
-
-  return { pane_id: paneId, tab_id: tabId, workspace_id: workspaceId };
-}
-
-function buildTabCreateArgs(name: string, cwd: string, workspaceId: string): string[] {
-  return [
-    "tab",
-    "create",
-    "--workspace",
-    workspaceId,
-    "--label",
-    name,
-    "--cwd",
-    cwd,
-    "--no-focus",
-  ];
-}
-
-export function createHerdrSurface(name: string, cwd: string = process.cwd()): string {
-  // Create a new tab per subagent so parallel spawns each get a full tab
-  // instead of ever-narrower splits of the parent pane. Target the current
-  // workspace explicitly because Herdr's implicit default may be another space.
-  const { workspace_id: workspaceId } = getHerdrCurrentPaneInfo();
-  const output = herdrExec(buildTabCreateArgs(name, cwd, workspaceId));
-  const paneId = extractHerdrRootPaneId(output, "tab create");
-  try {
-    herdrExec(["pane", "rename", paneId, name]);
-  } catch {
-    // Optional — pane label is cosmetic.
-  }
-  return paneId;
-}
-
-export function createHerdrSurfaceSplit(
-  name: string,
-  direction: "right" | "down",
-  cwd: string = process.cwd(),
-): string {
-  const parentPaneId = getHerdrParentPaneId();
-  const output = herdrExec([
-    "pane",
-    "split",
-    parentPaneId,
-    "--direction",
-    direction,
-    "--no-focus",
-    "--cwd",
-    cwd,
-  ]);
-  const paneId = extractHerdrPaneId(output, "pane split");
-  try {
-    herdrExec(["pane", "rename", paneId, name]);
-  } catch {
-    // Optional.
-  }
-  return paneId;
-}
-
-export function readHerdrScreen(surface: string, lines = 50): string {
-  // `visible` is reliable for freshly created panes where herdr's `recent`
-  // scrollback may not be populated yet.
-  return herdrExec(["pane", "read", surface, "--source", "visible", "--lines", String(lines)]);
-}
-
-export async function readHerdrScreenAsync(surface: string, lines = 50): Promise<string> {
-  return herdrExecAsync(["pane", "read", surface, "--source", "visible", "--lines", String(lines)]);
-}
-
-export type { PaneInspection, HerdrAgentStatus } from "./lifecycle.ts";
 
 type PaneInspectionResult =
   | { kind: "present"; agent?: string; agentStatus: "idle" | "working" | "blocked" | "done" | "unknown" }
@@ -244,28 +121,8 @@ export async function inspectHerdrPane(surface: string): Promise<PaneInspectionR
   }
 }
 
-export function sendHerdrCommand(surface: string, command: string): void {
-  // pane run sends the text and Enter in a single socket request, avoiding
-  // a race where Enter could arrive before the text is fully processed.
-  herdrExec(["pane", "run", surface, command]);
-}
-
 export function sendHerdrEscape(surface: string): void {
   herdrExec(["pane", "send-keys", surface, "Escape"]);
-}
-
-export function closeHerdrSurface(surface: string): void {
-  herdrExec(["pane", "close", surface]);
-}
-
-export function renameHerdrTab(title: string): void {
-  const { tab_id: tabId } = getHerdrCurrentPaneInfo();
-  herdrExec(["tab", "rename", tabId, title]);
-}
-
-export function renameHerdrWorkspace(title: string): void {
-  const { workspace_id: workspaceId } = getHerdrCurrentPaneInfo();
-  herdrExec(["workspace", "rename", workspaceId, title]);
 }
 
 function buildPaneReportTaskArgs(
@@ -299,71 +156,9 @@ export function reportHerdrPaneTask(
   }
 }
 
-/** Agents-panel name of a child at `depth` (1 = direct child): "\u2514\u2500 name", "\u250a \u2514\u2500 name", \u2026 */
-function treeDisplayName(name: string, depth: number): string {
-  const label = name.replace(/[\r\n\t]+/g, " ").trim() || "subagent";
-  return `${"\u250a ".repeat(Math.max(0, depth - 1))}\u2514\u2500 ${label}`;
-}
-
-function buildPaneTreeArgs(
-  paneId: string,
-  name: string,
-  parentPaneId: string,
-  depth: number,
-): string[] {
-  return [
-    "pane",
-    "report-metadata",
-    paneId,
-    "--source",
-    "memo-subagents",
-    "--display-agent",
-    treeDisplayName(name, depth),
-    "--token",
-    `parent=${parentPaneId}`,
-    "--token",
-    `tree_depth=${depth}`,
-  ];
-}
-
-/** Depth of a pane in the subagent tree: its reported `tree_depth` token, else 0 (a root). */
-function parsePaneTreeDepth(output: string): number {
-  const pane = (parseHerdrJson(output) as { result?: { pane?: { tokens?: Record<string, unknown> } } } | null)
-    ?.result?.pane;
-  const depth = Number(pane?.tokens?.tree_depth);
-  return Number.isSafeInteger(depth) && depth > 0 ? depth : 0;
-}
-
-/**
- * Display-only: name the child pane in Herdr's Agents panel as a branch under the
- * calling pane ("\u2514\u2500 scout"), one level deeper than the caller when it is itself
- * a subagent. Never affects identity or lifecycle; failures are ignored.
- */
-export function reportHerdrPaneTree(paneId: string, name: string): void {
-  const parentPaneId = process.env.HERDR_PANE_ID;
-  if (!parentPaneId || parentPaneId === paneId) return;
-  let depth = 1;
-  try {
-    depth = parsePaneTreeDepth(herdrExec(["pane", "get", parentPaneId])) + 1;
-  } catch {
-    // Unknown parent depth: show as a direct child.
-  }
-  try {
-    herdrExec(buildPaneTreeArgs(paneId, name, parentPaneId, depth));
-  } catch {
-    // Cosmetic only.
-  }
-}
-
 export const __herdrTest__ = {
-  buildTabCreateArgs,
   buildPaneReportTaskArgs,
-  buildPaneTreeArgs,
-  parsePaneTreeDepth,
-  treeDisplayName,
   parseHerdrJson,
-  extractHerdrPaneId,
-  extractHerdrRootPaneId,
   parsePaneGetOutput,
   parsePaneGetError,
 };

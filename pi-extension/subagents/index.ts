@@ -3,7 +3,6 @@ import { keyHint } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "@sinclair/typebox";
 import { Box, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import {
   readdirSync,
   readFileSync,
@@ -15,19 +14,13 @@ import { homedir } from "node:os";
 import {
   isTerminalAvailable,
   terminalSetupHint,
-  createSubagentPane,
-  runScriptInPane,
-  closePane,
   interruptPane,
-  shellQuote,
-  readPane,
-  readPaneAsync,
   inspectPane,
   setPaneTask,
 } from "./terminal.ts";
-import { waitForCompletion } from "./completion.ts";
-import { paneSelector } from "./pane-selector.ts";
-import { randomBytes } from "node:crypto";
+import type { CompletionResult } from "./completion.ts";
+import { paneSelector, type PaneMover } from "./pane-selector.ts";
+import { randomBytes, randomUUID } from "node:crypto";
 import {
   buildAuthenticatedModelCatalog,
   resolveRuntimePlan,
@@ -36,13 +29,7 @@ import {
   type ResolvedRuntimePlan,
   type ThinkingLevel,
 } from "./runtime-routing.ts";
-import {
-  getHarnessDriver,
-  buildSubagentToolAllowlist,
-  buildPiPromptArgs,
-} from "./harness/index.ts";
 import { loadModelConfig, resolveModelDefault, type ModelConfig } from "./model-config.ts";
-import { hostChildEnvAssignments, hostChildExtensionArgs } from "./child-host.ts";
 import {
   createWorktree,
   findWorktreeRecordBySession,
@@ -79,7 +66,6 @@ import {
   loadStatusConfig,
 } from "./status.ts";
 import {
-  getSubagentActivityFile,
   readSubagentActivityFile,
   type ActivityReadResult,
   type SubagentActivityState,
@@ -99,16 +85,20 @@ import {
   projectLifecycle,
   type LifecycleProjection,
   type SubagentLifecycle,
-  type PaneInspection,
 } from "./lifecycle.ts";
 import {
   presence,
   presenceActive,
   type PresenceEntry,
 } from "./runtime/presence.ts";
+import { RuntimeError } from "./runtime/index.ts";
+import type { AgentHandle, LaunchSpec, Observation } from "./runtime/index.ts";
+import {
+  subagentRuntime,
+  superviseSubagent,
+  type SupervisedOutcome,
+} from "./runtime-client.ts";
 
-/** Absolute path to `pi-extension/subagents`. https://github.com/nodejs/node/issues/37845 */
-const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
 
 // Survive /reload: replace presentation timers while keeping active completion
 // watchers and their registry alive. Old module closures continue watching the
@@ -520,19 +510,6 @@ function formatElapsed(seconds: number): string {
   return `${m}m ${s}s`;
 }
 
-/**
- * Wait long enough for a freshly created pane to finish shell startup.
- *
- * Some environments do extra shell-init work before the prompt is ready
- * (for example direnv/devenv), so the delay is configurable for users who hit
- * dropped commands. Keep the historical default at 500ms.
- */
-function getShellReadyDelayMs(): number {
-  const raw = process.env.PI_SUBAGENT_SHELL_READY_DELAY_MS?.trim();
-  const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 500;
-}
-
 function muxUnavailableResult() {
   return {
     content: [
@@ -613,8 +590,12 @@ interface RunningSubagent {
   task: string;
   agent?: string;
   surface: string;
+  /** Agent runtime handle (replaced when the pane selector moves the pane). */
+  handle?: AgentHandle;
   startTime: number;
   sessionFile: string;
+  /** Session entries that existed before a resume: the summary only uses newer ones. */
+  entryCountBefore?: number;
   launchScriptFile?: string;
   activityFile?: string;
   activity?: SubagentActivityState;
@@ -848,6 +829,9 @@ function renderWidgetLines(
   entries: PresenceEntry[],
   width: number,
 ): string[] {
+  // Subagent-tool children are rendered from their richer running entry, not their presence row.
+  const own = new Set(agents.map((agent) => agent.handle?.protocolDir).filter(Boolean));
+  entries = entries.filter((entry) => !own.has(entry.key));
   const ungrouped = entries.filter((entry) => !entry.group);
   return [
     ...(agents.length > 0 || ungrouped.length > 0
@@ -906,7 +890,8 @@ function updateWidget() {
   const latestCtx = runtime.latestCtx;
   if (!latestCtx?.hasUI) return;
 
-  if (runningSubagents.size === 0 && presence().list().length === 0) {
+  const own = new Set([...runningSubagents.values()].map((agent) => agent.handle?.protocolDir));
+  if (runningSubagents.size === 0 && presence().list().every((entry) => own.has(entry.key))) {
     latestCtx.ui.setWidget("subagent-status", undefined);
     if (widgetInterval) {
       clearInterval(widgetInterval);
@@ -947,12 +932,6 @@ function updateWidget() {
 function ensureLifecycle(running: RunningSubagent): SubagentLifecycle {
   if (running.lifecycle) return running.lifecycle;
   let lifecycle = createLifecycle(running.startTime);
-  const driver = getHarnessDriver();
-  if (!driver.hasActivitySnapshots) {
-    lifecycle = markProcessRunning(lifecycle, running.startTime);
-    running.lifecycle = lifecycle;
-    return lifecycle;
-  }
   const state = running.statusState;
   if (state?.activityLabel === "interrupted" && state.localOverrideAtMs != null) {
     lifecycle = markInterruptRequested(lifecycle, state.localOverrideAtMs);
@@ -997,13 +976,13 @@ function ensureLifecycle(running: RunningSubagent): SubagentLifecycle {
 
 function observeRunningSubagent(running: RunningSubagent, observedAt = Date.now()) {
   ensureLifecycle(running);
-  const driver = getHarnessDriver();
-  if (!driver.hasActivitySnapshots) return;
 
-  const activityFile = running.activityFile;
-  const read: ActivityReadResult = activityFile
-    ? readSubagentActivityFile(activityFile, running.id)
-    : { ok: false, reason: "missing" };
+  // Runtime children write their activity in the runtime evidence; legacy entries in the artifact dir.
+  const read: ActivityReadResult = running.handle
+    ? subagentRuntime().activity(running.handle)
+    : running.activityFile
+      ? readSubagentActivityFile(running.activityFile, running.id)
+      : { ok: false, reason: "missing" };
 
   running.activityRead = read.ok
     ? { ok: true }
@@ -1037,9 +1016,31 @@ function resolveInterruptTarget(params: { id?: string; name?: string }):
   return { error: `Ambiguous subagent name "${requestedName}". Matches: ${candidates}` };
 }
 
+/**
+ * Pane selector moves of runtime children go through the runtime: the observed new tab replaces the
+ * stored handle (identity stays exact). Other panes are moved directly.
+ */
+const subagentPaneMover: PaneMover = async (paneId, to) => {
+  const running = [...runningSubagents.values()].find((agent) => agent.surface === paneId);
+  if (!running?.handle) return paneSelector.herdrMover()(paneId, to);
+  running.handle = await subagentRuntime().move(running.handle, to);
+};
+
+/** Runtime children get a correlated interrupt request (the child aborts its current run). */
+function interruptSubagentPane(surface: string): void {
+  const running = [...runningSubagents.values()].find((agent) => agent.surface === surface);
+  if (!running?.handle) {
+    interruptPane(surface);
+    return;
+  }
+  // A request, not proof: the run ends as "interrupted" in the child's evidence. A refused request
+  // (agent no longer owned) leaves the lifecycle to the supervisor's next observation.
+  void subagentRuntime().interrupt(running.handle).catch(() => {});
+}
+
 function requestSubagentInterrupt(
   running: RunningSubagent,
-  interruptPaneKey: (surface: string) => void = interruptPane,
+  interruptPaneKey: (surface: string) => void = interruptSubagentPane,
 ): { ok: true } | { error: string } {
   try {
     interruptPaneKey(running.surface);
@@ -1047,7 +1048,7 @@ function requestSubagentInterrupt(
   } catch (error: any) {
     return {
       error:
-        `Failed to send Escape to subagent "${running.name}" via herdr: ` +
+        `Failed to interrupt subagent "${running.name}": ` +
         `${error?.message ?? String(error)}`,
     };
   }
@@ -1055,7 +1056,7 @@ function requestSubagentInterrupt(
 
 function handleSubagentInterrupt(
   params: { id?: string; name?: string },
-  interruptPaneKey: (surface: string) => void = interruptPane,
+  interruptPaneKey: (surface: string) => void = interruptSubagentPane,
 ) {
   const resolved = resolveInterruptTarget(params);
   if ("error" in resolved) {
@@ -1153,53 +1154,6 @@ function startStatusRefresh(pi: ExtensionAPI) {
 function resolveResumeLaunchBehavior(params: { autoExit?: boolean }): { autoExit: boolean; interactive: boolean } {
   const autoExit = params.autoExit ?? true;
   return { autoExit, interactive: !autoExit };
-}
-
-/**
- * Build the shell command used by subagent_resume.
- *
- * Applies the same host composition as fresh pi launches
- * (MEMO_SUBAGENTS_CHILD_EXTENSIONS / MEMO_SUBAGENTS_CHILD_ENV, see child-host.ts)
- * so a resumed child keeps host-provided extensions such as model providers.
- * `cwd` is only set when the session belongs to a memo worktree.
- */
-function buildResumeCommand(opts: {
-  sessionPath: string;
-  name: string;
-  id: string;
-  activityFile: string;
-  autoExit: boolean;
-  resumeMsgFile?: string;
-  cwd?: string;
-  env?: NodeJS.ProcessEnv;
-}): string {
-  const env = opts.env ?? process.env;
-  const parts = ["pi", "--session", shellQuote(opts.sessionPath)];
-
-  // Load subagent-done extension so the agent can self-terminate if needed
-  const subagentDonePath = join(SUBAGENTS_DIR, "subagent-done.ts");
-  parts.push("-e", shellQuote(subagentDonePath));
-  // memo-subagents host composition (same order as the pi driver).
-  parts.push(...hostChildExtensionArgs(shellQuote, env));
-  if (opts.resumeMsgFile) parts.push(shellQuote(`@${opts.resumeMsgFile}`));
-
-  // Build env prefix — propagate PI_CODING_AGENT_DIR for config isolation
-  const resumeEnvParts: string[] = [];
-  if (env.PI_CODING_AGENT_DIR) {
-    resumeEnvParts.push(`PI_CODING_AGENT_DIR=${shellQuote(env.PI_CODING_AGENT_DIR)}`);
-  }
-  resumeEnvParts.push(...hostChildEnvAssignments(shellQuote, env));
-  resumeEnvParts.push(`PI_SUBAGENT_NAME=${shellQuote(opts.name)}`);
-  resumeEnvParts.push(`PI_SUBAGENT_SESSION=${shellQuote(opts.sessionPath)}`);
-  resumeEnvParts.push(`PI_SUBAGENT_ID=${shellQuote(opts.id)}`);
-  resumeEnvParts.push(`PI_SUBAGENT_ACTIVITY_FILE=${shellQuote(opts.activityFile)}`);
-  if (opts.autoExit) {
-    resumeEnvParts.push(`PI_SUBAGENT_AUTO_EXIT=1`);
-  }
-  const resumeEnvPrefix = resumeEnvParts.join(" ") + " ";
-  const cdPrefix = opts.cwd ? `cd ${shellQuote(opts.cwd)} && ` : "";
-
-  return `${cdPrefix}${resumeEnvPrefix}${parts.join(" ")}; echo '__SUBAGENT_DONE_'$?'__'`;
 }
 
 // ── git worktree integration (see worktree.ts, docs/worktrees.md) ──
@@ -1452,7 +1406,6 @@ async function resolveResumeWorktree(
 
 export const __test__ = {
   borderLine,
-  getShellReadyDelayMs,
   renderSubagentWidgetLines,
   renderWidgetLines,
   renderPresenceGroupLines,
@@ -1464,8 +1417,6 @@ export const __test__ = {
   resolveLaunchBehavior,
   resolveEffectiveAutoExit,
   resolveEffectiveInteractive,
-  buildSubagentToolAllowlist,
-  buildPiPromptArgs,
   observeRunningSubagent,
   resolveDenyTools,
   resolveInterruptTarget,
@@ -1473,7 +1424,6 @@ export const __test__ = {
   handleSubagentInterrupt,
   resolveResultPresentation,
   resolveResumeLaunchBehavior,
-  buildResumeCommand,
   validateWorktreeParams,
   confirmDirtyWorktreeSource,
   insertBeforeSessionRef,
@@ -1523,10 +1473,11 @@ async function launchSubagent(
     return await launchSubagentInner(params, ctx, parentThinking, options, state);
   } catch (error) {
     if (!state.worktree) throw error;
-    if (state.surface && !options?.surface) {
-      try {
-        closePane(state.surface);
-      } catch {}
+    // An uncertain launch may have a child running in the worktree: keep it (and the pane) for inspection.
+    if (error instanceof RuntimeError && error.code === "launch_uncertain") {
+      throw new Error(
+        `${error.message} (launch outcome uncertain: worktree ${state.worktree.path} and any pane were kept for inspection)`,
+      );
     }
     const rollback = await rollbackWorktree(state.worktree);
     const note = rollback.errors.length > 0
@@ -1534,6 +1485,61 @@ async function launchSubagent(
       : `worktree ${state.worktree.path} and branch ${state.worktree.branch} rolled back`;
     throw new Error(`${error instanceof Error ? error.message : String(error)} (${note})`);
   }
+}
+
+function slugName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "") || "subagent";
+}
+
+function surfaceMode(): "selector" | "split" | "tab" {
+  const mode = process.env.PI_SUBAGENT_SURFACE ?? "selector";
+  return mode === "tab" || mode === "split" ? mode : "selector";
+}
+
+function splitList(value: string | undefined): string[] {
+  return (value ?? "").split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+/** Header-only session file (standalone mode): the child opens exactly this file. */
+function writeStandaloneSessionFile(path: string, id: string, cwd: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(
+    path,
+    JSON.stringify({ type: "session", version: 3, id, timestamp: new Date().toISOString(), cwd }) + "\n",
+    "utf8",
+  );
+}
+
+/** Agent `tools` become the runtime allowlist (exit tools come from the exit policy); denied tools are blocked. */
+function subagentToolPolicy(
+  tools: string | undefined,
+  denySet: Set<string>,
+): { tools?: string[]; denyTools: string[] } {
+  const allowlist = splitList(tools).filter((tool) => tool !== "caller_ping" && tool !== "subagent_done");
+  return {
+    ...(allowlist.length > 0 ? { tools: allowlist } : {}),
+    denyTools: [...denySet],
+  };
+}
+
+/** Identity variables read by memo-subagents inside the child (self-spawn guard, denied tools). */
+function subagentEnv(options: {
+  name: string;
+  agent?: string;
+  id: string;
+  denySet?: Set<string>;
+}): Record<string, string> {
+  return {
+    PI_SUBAGENT_NAME: options.name,
+    PI_SUBAGENT_ID: options.id,
+    ...(options.agent ? { PI_SUBAGENT_AGENT: options.agent } : {}),
+    ...(options.denySet && options.denySet.size > 0 ? { PI_DENY_TOOLS: [...options.denySet].join(",") } : {}),
+  };
 }
 
 function resolveWorktreePaths(cwd: string) {
@@ -1577,7 +1583,6 @@ async function launchSubagentInner(
     { provider: ctx.model.provider, modelId: ctx.model.id, thinking: parentThinking },
     wrapPiModelRegistry(ctx.modelRegistry),
   );
-  const effectiveThinking = runtimePlan.thinking;
   const effectiveAutoExit = resolveEffectiveAutoExit(params, agentDefs);
   const effectiveInteractive = resolveEffectiveInteractive(params, agentDefs);
 
@@ -1588,14 +1593,20 @@ async function launchSubagentInner(
 
   const resolvedPaths = resolveSubagentPaths(params, agentDefs);
 
-  const driver = getHarnessDriver(agentDefs?.cli);
+  // Only pi agents: a definition with another cli is refused before any worktree or pane.
+  if (agentDefs && !isPiAgent(agentDefs)) {
+    throw new Error(
+      `Unsupported subagent cli "${agentDefs.cli}": memo-subagents launches only pi subagents. ` +
+        "Remove the `cli` field from the agent definition.",
+    );
+  }
 
   // Optional worktree: created after runtime validation and before the pane.
   if (options?.worktreePlan) {
     launchState.worktree = await createWorktree(options.worktreePlan);
   }
   const worktree = launchState.worktree;
-  const { effectiveCwd, localAgentDir, effectiveAgentDir } = worktree
+  const { effectiveCwd, effectiveAgentDir } = worktree
     ? resolveWorktreePaths(worktree.cwd)
     : resolvedPaths;
   const targetCwdForSession = effectiveCwd ?? ctx.cwd;
@@ -1613,18 +1624,11 @@ async function launchSubagentInner(
   ].join("-");
   const subagentSessionFile = join(sessionDir, `${timestamp}_${uuid}.jsonl`);
 
-  const surfacePreCreated = !!options?.surface;
-  const surface = options?.surface ?? createSubagentPane(params.name, worktree?.cwd);
-  launchState.surface = surface;
-  if (params.task) {
-    setPaneTask(surface, params.task);
-  }
-  if (!surfacePreCreated) {
-    await new Promise<void>((resolve) => setTimeout(resolve, getShellReadyDelayMs()));
-  }
-
   const launchBehavior = resolveLaunchBehavior(params, agentDefs);
 
+  // Every child opens a session file in the normal per-cwd session directory: header only
+  // (standalone), with parent lineage, or a full fork of the parent conversation.
+  const childSessionId = randomUUID();
   if (launchBehavior.seededSessionMode) {
     seedSubagentSessionFile({
       mode: launchBehavior.seededSessionMode,
@@ -1632,17 +1636,13 @@ async function launchSubagentInner(
       childSessionFile: subagentSessionFile,
       childCwd: targetCwdForSession,
     });
+  } else {
+    writeStandaloneSessionFile(subagentSessionFile, childSessionId, targetCwdForSession);
   }
-
-  const activityFile = getSubagentActivityFile(artifactDir, id);
-  if (driver.hasActivitySnapshots) {
-    mkdirSync(dirname(activityFile), { recursive: true });
-  }
-  const { inheritsConversationContext } = launchBehavior;
 
   // Build the task message
   // Only full-context fork mode inherits prior conversation state.
-  // Blank-session modes need the wrapper instructions and artifact-backed handoff.
+  // Blank-session modes need the wrapper instructions in the task.
   const modeHint = effectiveAutoExit
     ? "Complete your task autonomously."
     : "Complete your task. When finished, call the subagent_done tool. The user can interact with you at any time.";
@@ -1654,70 +1654,66 @@ async function launchSubagentInner(
   const systemPromptMode = agentDefs?.systemPromptMode;
   const identityInSystemPrompt = systemPromptMode && identity;
   const roleBlock = identity && !identityInSystemPrompt ? `\n\n${identity}` : "";
-  const effectiveModel = driver.formatModel(runtimePlan);
+  const task = worktree ? `${params.task}\n\n${worktreeTaskNote(worktree)}` : params.task;
+  const prompt = launchBehavior.taskDelivery === "direct"
+    ? task
+    : `${roleBlock}\n\n${modeHint}\n\n${task}\n\n${summaryInstruction}`;
+  let systemPromptFile: string | undefined;
+  if (identityInSystemPrompt && identity) {
+    systemPromptFile = join(artifactDir, `context/${slugName(params.name)}-sysprompt-${id}.md`);
+    mkdirSync(dirname(systemPromptFile), { recursive: true });
+    writeFileSync(systemPromptFile, identity, "utf8");
+  }
 
-  const built = driver.buildCommand({
-    params: worktree
-      ? { ...params, id, task: `${params.task}\n\n${worktreeTaskNote(worktree)}` }
-      : { ...params, id },
-    agentDefs,
-    runtimePlan,
-    effectiveModel,
-    effectiveThinking,
-    parentThinking,
-    surface,
-    artifactDir,
-    sessionDir,
-    subagentSessionFile,
-    effectiveCwd,
-    localAgentDir,
-    effectiveAutoExit,
-    effectiveInteractive,
-    inheritsConversationContext,
-    taskDelivery: launchBehavior.taskDelivery,
-    denySet,
-    identity,
-    identityInSystemPrompt: Boolean(identityInSystemPrompt),
-    systemPromptMode,
-    roleBlock,
-    modeHint,
-    summaryInstruction,
-    subagentsDir: SUBAGENTS_DIR,
-    shellQuote,
-  });
-
-  const launchScriptName = `${(params.name || "subagent")
-    .toLowerCase()
-    .replace(/[^a-z0-9\s-]/g, "")
-    .replace(/\s+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "") || "subagent"}-${id}.sh`;
-  const launchScriptFile = join(artifactDir, "subagent-scripts", launchScriptName);
-
-  runScriptInPane(surface, built.command, {
-    scriptPath: launchScriptFile,
-    scriptPreamble: (built.launchScriptPreamble ?? [
-      `# Subagent launch script for ${params.name}`,
-      `# Generated: ${new Date().toISOString()}`,
-      `# Surface: ${surface}`,
-    ]).join("\n"),
-  });
+  const reservation = surfaceMode() === "selector" ? paneSelector.reserve() : undefined;
+  const spec: LaunchSpec = {
+    scope: sessionId,
+    agentId: id,
+    attempt: 1,
+    taskId: "task-1",
+    prompt,
+    cwd: targetCwdForSession,
+    model: runtimePlan.model,
+    thinking: runtimePlan.thinking,
+    isolation: "profile",
+    agentDir: effectiveAgentDir,
+    ...subagentToolPolicy(params.tools ?? agentDefs?.tools, denySet),
+    userInput: "allowed",
+    exit: effectiveAutoExit ? "auto" : "tool",
+    skills: splitList(params.skills ?? agentDefs?.skills),
+    session: { kind: "file", path: subagentSessionFile },
+    env: subagentEnv({ name: params.name, agent: params.agent, id, denySet }),
+    ...(systemPromptFile
+      ? systemPromptMode === "replace"
+        ? { systemPrompt: systemPromptFile }
+        : { appendSystemPrompt: [systemPromptFile] }
+      : {}),
+    placement: reservation?.placement ?? (surfaceMode() === "tab" ? "tab" : "split-right"),
+    display: { label: params.name },
+  };
+  let handle: AgentHandle;
+  try {
+    handle = await subagentRuntime().launch(spec);
+  } catch (error) {
+    if (reservation) paneSelector.release(reservation);
+    throw error;
+  }
+  launchState.surface = handle.paneId;
+  if (reservation) paneSelector.adopt(reservation, handle.paneId, params.name);
+  if (params.task) setPaneTask(handle.paneId, params.task);
 
   const running: RunningSubagent = {
     id,
     name: params.name,
     task: params.task,
     agent: params.agent,
-    surface,
+    surface: handle.paneId,
+    handle,
     startTime,
-    sessionFile: built.sessionFile ?? subagentSessionFile,
-    launchScriptFile,
+    sessionFile: subagentSessionFile,
     interactive: effectiveInteractive,
     runtimePlan,
-    activityFile: driver.hasActivitySnapshots ? activityFile : undefined,
-    lifecycle: !driver.hasActivitySnapshots
-      ? markProcessRunning(createLifecycle(startTime), Date.now())
-      : createLifecycle(startTime),
+    lifecycle: createLifecycle(startTime),
     ...(worktree ? { worktree } : {}),
   };
 
@@ -1753,50 +1749,79 @@ async function launchSubagentInner(
  * the summary from the session file, cleans up the surface,
  * and removes the entry from runningSubagents.
  */
+/** Display-only lifecycle input from one runtime observation (plus Herdr's agent status). */
+function observeSubagentObservation(running: RunningSubagent, o: Observation, observedAt = Date.now()) {
+  ensureLifecycle(running);
+  observeRunningSubagent(running, observedAt);
+  if (o.kind === "missing") {
+    running.lifecycle = observePaneInspection(running.lifecycle, { kind: "missing", error: o.error }, observedAt);
+  } else if (o.kind === "unavailable" && !o.exited) {
+    running.lifecycle = observePaneInspection(running.lifecycle, { kind: "unavailable", error: o.error }, observedAt);
+  } else if (o.kind !== "unavailable") {
+    void inspectPane(running.surface)
+      .then((inspection) => {
+        if (inspection.kind !== "present") return;
+        running.lifecycle = observePaneInspection(running.lifecycle, inspection, Date.now());
+        updateWidget();
+      })
+      .catch(() => {});
+  }
+  updateWidget();
+}
+
+/** Completion record for the lifecycle from the supervised end of a runtime child. */
+function completionFromOutcome(outcome: SupervisedOutcome, name: string): CompletionResult {
+  const end = outcome.end;
+  if (end.kind === "ping") return { reason: "ping", exitCode: 0, ping: { name, message: end.message } };
+  if (end.kind === "error") return { reason: "error", exitCode: 1, errorMessage: end.errorMessage };
+  if (end.kind === "cancelled") return { reason: "error", exitCode: 1, errorMessage: "Subagent cancelled." };
+  return { reason: "done", exitCode: 0 };
+}
+
+/**
+ * Supervise a launched subagent through the agent runtime until it ends, extract the summary from its
+ * session file and close its pane (never forced).
+ */
 async function watchSubagent(
   running: RunningSubagent,
   signal: AbortSignal,
 ): Promise<SubagentResult> {
-  const { name, task, surface, startTime, sessionFile } = running;
+  const { name, task, startTime, sessionFile } = running;
+  if (!running.handle) throw new Error(`Subagent "${name}" has no runtime handle`);
 
   try {
-    const result = await waitForCompletion(signal, {
-      intervalMs: 1000,
-      sessionFile,
-      readTerminalTail: () => readPaneAsync(surface, 5),
-      inspectPane: async () => inspectPane(surface),
-      onPaneInspection: (inspection: PaneInspection, observedAt: number) => {
-        ensureLifecycle(running);
-        running.lifecycle = observePaneInspection(running.lifecycle, inspection, observedAt);
-        updateWidget();
-      },
-      onTick() {
-        observeRunningSubagent(running);
-      },
+    const outcome = await superviseSubagent({
+      runtime: subagentRuntime(),
+      handle: () => running.handle!,
+      signal,
+      onObservation: (o) => observeSubagentObservation(running, o),
     });
-
+    paneSelector.forget(running.surface);
+    const result = completionFromOutcome(outcome, name);
     const detectedAt = Date.now();
     running.lifecycle = markCompletionDetected(running.lifecycle, result, detectedAt);
     updateWidget();
     const elapsed = Math.floor((detectedAt - startTime) / 1000);
 
-    // Pi subagent result extraction
+    if (outcome.end.kind === "cancelled") {
+      running.lifecycle = markFailed(running.lifecycle, "Subagent cancelled.", Date.now(), 1);
+      return { name, task, summary: "Subagent cancelled.", exitCode: 1, elapsed, error: "cancelled", sessionFile };
+    }
+
     let summary: string;
+    const fallback = result.errorMessage
+      ? `Subagent error: ${result.errorMessage}`
+      : result.exitCode !== 0
+        ? `Sub-agent exited with code ${result.exitCode}`
+        : "Sub-agent exited without output";
     if (existsSync(sessionFile)) {
-      const allEntries = getNewEntries(sessionFile, 0);
-      const observed = findObservedSessionRuntime(allEntries);
+      const allEntries = getNewEntries(sessionFile, running.entryCountBefore ?? 0);
+      const observed = findObservedSessionRuntime(getNewEntries(sessionFile, 0));
       if (running.runtimePlan && observed.provider && observed.modelId) {
         const observedModel = `${observed.provider}/${observed.modelId}`;
-        const observedThinking =
-          observed.thinking === "off" ||
-          observed.thinking === "minimal" ||
-          observed.thinking === "low" ||
-          observed.thinking === "medium" ||
-          observed.thinking === "high" ||
-          observed.thinking === "xhigh" ||
-          observed.thinking === "max"
-            ? observed.thinking
-            : undefined;
+        const observedThinking = (THINKING_LEVELS as readonly string[]).includes(observed.thinking ?? "")
+          ? (observed.thinking as ThinkingLevel)
+          : undefined;
         const mismatch = observedModel !== running.runtimePlan.model
           ? `Resolved model ${running.runtimePlan.model} but child reported ${observedModel}`
           : undefined;
@@ -1810,22 +1835,14 @@ async function watchSubagent(
           ...(mismatch ? { runtimeMismatch: mismatch } : {}),
         };
       }
-      summary =
-        findLastAssistantMessage(allEntries) ??
-        (result.errorMessage
-          ? `Subagent error: ${result.errorMessage}`
-          : result.exitCode !== 0
-            ? `Sub-agent exited with code ${result.exitCode}`
-            : "Sub-agent exited without output");
+      summary = findLastAssistantMessage(allEntries) ?? fallback;
     } else {
-      summary = result.errorMessage
-        ? `Subagent error: ${result.errorMessage}`
-        : result.exitCode !== 0
-          ? `Sub-agent exited with code ${result.exitCode}`
-          : "Sub-agent exited without output";
+      summary = fallback;
+    }
+    if (!outcome.closed && outcome.closeError) {
+      summary += `\n\n(The subagent pane was left open: ${outcome.closeError})`;
     }
 
-    closePane(surface);
     running.lifecycle = result.exitCode === 0
       ? markCompleted(running.lifecycle, Date.now())
       : markFailed(running.lifecycle, result.errorMessage ?? summary, Date.now(), result.exitCode);
@@ -1841,28 +1858,9 @@ async function watchSubagent(
       ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
     };
   } catch (err: any) {
-    try {
-      closePane(surface);
-    } catch {}
-    running.lifecycle = markFailed(
-      running.lifecycle,
-      signal.aborted ? "Subagent cancelled." : err?.message ?? String(err),
-      Date.now(),
-      1,
-    );
+    paneSelector.forget(running.surface);
+    running.lifecycle = markFailed(running.lifecycle, err?.message ?? String(err), Date.now(), 1);
     updateWidget();
-
-    if (signal.aborted) {
-      return {
-        name,
-        task,
-        summary: "Subagent cancelled.",
-        exitCode: 1,
-        elapsed: Math.floor((Date.now() - startTime) / 1000),
-        error: "cancelled",
-        sessionFile,
-      };
-    }
     return {
       name,
       task,
@@ -1870,6 +1868,7 @@ async function watchSubagent(
       exitCode: 1,
       elapsed: Math.floor((Date.now() - startTime) / 1000),
       error: err?.message ?? String(err),
+      sessionFile,
     };
   }
 }
@@ -2173,7 +2172,6 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             task: params.task,
             agent: params.agent,
             sessionFile: running.sessionFile,
-            launchScriptFile: running.launchScriptFile,
             model: running.runtimePlan?.model,
             thinking: running.runtimePlan?.thinking,
             runtimePlan: running.runtimePlan,
@@ -2423,7 +2421,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         const name = params.name ?? "Resume";
         const { autoExit, interactive } = resolveResumeLaunchBehavior(params);
         const startTime = Date.now();
-        const id = Math.random().toString(16).slice(2, 10);
+        const id = randomBytes(12).toString("hex");
 
         if (!isTerminalAvailable()) {
           return muxUnavailableResult();
@@ -2435,6 +2433,16 @@ export default function subagentsExtension(pi: ExtensionAPI) {
               { type: "text", text: `Error: session file not found: ${params.sessionPath}` },
             ],
             details: { error: "session not found" },
+          };
+        }
+        // Never two live children on the same session file.
+        const live = [...runningSubagents.values()].find((agent) => agent.sessionFile === params.sessionPath);
+        if (live) {
+          return {
+            content: [
+              { type: "text", text: `Error: session is still open in the running subagent "${live.name}".` },
+            ],
+            details: { error: "session in use", id: live.id },
           };
         }
 
@@ -2451,74 +2459,67 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         // Record entry count before resuming so we can extract new messages
         const entryCountBefore = getNewEntries(params.sessionPath, 0).length;
 
-        const surface = createSubagentPane(name, worktree?.cwd);
-        if (params.message) {
-          setPaneTask(surface, params.message);
+        // The resumed child keeps the session's own model/thinking (as `pi --session` would).
+        const observed = findObservedSessionRuntime(getNewEntries(params.sessionPath, 0));
+        const parentThinking = pi.getThinkingLevel();
+        const model = observed.provider && observed.modelId
+          ? `${observed.provider}/${observed.modelId}`
+          : ctx.model
+            ? `${ctx.model.provider}/${ctx.model.id}`
+            : undefined;
+        if (!model) {
+          return {
+            content: [{ type: "text", text: "Error: cannot determine the model of the resumed session." }],
+            details: { error: "unknown model" },
+          };
         }
-        await new Promise<void>((resolve) => setTimeout(resolve, getShellReadyDelayMs()));
-
-        const sessionId = ctx.sessionManager.getSessionId();
-        const artifactDir = getArtifactDir(ctx.sessionManager.getSessionDir(), sessionId);
-        const activityFile = getSubagentActivityFile(artifactDir, id);
-        mkdirSync(dirname(activityFile), { recursive: true });
-
-        let resumeMsgFile: string | undefined;
-        if (params.message) {
-          const msgTimestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-          resumeMsgFile = join(
-            artifactDir,
-            "subagent-resume",
-            `${name
-              .toLowerCase()
-              .replace(/[^a-z0-9\s-]/g, "")
-              .replace(/\s+/g, "-")
-              .replace(/-+/g, "-")
-              .replace(/^-|-$/g, "") || "resume"}-${msgTimestamp}.md`,
-          );
-          mkdirSync(dirname(resumeMsgFile), { recursive: true });
-          writeFileSync(resumeMsgFile, params.message, "utf8");
+        const thinking = (THINKING_LEVELS as readonly string[]).includes(observed.thinking ?? "")
+          ? (observed.thinking as ThinkingLevel)
+          : (parentThinking as ThinkingLevel);
+        const resumeCwd = worktree?.cwd ?? ctx.cwd;
+        const localAgentDir = join(resumeCwd, ".pi", "agent");
+        const reservation = surfaceMode() === "selector" ? paneSelector.reserve() : undefined;
+        let handle: AgentHandle;
+        try {
+          handle = await subagentRuntime().launch({
+            scope: ctx.sessionManager.getSessionId(),
+            agentId: id,
+            attempt: 1,
+            taskId: "task-1",
+            prompt: params.message ?? "",
+            cwd: resumeCwd,
+            model,
+            thinking,
+            isolation: "profile",
+            agentDir: existsSync(localAgentDir) ? localAgentDir : getAgentConfigDir(),
+            userInput: "allowed",
+            exit: autoExit ? "auto" : "tool",
+            session: { kind: "file", path: params.sessionPath },
+            env: subagentEnv({ name, id }),
+            placement: reservation?.placement ?? (surfaceMode() === "tab" ? "tab" : "split-right"),
+            display: { label: name },
+          });
+        } catch (error) {
+          if (reservation) paneSelector.release(reservation);
+          const message = error instanceof Error ? error.message : String(error);
+          return {
+            content: [{ type: "text", text: `Error: resume failed: ${message}` }],
+            details: { error: message },
+          };
         }
-
-        const command = buildResumeCommand({
-          sessionPath: params.sessionPath,
-          name,
-          id,
-          activityFile,
-          autoExit,
-          resumeMsgFile,
-          ...(worktree ? { cwd: worktree.cwd } : {}),
-        });
-        const launchScriptFile = join(
-          artifactDir,
-          "subagent-scripts",
-          `${name
-            .toLowerCase()
-            .replace(/[^a-z0-9\s-]/g, "")
-            .replace(/\s+/g, "-")
-            .replace(/-+/g, "-")
-            .replace(/^-|-$/g, "") || "resume"}-resume-${Date.now()}.sh`,
-        );
-        runScriptInPane(surface, command, {
-          scriptPath: launchScriptFile,
-          scriptPreamble: [
-            `# Subagent resume script for ${name}`,
-            `# Generated: ${new Date().toISOString()}`,
-            `# Session: ${params.sessionPath}`,
-            `# Surface: ${surface}`,
-            ...(resumeMsgFile ? [`# Resume message file: ${resumeMsgFile}`] : []),
-          ].join("\n"),
-        });
+        if (reservation) paneSelector.adopt(reservation, handle.paneId, name);
+        if (params.message) setPaneTask(handle.paneId, params.message);
 
         // Register as a running subagent for widget tracking
         const running: RunningSubagent = {
           id,
           name,
           task: params.message ?? "resumed session",
-          surface,
+          surface: handle.paneId,
+          handle,
           startTime,
           sessionFile: params.sessionPath,
-          launchScriptFile,
-          activityFile,
+          entryCountBefore,
           interactive,
           runtimePlan: undefined,
           lifecycle: createLifecycle(startTime),
@@ -2636,7 +2637,6 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             id,
             name,
             sessionPath: params.sessionPath,
-            launchScriptFile,
             ...(worktree ? { worktree: worktreeDetails(worktree) } : {}),
             status: "started",
           },
@@ -2750,7 +2750,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         return;
       }
       paneSelector.state.owned.set(chosen.surface, chosen.name);
-      paneSelector.select(chosen.surface);
+      await paneSelector.select(chosen.surface, subagentPaneMover);
       updateWidget();
     } catch (error) {
       ctx.ui.notify(`Unable to switch subagent: ${error instanceof Error ? error.message : String(error)}`, "error");

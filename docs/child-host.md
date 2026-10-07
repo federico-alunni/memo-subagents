@@ -4,17 +4,19 @@ A pi child runs in a new Herdr pane. It does **not** inherit the parent pi proce
 
 | Variable | Format | Effect |
 | --- | --- | --- |
-| `MEMO_SUBAGENTS_CHILD_EXTENSIONS` | `:`-separated **absolute** paths | Each path is passed to the child as `-e <path>`, right after the package's `subagent-done.ts`. Relative or empty entries are ignored; duplicates are removed. |
-| `MEMO_SUBAGENTS_CHILD_ENV` | `,`-separated variable names | Each listed variable that is defined in the parent process is forwarded into the child command as `NAME=value` (shell-quoted), right after `PI_CODING_AGENT_DIR`. Invalid names, undefined variables, `PI_*` and `MEMO_SUBAGENTS_*` names are ignored. |
+| `MEMO_SUBAGENTS_CHILD_EXTENSIONS` | `:`-separated **absolute** paths | Each path is passed to the child as `-e <path>`, right after the runtime child extension. Relative or empty entries are ignored; duplicates are removed. |
+| `MEMO_SUBAGENTS_CHILD_ENV` | `,`-separated variable names | Each listed variable that is defined in the parent process is forwarded into the child command as `NAME=value` (shell-quoted). Invalid names, undefined variables, `PI_*` and `MEMO_SUBAGENTS_*` names are ignored. |
 
 They apply to:
 
-- fresh pi launches (`subagent` with the pi driver), and
-- `subagent_resume` (the resumed child keeps the same host extensions and variables).
+- fresh launches (`subagent`), and
+- `subagent_resume` (the resumed child keeps the same host extensions and variables),
+
+through the agent runtime (`hostCompositionFromEnv()`, see [runtime.md](runtime.md)).
 
 Only these two variables are read; in particular the former `IR_CHILD_EXTENSIONS` / `IR_CHILD_ENV` of the vendored pi-issue-round copy are **ignored**.
 
-Without the variables, launch and resume commands are exactly as before.
+Without the variables, children get no extra extension or variable.
 
 ## When you need it
 

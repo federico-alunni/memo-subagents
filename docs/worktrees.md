@@ -19,7 +19,7 @@ Without `worktree: true` nothing changes: launched commands are byte-identical t
 - **Source directory**: the directory the child would otherwise run in — `cwd` parameter, else the agent's frontmatter `cwd`, else the session cwd. It must be inside a git work tree.
 - **Location** (default): next to the repository, `<dirname(toplevel)>/<basename(toplevel)>-memo-worktrees/<slug>-<id8>`. With `config.json` → `"worktrees": { "root": "/abs/dir" }` it becomes `<root>/<repoName>/<slug>-<id8>`. A root inside the source checkout is refused.
 - **Child cwd**: the same sub-path inside the worktree. Spawning with `cwd: "repo/packages/api"` starts the child in `<worktree>/packages/api` (or the worktree root if that directory does not exist at the base commit — reported as a warning).
-- The child's pi session directory, the seeded session header (`lineage-only` / `fork`), `.pi/agent` lookup and the Herdr pane cwd all follow the worktree cwd. Launch artifacts stay in the parent session's artifact directory.
+- The child's pi session directory, the seeded session header (`lineage-only` / `fork`), `.pi/agent` lookup and the Herdr pane cwd all follow the worktree cwd. Runtime evidence stays in the private runtime state directory (outside the worktree).
 - The task gets a short note: work in `<cwd>` on branch `<branch>` (base `<sha7>`), commit there, do not modify the original checkout, nothing is merged automatically.
 
 ## Creation and safety
@@ -28,7 +28,7 @@ All git calls use `execFile` (no shell), `-c core.fsmonitor=false`, `GIT_TERMINA
 
 Preflight (nothing is created if any check fails): source inside a work tree; repository has commits; `check-ref-format refs/heads/<branch>`; branch does not exist; base resolves with `rev-parse --verify <base>^{commit}`; path does not exist and is not registered in `git worktree list --porcelain -z`.
 
-Then `git worktree add -b <branch> <path> <baseSha>` and a read-back (registered, on the branch, `HEAD == baseSha`). If `add` fails or the read-back disagrees (e.g. a failing `post-checkout` hook), or the pane/launch script fails afterwards, the worktree is rolled back with `git worktree remove <path>` (never `--force`) and `git update-ref -d refs/heads/<branch> <baseSha>` — the branch is deleted only if it still points at the base.
+Then `git worktree add -b <branch> <path> <baseSha>` and a read-back (registered, on the branch, `HEAD == baseSha`). If `add` fails or the read-back disagrees (e.g. a failing `post-checkout` hook), or the runtime launch definitely fails afterwards (`unsupported` / `launch_failed`), the worktree is rolled back with `git worktree remove <path>` (never `--force`) and `git update-ref -d refs/heads/<branch> <baseSha>` — the branch is deleted only if it still points at the base. An uncertain launch (`launch_uncertain`) keeps the worktree and any pane for inspection: a child may already be running there.
 
 Shallow clones are allowed (warning). A detached `HEAD` in the source is fine (the base is a SHA).
 
