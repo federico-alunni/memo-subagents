@@ -181,7 +181,6 @@ export class PiHarnessDriver implements HarnessDriver {
     return {
       command,
       sessionFile: subagentSessionFile,
-      cli: "pi",
       launchScriptPreamble: [
         `# Subagent launch script for ${params.name}`,
         `# Generated: ${new Date().toISOString()}`,

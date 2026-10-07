@@ -1,6 +1,6 @@
 # Worktree isolation
 
-`subagent({ …, worktree: true })` runs the child in a fresh `git worktree` on a new branch, so several children can edit the same repository without touching each other or your checkout. It works with every harness driver (pi, claude, codex, opencode, grok, generic) because it only changes the child's working directory.
+`subagent({ …, worktree: true })` runs the child in a fresh `git worktree` on a new branch, so several children can edit the same repository without touching each other or your checkout. It only changes the child's working directory.
 
 Without `worktree: true` nothing changes: launched commands are byte-identical to the previous behaviour (covered by `test/worktree-launch.test.ts`).
 

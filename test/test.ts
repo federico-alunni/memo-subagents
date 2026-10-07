@@ -1397,32 +1397,17 @@ describe("subagent discovery", () => {
     });
   });
 
-  it("strips surrounding quotes from a quoted command: frontmatter value", async () => {
+  it("strips surrounding quotes from a quoted frontmatter value", async () => {
     await withIsolatedAgentEnv(async ({ projectAgentsDir }) => {
       writeAgentFile(
         projectAgentsDir,
-        "quoted-command-test-agent",
-        [
-          "name: quoted-command-test-agent",
-          `command: "aider --model {model} --message {task}"`,
-        ].join("\n"),
+        "quoted-value-test-agent",
+        ["name: quoted-value-test-agent", `model: "anthropic/claude-sonnet-4-5"`, "thinking: high"].join("\n"),
       );
 
-      const loaded = testApi.loadAgentDefaults("quoted-command-test-agent");
-      assert.equal(loaded?.commandTemplate, "aider --model {model} --message {task}");
-    });
-  });
-
-  it("leaves an unquoted command: frontmatter value untouched", async () => {
-    await withIsolatedAgentEnv(async ({ projectAgentsDir }) => {
-      writeAgentFile(
-        projectAgentsDir,
-        "unquoted-command-test-agent",
-        ["name: unquoted-command-test-agent", "command: aider --model {model} --message {task}"].join("\n"),
-      );
-
-      const loaded = testApi.loadAgentDefaults("unquoted-command-test-agent");
-      assert.equal(loaded?.commandTemplate, "aider --model {model} --message {task}");
+      const loaded = testApi.loadAgentDefaults("quoted-value-test-agent");
+      assert.equal(loaded?.model, "anthropic/claude-sonnet-4-5");
+      assert.equal(loaded?.thinking, "high");
     });
   });
 
@@ -2657,31 +2642,6 @@ describe("subagent interruption", () => {
 
       assert.deepEqual(surfaces, ["pane-1", "pane-1"]);
       assert.equal(runningMap.has("a1"), true);
-    } finally {
-      runningMap.clear();
-    }
-  });
-
-  it("rejects Claude-backed interrupt requests before delivery", () => {
-    const testApi = (subagentsModule as any).__test__;
-    const runningMap = testApi.runningSubagents as Map<string, any>;
-    let delivered = false;
-    runningMap.clear();
-
-    try {
-      runningMap.set("a1", makeRunning({ cli: "claude" }));
-
-      const result = testApi.handleSubagentInterrupt({ name: "Worker" }, () => {
-        delivered = true;
-      });
-
-      assert.equal(delivered, false);
-      assert.match(result.content[0].text, /currently supported only for Pi-backed subagents/i);
-      assert.deepEqual(result.details, {
-        error: "claude interrupt unsupported",
-        id: "a1",
-        name: "Worker",
-      });
     } finally {
       runningMap.clear();
     }

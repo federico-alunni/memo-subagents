@@ -25,7 +25,8 @@
     "index.ts: worktree / worktreeBranch / worktreeBase parameters, dirty-source prompt, details.worktree in results, worktree-aware resume, subagent_worktrees tool (in SPAWNING_TOOLS), /subagent-worktrees command, widget/renderer badges.",
     "terminal.ts / herdr.ts: optional pane cwd argument (defaults to process.cwd() as before).",
     "Symbol.for('pi-subagents/*') runtime keys are unchanged; therefore never load together with pi-herdr-subagents.",
-    "Tests live in test/ (upstream layout); test/integration copied from upstream v0.2.0 as opt-in (npm run test:integration)."
+    "Tests live in test/ (upstream layout); test/integration copied from upstream v0.2.0 as opt-in (npm run test:integration).",
+    "Pi only: harness/drivers/{claude,codex,opencode,grok,generic}.ts, harness/pane-summary.ts and plugin/ (Claude Code hook) removed; registry resolves only pi and rejects other `cli` values; resumeSessionId/claudeSessionId removed from index.ts."
   ],
   "files": [
     {
@@ -74,53 +75,8 @@
       "status": "identical-to-upstream"
     },
     {
-      "path": "pi-extension/subagents/harness/drivers/claude.ts",
-      "sha256": "d7817e71a2e6d5f9c7233129015b8ccf3a1a138ca3a2b447b8fb1fec35f3643c",
-      "upstreamV020Sha256": "d7817e71a2e6d5f9c7233129015b8ccf3a1a138ca3a2b447b8fb1fec35f3643c",
-      "installedNpmSha256": "d7817e71a2e6d5f9c7233129015b8ccf3a1a138ca3a2b447b8fb1fec35f3643c",
-      "localPackageSha256": "d7817e71a2e6d5f9c7233129015b8ccf3a1a138ca3a2b447b8fb1fec35f3643c",
-      "piIssueRoundVendoredSha256": "d7817e71a2e6d5f9c7233129015b8ccf3a1a138ca3a2b447b8fb1fec35f3643c",
-      "status": "identical-to-upstream"
-    },
-    {
-      "path": "pi-extension/subagents/harness/drivers/codex.ts",
-      "sha256": "3b52d407eee90bf77ed4414b7dea81a0996578ce370435f94829b780dbc25014",
-      "upstreamV020Sha256": "3b52d407eee90bf77ed4414b7dea81a0996578ce370435f94829b780dbc25014",
-      "installedNpmSha256": "3b52d407eee90bf77ed4414b7dea81a0996578ce370435f94829b780dbc25014",
-      "localPackageSha256": "3b52d407eee90bf77ed4414b7dea81a0996578ce370435f94829b780dbc25014",
-      "piIssueRoundVendoredSha256": "3b52d407eee90bf77ed4414b7dea81a0996578ce370435f94829b780dbc25014",
-      "status": "identical-to-upstream"
-    },
-    {
-      "path": "pi-extension/subagents/harness/drivers/generic.ts",
-      "sha256": "38bada1019da14e8cab557e62215a3c9e408d347da819ea3541a3f101a90f10e",
-      "upstreamV020Sha256": "38bada1019da14e8cab557e62215a3c9e408d347da819ea3541a3f101a90f10e",
-      "installedNpmSha256": "38bada1019da14e8cab557e62215a3c9e408d347da819ea3541a3f101a90f10e",
-      "localPackageSha256": "38bada1019da14e8cab557e62215a3c9e408d347da819ea3541a3f101a90f10e",
-      "piIssueRoundVendoredSha256": "38bada1019da14e8cab557e62215a3c9e408d347da819ea3541a3f101a90f10e",
-      "status": "identical-to-upstream"
-    },
-    {
-      "path": "pi-extension/subagents/harness/drivers/grok.ts",
-      "sha256": "6a8d3fab03875b3775c52c9907601b0cf1e13908de0b0f402c922c5b577ff08f",
-      "upstreamV020Sha256": "6a8d3fab03875b3775c52c9907601b0cf1e13908de0b0f402c922c5b577ff08f",
-      "installedNpmSha256": "6a8d3fab03875b3775c52c9907601b0cf1e13908de0b0f402c922c5b577ff08f",
-      "localPackageSha256": "6a8d3fab03875b3775c52c9907601b0cf1e13908de0b0f402c922c5b577ff08f",
-      "piIssueRoundVendoredSha256": "6a8d3fab03875b3775c52c9907601b0cf1e13908de0b0f402c922c5b577ff08f",
-      "status": "identical-to-upstream"
-    },
-    {
-      "path": "pi-extension/subagents/harness/drivers/opencode.ts",
-      "sha256": "00257b461565fa2e32a961c6abf19dca0279cc37ea6c2932f61a7f43311608a9",
-      "upstreamV020Sha256": "00257b461565fa2e32a961c6abf19dca0279cc37ea6c2932f61a7f43311608a9",
-      "installedNpmSha256": "00257b461565fa2e32a961c6abf19dca0279cc37ea6c2932f61a7f43311608a9",
-      "localPackageSha256": "00257b461565fa2e32a961c6abf19dca0279cc37ea6c2932f61a7f43311608a9",
-      "piIssueRoundVendoredSha256": "00257b461565fa2e32a961c6abf19dca0279cc37ea6c2932f61a7f43311608a9",
-      "status": "identical-to-upstream"
-    },
-    {
       "path": "pi-extension/subagents/harness/drivers/pi.ts",
-      "sha256": "f576395f0214fd722332504fbff5949181a4da97b45f866a45bc872015811bc9",
+      "sha256": "6b9a232cbe8c627b84bedfc5ae176dd84f92421129b7c8077af97af3f2738e74",
       "upstreamV020Sha256": "e5daff9e638f7db4a015771ab0f2dd6c6cd48871ceca9817e9d9705d43e8684a",
       "installedNpmSha256": "e5daff9e638f7db4a015771ab0f2dd6c6cd48871ceca9817e9d9705d43e8684a",
       "localPackageSha256": "e5daff9e638f7db4a015771ab0f2dd6c6cd48871ceca9817e9d9705d43e8684a",
@@ -129,43 +85,34 @@
     },
     {
       "path": "pi-extension/subagents/harness/index.ts",
-      "sha256": "b2c9be3ca904f43881ee42396f577c3d9222c27f8c3835f303d7ec2091b338b4",
+      "sha256": "3f0378bf1a0425f1360110a11bc6848e11d04377003cc3d7d0bc0527c7d866e7",
       "upstreamV020Sha256": "b2c9be3ca904f43881ee42396f577c3d9222c27f8c3835f303d7ec2091b338b4",
       "installedNpmSha256": "b2c9be3ca904f43881ee42396f577c3d9222c27f8c3835f303d7ec2091b338b4",
       "localPackageSha256": "b2c9be3ca904f43881ee42396f577c3d9222c27f8c3835f303d7ec2091b338b4",
       "piIssueRoundVendoredSha256": "b2c9be3ca904f43881ee42396f577c3d9222c27f8c3835f303d7ec2091b338b4",
-      "status": "identical-to-upstream"
-    },
-    {
-      "path": "pi-extension/subagents/harness/pane-summary.ts",
-      "sha256": "93ac5d9c2964ab29509fc13f2b84f53707d8e40532608fcd56a68b0360ad02ef",
-      "upstreamV020Sha256": "93ac5d9c2964ab29509fc13f2b84f53707d8e40532608fcd56a68b0360ad02ef",
-      "installedNpmSha256": "93ac5d9c2964ab29509fc13f2b84f53707d8e40532608fcd56a68b0360ad02ef",
-      "localPackageSha256": "93ac5d9c2964ab29509fc13f2b84f53707d8e40532608fcd56a68b0360ad02ef",
-      "piIssueRoundVendoredSha256": "93ac5d9c2964ab29509fc13f2b84f53707d8e40532608fcd56a68b0360ad02ef",
-      "status": "identical-to-upstream"
+      "status": "modified"
     },
     {
       "path": "pi-extension/subagents/harness/registry.ts",
-      "sha256": "da9d7ea322cde84f2dae0cc5498007d26339bd897cf4af0acdc6d1e6d0ed3dd4",
+      "sha256": "09bc6de26324d391a124ed08528f71488fc03a5ad4657cfd71a2c9b254f16e6f",
       "upstreamV020Sha256": "da9d7ea322cde84f2dae0cc5498007d26339bd897cf4af0acdc6d1e6d0ed3dd4",
       "installedNpmSha256": "da9d7ea322cde84f2dae0cc5498007d26339bd897cf4af0acdc6d1e6d0ed3dd4",
       "localPackageSha256": "da9d7ea322cde84f2dae0cc5498007d26339bd897cf4af0acdc6d1e6d0ed3dd4",
       "piIssueRoundVendoredSha256": "da9d7ea322cde84f2dae0cc5498007d26339bd897cf4af0acdc6d1e6d0ed3dd4",
-      "status": "identical-to-upstream"
+      "status": "modified"
     },
     {
       "path": "pi-extension/subagents/harness/types.ts",
-      "sha256": "4523a135b2a88df8a6cc4f3b6989248ceb491ce489ddb8f6850eeb194b51dbc2",
+      "sha256": "ee930d55c4438177a79440100dc7e92e40caea763ae97ffbc751ed770cabd66b",
       "upstreamV020Sha256": "4523a135b2a88df8a6cc4f3b6989248ceb491ce489ddb8f6850eeb194b51dbc2",
       "installedNpmSha256": "4523a135b2a88df8a6cc4f3b6989248ceb491ce489ddb8f6850eeb194b51dbc2",
       "localPackageSha256": "4523a135b2a88df8a6cc4f3b6989248ceb491ce489ddb8f6850eeb194b51dbc2",
       "piIssueRoundVendoredSha256": "4523a135b2a88df8a6cc4f3b6989248ceb491ce489ddb8f6850eeb194b51dbc2",
-      "status": "identical-to-upstream"
+      "status": "modified"
     },
     {
       "path": "pi-extension/subagents/herdr.ts",
-      "sha256": "538392aafaf1130e89ed2ece96de020e2283e7c4879dbd110e25e9237c6a79a9",
+      "sha256": "0b53123df41573896521d7180972426728da870b56e373b12f2da70b55f58adf",
       "upstreamV020Sha256": "276f18ae80356a957746ace2e19302b269deb6b294390ca50b800b1945b36663",
       "installedNpmSha256": "276f18ae80356a957746ace2e19302b269deb6b294390ca50b800b1945b36663",
       "localPackageSha256": "276f18ae80356a957746ace2e19302b269deb6b294390ca50b800b1945b36663",
@@ -174,7 +121,7 @@
     },
     {
       "path": "pi-extension/subagents/index.ts",
-      "sha256": "9ad02adf80158b2c3c18ee38080ca709984e34045fd80ac280dbe1b6ae57bc34",
+      "sha256": "967053d0e66595674f236f35d84d09b4d61b6ba4fd640fa000f5b27271fca601",
       "upstreamV020Sha256": "73a9ea0ab5ecd0cc13060697e00f8e9ca70fc95251090611e3bbea73be46fe93",
       "installedNpmSha256": "73a9ea0ab5ecd0cc13060697e00f8e9ca70fc95251090611e3bbea73be46fe93",
       "localPackageSha256": "d6917cb3a443fd32e2cedc9fca529d9ebc995903512b584cf4dc8de669ba61b4",
@@ -209,40 +156,13 @@
       "status": "added-by-local-selector"
     },
     {
-      "path": "pi-extension/subagents/plugin/.claude-plugin/plugin.json",
-      "sha256": "ead558d34c2b3bc81d595c215d1f10b8dcfa984795495fcb6b39a8d7002cbf49",
-      "upstreamV020Sha256": "ead558d34c2b3bc81d595c215d1f10b8dcfa984795495fcb6b39a8d7002cbf49",
-      "installedNpmSha256": "ead558d34c2b3bc81d595c215d1f10b8dcfa984795495fcb6b39a8d7002cbf49",
-      "localPackageSha256": "ead558d34c2b3bc81d595c215d1f10b8dcfa984795495fcb6b39a8d7002cbf49",
-      "piIssueRoundVendoredSha256": "ead558d34c2b3bc81d595c215d1f10b8dcfa984795495fcb6b39a8d7002cbf49",
-      "status": "identical-to-upstream"
-    },
-    {
-      "path": "pi-extension/subagents/plugin/hooks/hooks.json",
-      "sha256": "59aef2d4704a87e610f235d3c4a8c021b92f0e334b2e97931f15dfd9b0368697",
-      "upstreamV020Sha256": "59aef2d4704a87e610f235d3c4a8c021b92f0e334b2e97931f15dfd9b0368697",
-      "installedNpmSha256": "59aef2d4704a87e610f235d3c4a8c021b92f0e334b2e97931f15dfd9b0368697",
-      "localPackageSha256": "59aef2d4704a87e610f235d3c4a8c021b92f0e334b2e97931f15dfd9b0368697",
-      "piIssueRoundVendoredSha256": "59aef2d4704a87e610f235d3c4a8c021b92f0e334b2e97931f15dfd9b0368697",
-      "status": "identical-to-upstream"
-    },
-    {
-      "path": "pi-extension/subagents/plugin/hooks/on-stop.sh",
-      "sha256": "69c548fd0fa54eefc5954fe05d2d8a26d68ef3f93f3c4ab1f644ab6ce36182f7",
-      "upstreamV020Sha256": "69c548fd0fa54eefc5954fe05d2d8a26d68ef3f93f3c4ab1f644ab6ce36182f7",
-      "installedNpmSha256": "69c548fd0fa54eefc5954fe05d2d8a26d68ef3f93f3c4ab1f644ab6ce36182f7",
-      "localPackageSha256": "69c548fd0fa54eefc5954fe05d2d8a26d68ef3f93f3c4ab1f644ab6ce36182f7",
-      "piIssueRoundVendoredSha256": "69c548fd0fa54eefc5954fe05d2d8a26d68ef3f93f3c4ab1f644ab6ce36182f7",
-      "status": "identical-to-upstream"
-    },
-    {
       "path": "pi-extension/subagents/runtime-routing.ts",
-      "sha256": "e25cb5ffe6a4a876b0e34d9cc7025e6fd76e65c58faea755ed733035cde8dddb",
+      "sha256": "176cb5274930be7ae158593e5793b5007a1863df6870ce31c52df60030f45d19",
       "upstreamV020Sha256": "e25cb5ffe6a4a876b0e34d9cc7025e6fd76e65c58faea755ed733035cde8dddb",
       "installedNpmSha256": "e25cb5ffe6a4a876b0e34d9cc7025e6fd76e65c58faea755ed733035cde8dddb",
       "localPackageSha256": "e25cb5ffe6a4a876b0e34d9cc7025e6fd76e65c58faea755ed733035cde8dddb",
       "piIssueRoundVendoredSha256": "e25cb5ffe6a4a876b0e34d9cc7025e6fd76e65c58faea755ed733035cde8dddb",
-      "status": "identical-to-upstream"
+      "status": "modified"
     },
     {
       "path": "pi-extension/subagents/session.ts",
@@ -273,7 +193,7 @@
     },
     {
       "path": "pi-extension/subagents/terminal.ts",
-      "sha256": "0a10528b6d19172ca0499a62d980abbad2c238170ea9c4df17198703b091cdcb",
+      "sha256": "c751fd233caddab7f7b16956e56338804f82db7950208aa2f469cfbee8854d2c",
       "upstreamV020Sha256": "569bc906653e6b0025e94d2df736de40cadb3bf3078e629b64334fa7678330a5",
       "installedNpmSha256": "e71de312aea79998cdb3f55d6bb9a4693e3255c3b8809727e8b2369c61c3c04a",
       "localPackageSha256": "cddfbefbb7a78e48d6fae2989ef6e6874fe164fd61c622dd1d37b4fbd917d29f",

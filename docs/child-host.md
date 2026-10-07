@@ -12,7 +12,7 @@ They apply to:
 - fresh pi launches (`subagent` with the pi driver), and
 - `subagent_resume` (the resumed child keeps the same host extensions and variables).
 
-Other harness drivers (claude, codex, …) are not affected. Only these two variables are read; in particular the former `IR_CHILD_EXTENSIONS` / `IR_CHILD_ENV` of the vendored pi-issue-round copy are **ignored**.
+Only these two variables are read; in particular the former `IR_CHILD_EXTENSIONS` / `IR_CHILD_ENV` of the vendored pi-issue-round copy are **ignored**.
 
 Without the variables, launch and resume commands are exactly as before.
 

@@ -193,12 +193,6 @@ const SubagentParams = Type.Object({
         "Mark the subagent as interactive (long-running, user drives the conversation in its own pane). When true, the main session is not woken by status transitions (stalled/recovered) for this subagent. If omitted, falls back to the agent's `interactive` frontmatter, otherwise the inverse of `auto-exit` (agents that auto-exit are autonomous and get stall pings; agents that don't are interactive and stay quiet).",
     }),
   ),
-  resumeSessionId: Type.Optional(
-    Type.String({
-      description:
-        "Resume a previous Claude Code session by its ID. Loads the conversation history and continues where it left off. The session ID is returned in details of every claude tool call. Use this to retry cancelled runs or ask follow-up questions.",
-    }),
-  ),
   worktree: Type.Optional(
     Type.Boolean({
       description:
@@ -233,8 +227,8 @@ interface AgentDefaults {
   systemPromptMode?: "append" | "replace";
   sessionMode?: SubagentSessionMode;
   cwd?: string;
+  /** Parsed only to reject non-pi definitions (memo-subagents launches only pi). */
   cli?: string;
-  commandTemplate?: string;
   body?: string;
   disableModelInvocation?: boolean;
 }
@@ -344,9 +338,6 @@ function parseAgentDefinition(content: string, fallbackName: string): AgentDefin
     sessionMode: parseSessionMode(getFrontmatterValue(frontmatter, "session-mode")),
     cwd: getFrontmatterValue(frontmatter, "cwd"),
     cli: getFrontmatterValue(frontmatter, "cli"),
-    commandTemplate:
-      getFrontmatterValue(frontmatter, "command") ??
-      getFrontmatterValue(frontmatter, "command-template"),
     body: body || undefined,
     disableModelInvocation:
       getFrontmatterValue(frontmatter, "disable-model-invocation")?.toLowerCase() === "true",
@@ -592,7 +583,6 @@ interface SubagentResult {
   task: string;
   summary: string;
   sessionFile?: string;
-  claudeSessionId?: string;
   exitCode: number;
   elapsed: number;
   error?: string;
@@ -621,8 +611,6 @@ interface RunningSubagent {
     error?: string;
   };
   abortController?: AbortController;
-  cli?: string;
-  sentinelFile?: string;
   /**
    * Optional legacy status snapshot retained only for hydrating pre-lifecycle
    * runtime entries after /reload. Live observation uses `lifecycle` only.
@@ -825,9 +813,7 @@ function renderSubagentWidgetLines(agents: RunningSubagent[], width: number): st
       : "";
     const right = statusConfig.enabled
       ? ` ${runtimeTag}${formatLifecycleWidgetLabel(projection, now).trim()} `
-      : agent.cli && agent.cli !== "pi"
-        ? ` ${runtimeTag}running… `
-        : ` ${runtimeTag}starting… `;
+      : ` ${runtimeTag}starting… `;
 
     lines.push(borderLine(left, right, width, accent));
   }
@@ -882,7 +868,7 @@ function updateWidget() {
 function ensureLifecycle(running: RunningSubagent): SubagentLifecycle {
   if (running.lifecycle) return running.lifecycle;
   let lifecycle = createLifecycle(running.startTime);
-  const driver = getHarnessDriver(running.cli);
+  const driver = getHarnessDriver();
   if (!driver.hasActivitySnapshots) {
     lifecycle = markProcessRunning(lifecycle, running.startTime);
     running.lifecycle = lifecycle;
@@ -932,7 +918,7 @@ function ensureLifecycle(running: RunningSubagent): SubagentLifecycle {
 
 function observeRunningSubagent(running: RunningSubagent, observedAt = Date.now()) {
   ensureLifecycle(running);
-  const driver = getHarnessDriver(running.cli);
+  const driver = getHarnessDriver();
   if (!driver.hasActivitySnapshots) return;
 
   const activityFile = running.activityFile;
@@ -1001,22 +987,6 @@ function handleSubagentInterrupt(
   }
 
   const running = resolved.running;
-  const driver = getHarnessDriver(running.cli);
-  if (!driver.supportsTurnInterrupt) {
-    return {
-      content: [{
-        type: "text" as const,
-        text:
-          `Turn-only Escape interrupt is currently supported only for Pi-backed subagents. ${driver.name}-backed semantics have not been verified yet.`,
-      }],
-      details: {
-        error: `${running.cli ?? "external"} interrupt unsupported`,
-        id: running.id,
-        name: running.name,
-      },
-    };
-  }
-
   const now = Date.now();
   observeRunningSubagent(running, now);
 
@@ -1536,9 +1506,7 @@ async function launchSubagentInner(
 
   const resolvedPaths = resolveSubagentPaths(params, agentDefs);
 
-  const cliId = agentDefs?.cli ?? "pi";
-  const driver = getHarnessDriver(cliId);
-  driver.validateRuntimePlan?.(runtimePlan, parentThinking);
+  const driver = getHarnessDriver(agentDefs?.cli);
 
   // Optional worktree: created after runtime validation and before the pane.
   if (options?.worktreePlan) {
@@ -1662,8 +1630,6 @@ async function launchSubagentInner(
     startTime,
     sessionFile: built.sessionFile ?? subagentSessionFile,
     launchScriptFile,
-    cli: built.cli,
-    sentinelFile: built.sentinelFile,
     interactive: effectiveInteractive,
     runtimePlan,
     activityFile: driver.hasActivitySnapshots ? activityFile : undefined,
@@ -1715,7 +1681,6 @@ async function watchSubagent(
     const result = await waitForCompletion(signal, {
       intervalMs: 1000,
       sessionFile,
-      sentinelFile: running.sentinelFile,
       readTerminalTail: () => readPaneAsync(surface, 5),
       inspectPane: async () => inspectPane(surface),
       onPaneInspection: (inspection: PaneInspection, observedAt: number) => {
@@ -1732,35 +1697,6 @@ async function watchSubagent(
     running.lifecycle = markCompletionDetected(running.lifecycle, result, detectedAt);
     updateWidget();
     const elapsed = Math.floor((detectedAt - startTime) / 1000);
-
-    const driver = getHarnessDriver(running.cli);
-    if (driver.extractResult) {
-      const extracted = await driver.extractResult({
-        running,
-        completionResult: result,
-        surface,
-        readPane,
-        closePane,
-        artifactDir: dirname(running.launchScriptFile ?? running.sessionFile),
-      });
-
-      if (extracted) {
-        closePane(surface);
-        running.lifecycle = result.exitCode === 0
-          ? markCompleted(running.lifecycle, Date.now())
-          : markFailed(running.lifecycle, result.errorMessage ?? extracted.summary, Date.now(), result.exitCode);
-
-        return {
-          name,
-          task,
-          summary: extracted.summary,
-          exitCode: result.exitCode,
-          elapsed,
-          ...(extracted.sessionId ? { claudeSessionId: extracted.sessionId } : {}),
-          ...extracted.details,
-        };
-      }
-    }
 
     // Pi subagent result extraction
     let summary: string;
@@ -2091,7 +2027,6 @@ export default function subagentsExtension(pi: ExtensionAPI) {
                   elapsed: result.elapsed,
                   sessionFile: result.sessionFile,
                   ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
-                  ...(result.claudeSessionId ? { claudeSessionId: result.claudeSessionId } : {}),
                   ...(running.runtimePlan ? { runtimePlan: running.runtimePlan } : {}),
                   ...(worktreeReport ? { worktree: worktreeReport.details } : {}),
                 },
