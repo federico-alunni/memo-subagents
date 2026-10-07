@@ -31,7 +31,8 @@ export interface ChildHost {
   model: string;
   effort: string;
   isIdle(): boolean;
-  sendPrompt(prompt: string): void;
+  /** Deliver one task: `/skill:<name>` messages first, then the prompt, in the same run. */
+  sendPrompt(prompt: string, skills?: string[]): void;
   abort(): void;
   shutdown(): void;
 }
@@ -95,7 +96,9 @@ export class ChildRuntime {
       this.host.effort !== this.boot.effort ||
       this.host.sessionId !== this.boot.sessionId ||
       this.host.cwd !== this.boot.cwd ||
-      !within(join(this.boot.protocolDir, "sessions"), this.host.sessionPath)
+      (this.boot.sessionFile
+        ? this.host.sessionPath !== this.boot.sessionFile
+        : !within(join(this.boot.protocolDir, "sessions"), this.host.sessionPath))
     )
       throw new Error("Child session/cwd identity mismatch");
     const ready: Ready = {
@@ -234,7 +237,7 @@ export class ChildRuntime {
       );
       this.active = task;
       this.latest = undefined;
-      this.host.sendPrompt(task.prompt);
+      this.host.sendPrompt(task.prompt, task.skills);
     } finally {
       this.busy = false;
     }
@@ -243,18 +246,50 @@ export class ChildRuntime {
     this.latest = messages;
   }
   async agentSettled(): Promise<void> {
-    if (!this.active || this.closed) return;
-    const task = this.active;
-    const current = await this.current();
-    if (!current || !sameTask(current, task))
-      throw new Error("Task changed during an active child run");
-    const path = taskFile(this.boot.protocolDir, task.taskId, "settled");
-    const previous = await json<ChildRecord>(path);
-    if (!previous)
-      await publish(path, record(task, "settled", settledResult(this.latest)));
-    else if (!validTask(previous, task, "settled"))
-      throw new Error("Conflicting settlement record");
-    this.active = undefined;
+    if (this.closed) return;
+    if (this.active) {
+      const task = this.active;
+      const current = await this.current();
+      if (!current || !sameTask(current, task))
+        throw new Error("Task changed during an active child run");
+      const path = taskFile(this.boot.protocolDir, task.taskId, "settled");
+      const previous = await json<ChildRecord>(path);
+      if (!previous)
+        await publish(path, record(task, "settled", settledResult(this.latest)));
+      else if (!validTask(previous, task, "settled"))
+        throw new Error("Conflicting settlement record");
+      this.active = undefined;
+    }
+    // Auto exit after any normal run (task or user turn); an aborted run stays open for the user.
+    if (this.boot.policy.exit === "auto") {
+      const outcome = settledResult(this.latest);
+      if (outcome.status !== "interrupted")
+        await this.exitWith(outcome.status === "error" ? "error" : "done", {
+          ...outcome,
+        });
+    }
+  }
+  /**
+   * The child ends itself (exit policy auto/tool): an immutable exit record correlated with the current
+   * task, then the same shutdown acknowledgement an orderly parent stop produces, then shutdown.
+   */
+  async exitWith(
+    reason: "done" | "ping" | "error",
+    extra: Partial<ChildRecord> = {},
+  ): Promise<void> {
+    if (this.boot.policy.exit === "parent")
+      throw new Error("This child is ended by its parent, not by itself");
+    if (this.closed) return;
+    const task = await this.current();
+    if (!task) throw new Error("No current task to end");
+    const exitPath = join(this.boot.protocolDir, "exit.json");
+    if (!(await json(exitPath)))
+      await publish(exitPath, record(task, "exit", { ...extra, reason }));
+    const ackPath = join(this.boot.protocolDir, "shutdown-ack.json");
+    if (!(await json(ackPath)))
+      await publish(ackPath, record(task, "shutdown-ack"));
+    this.dispose();
+    this.host.shutdown();
   }
   async takeover(): Promise<void> {
     const task = await this.current();

@@ -75,18 +75,46 @@ export interface AgentHandle extends TaskIdentity {
   parentPaneId?: string;
   placement?: "split-right" | "split-down";
 }
+/** "takeover": typed input/user bash/model changes block automatic control (workflow agents).
+ * "allowed": the user may drive the child in its pane (interactive generic subagents). */
+export type UserInputPolicy = "takeover" | "allowed";
+/** "parent": the child never exits by itself (stop/close by the parent).
+ * "auto": it exits after a normal (not aborted) settled run, and has `subagent_done`/`caller_ping`.
+ * "tool": it exits only through `subagent_done`/`caller_ping` (or the user quitting). */
+export type ExitPolicy = "parent" | "auto" | "tool";
+export const EXIT_TOOLS: readonly string[] = ["subagent_done", "caller_ping"];
 /** Child policy, written by the parent before launch and read by the child extension. */
 export interface ChildPolicy {
-  tools: string[];
+  /** Allowlist; null = no allowlist (profile children keep their normal tools). */
+  tools: string[] | null;
+  /** Tools deactivated and blocked even when present in the profile. */
+  denyTools: string[];
   bash: BashPolicy;
   question: boolean;
   delegatedTools: DelegatedToolSpec[];
+  userInput: UserInputPolicy;
+  exit: ExitPolicy;
+}
+/** Fill the defaults of fields added after 0.2.0, so older boot records keep their meaning. */
+export function normalizePolicy(raw: unknown): ChildPolicy | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const p = raw as Partial<ChildPolicy>;
+  return {
+    tools: p.tools === null ? null : (p.tools as string[]),
+    denyTools: p.denyTools ?? [],
+    bash: p.bash as BashPolicy,
+    question: p.question as boolean,
+    delegatedTools: p.delegatedTools as DelegatedToolSpec[],
+    userInput: p.userInput ?? "takeover",
+    exit: p.exit ?? "parent",
+  };
 }
 export interface DisplaySpec {
   label: string;
   group?: string;
   agentsPanelName?: string;
 }
+export type Isolation = "isolated" | "profile";
 export interface Boot extends Identity {
   labels?: Labels;
   cwd: string;
@@ -94,6 +122,9 @@ export interface Boot extends Identity {
   model: string;
   effort: string;
   policy: ChildPolicy;
+  isolation?: Isolation;
+  /** Exact session file the child must open (seeded or resumed session); absent = new session in sessions/. */
+  sessionFile?: string;
   /** Display only (widget rows rebuilt after a cold restart of the parent). */
   display?: DisplaySpec;
   launchedAt?: number;
@@ -101,6 +132,8 @@ export interface Boot extends Identity {
 export interface TaskCommand extends TaskIdentity {
   kind: "task";
   prompt: string;
+  /** Skills sent as `/skill:<name>` messages before the prompt, in the same run. */
+  skills?: string[];
   previousToken: string | null;
 }
 export interface ChildRecord extends TaskIdentity {
@@ -118,8 +151,12 @@ export interface ChildRecord extends TaskIdentity {
     | "interrupt-ack"
     /** The child is waiting for a human answer in its own pane. */
     | "question"
-    | "answer";
+    | "answer"
+    /** The child ended itself (exit policy auto/tool): done, help request (ping) or failed run. */
+    | "exit";
   at: string;
+  reason?: "done" | "ping" | "error";
+  message?: string;
   status?: "success" | "error" | "interrupted";
   summary?: string;
   error?: string;
@@ -279,25 +316,32 @@ export const BUILTIN_TOOLS: readonly string[] = [
   "ls",
 ];
 /** Validate a child policy received from a launch spec or a boot record. */
+const TOOL_NAME = /^[A-Za-z0-9_-]+$/;
 export function validPolicy(policy: ChildPolicy | undefined): policy is ChildPolicy {
   if (
     !policy ||
-    !Array.isArray(policy.tools) ||
-    !Array.isArray(policy.delegatedTools)
+    (policy.tools !== null && !Array.isArray(policy.tools)) ||
+    !Array.isArray(policy.delegatedTools) ||
+    !Array.isArray(policy.denyTools)
   )
     return false;
+  const tools = policy.tools ?? [];
   const delegated = policy.delegatedTools.map((d) => d?.name);
+  // `question` and the exit tools exist only through their policy flags.
+  const reserved = ["question", ...EXIT_TOOLS];
   return (
-    policy.tools.every((t) => typeof t === "string" && /^[A-Za-z0-9_-]+$/.test(t)) &&
-    // `question` exists only through the policy flag.
-    !policy.tools.includes("question") &&
+    tools.every((t) => typeof t === "string" && TOOL_NAME.test(t)) &&
+    policy.denyTools.every((t) => typeof t === "string" && TOOL_NAME.test(t)) &&
+    !tools.some((t) => reserved.includes(t)) &&
     new Set(delegated).size === delegated.length &&
     delegated.every(
       (name) =>
-        name !== "question" &&
+        !reserved.includes(name) &&
         !BUILTIN_TOOLS.includes(name) &&
-        !policy.tools.includes(name),
+        !tools.includes(name),
     ) &&
+    (policy.userInput === "takeover" || policy.userInput === "allowed") &&
+    (policy.exit === "parent" || policy.exit === "auto" || policy.exit === "tool") &&
     (policy.bash === "unrestricted" || policy.bash === "readonly") &&
     typeof policy.question === "boolean" &&
     Array.isArray(policy.delegatedTools) &&
@@ -316,10 +360,27 @@ export function validPolicy(policy: ChildPolicy | undefined): policy is ChildPol
     )
   );
 }
-/** Tools the child may activate: allowlist plus declared delegated tools and `question`. */
-export function activeTools(policy: ChildPolicy): string[] {
-  const tools = new Set(policy.tools);
-  for (const d of policy.delegatedTools) tools.add(d.name);
-  if (policy.question) tools.add("question");
+/** Tools the runtime itself adds: declared delegated tools, `question`, exit tools. */
+export function policyTools(policy: ChildPolicy): string[] {
+  return [
+    ...policy.delegatedTools.map((d) => d.name),
+    ...(policy.question ? ["question"] : []),
+    ...(policy.exit === "parent" ? [] : EXIT_TOOLS),
+  ];
+}
+/** Allowlisted tools the child may activate, or null when there is no allowlist. */
+export function activeTools(policy: ChildPolicy): string[] | null {
+  if (policy.tools === null) return null;
+  const tools = new Set([...policy.tools, ...policyTools(policy)]);
+  for (const denied of policy.denyTools) tools.delete(denied);
   return [...tools];
+}
+/** Whether a tool call is allowed by the policy (bash content is checked separately). */
+export function toolAllowed(policy: ChildPolicy, tool: string): boolean {
+  if (policy.denyTools.includes(tool)) return false;
+  const active = activeTools(policy);
+  if (active) return active.includes(tool);
+  // No allowlist: profile tools are allowed, but runtime-only tools must be enabled by the policy.
+  const runtimeOnly = ["question", ...EXIT_TOOLS];
+  return !runtimeOnly.includes(tool) || policyTools(policy).includes(tool);
 }

@@ -88,6 +88,7 @@ class FakeHerdr {
   childTty = "ttys-test";
   ttyFailure = false;
   prompts: string[] = [];
+  skills: string[][] = [];
   aborts = 0;
   shutdowns = 0;
   closes = 0;
@@ -243,18 +244,17 @@ class FakeHerdr {
     assert.ok(this.boot);
     return new ChildRuntime(this.boot, {
       sessionId: this.boot.sessionId,
-      sessionPath: join(
-        this.boot.protocolDir,
-        "sessions",
-        `${this.boot.sessionId}.jsonl`,
-      ),
+      sessionPath:
+        this.boot.sessionFile ??
+        join(this.boot.protocolDir, "sessions", `${this.boot.sessionId}.jsonl`),
       cwd: this.boot.cwd,
       pid: this.pid,
       model: this.boot.model,
       effort: this.boot.effort,
       isIdle: () => this.idle,
-      sendPrompt: (prompt) => {
+      sendPrompt: (prompt, skills) => {
         this.prompts.push(prompt);
+        if (skills?.length) this.skills.push(skills);
         this.idle = false;
       },
       abort: () => {
@@ -1281,9 +1281,12 @@ const policyOf = (spec: {
   delegatedTools?: DelegatedToolSpec[];
 }) => ({
   tools: spec.tools,
+  denyTools: [] as string[],
   bash: spec.bash ?? ("unrestricted" as const),
   question: spec.question === true,
   delegatedTools: spec.delegatedTools ?? [],
+  userInput: "takeover" as const,
+  exit: "parent" as const,
 });
 const WORKER_POLICY = policyOf({ tools: WORKER_TOOLS });
 const TRIAGE_POLICY = policyOf(TRIAGE);
@@ -1611,4 +1614,262 @@ test("presence: rows are rebuilt after a cold restart and never repainted by a s
   assert.equal(rows().length, 0);
   await f.transport.observe(next);
   assert.equal(rows().length, 0);
+});
+
+// ── Profile children, sessions, skills, exit and user input (subagent tool on the runtime) ──
+
+const GENERIC = {
+  isolation: "profile" as const,
+  tools: undefined,
+  userInput: "allowed" as const,
+  exit: "auto" as const,
+  placement: "tab" as const,
+  display: { label: "scout" },
+};
+
+test("profile children load their normal profile: no isolation flags, no allowlist unless declared", async (t) => {
+  const f = await fixture(t);
+  const agentDir = join(f.root, "user agent dir");
+  await mkdir(agentDir);
+  await f.transport.launch({ ...f.input, ...GENERIC, agentDir, env: { PI_SUBAGENT_AGENT: "scout" } });
+  const run = f.fake.calls.find((c) => c.argv[1] === "run")!.argv[3];
+  for (const flag of ["'-ne'", "'-ns'", "'-np'", "'--no-approve'", "'--no-themes'", "'--tools'"])
+    assert.ok(!run.includes(flag), flag);
+  assert.ok(run.includes("/runtime/child/extension.ts"));
+  assert.ok(run.includes(`PI_CODING_AGENT_DIR='${agentDir}'`));
+  assert.ok(run.includes("PI_SUBAGENT_AGENT='scout'"));
+  assert.equal(f.fake.boot!.isolation, "profile");
+  assert.equal(f.fake.boot!.policy.tools, null);
+  // Declared tools still become an allowlist (plus the exit tools of an auto child).
+  const g = await fixture(t);
+  await g.transport.launch({ ...g.input, ...GENERIC, tools: ["read", "bash"], denyTools: ["bash"] });
+  const run2 = g.fake.calls.find((c) => c.argv[1] === "run")!.argv[3];
+  assert.ok(run2.includes("'--tools' 'read,subagent_done,caller_ping'"));
+  // Isolated children always need an allowlist; a missing agent dir creates nothing.
+  const k = await fixture(t);
+  await assert.rejects(k.transport.launch({ ...k.input, tools: undefined }), errorCode("unsupported"));
+  await assert.rejects(
+    k.transport.launch({ ...k.input, ...GENERIC, agentDir: join(k.root, "absent") }),
+    errorCode("unsupported"),
+  );
+  assert.equal(k.fake.createCount, 0);
+  await k.transport.launch(k.input);
+});
+
+test("tool policy without allowlist: profile tools allowed, deny and runtime-only tools enforced", () => {
+  const policy = {
+    tools: null,
+    denyTools: ["write"],
+    bash: "unrestricted" as const,
+    question: false,
+    delegatedTools: [],
+    userInput: "allowed" as const,
+    exit: "tool" as const,
+  };
+  assert.equal(childToolCall(policy, "some_extension_tool", {}), undefined);
+  assert.equal(childToolCall(policy, "bash", { command: "npm test" }), undefined);
+  assert.equal(childToolCall(policy, "write", {})?.block, true);
+  assert.equal(childToolCall(policy, "question", {})?.block, true);
+  assert.equal(childToolCall(policy, "subagent_done", {}), undefined);
+  assert.equal(childToolCall({ ...policy, exit: "parent" as const }, "caller_ping", {})?.block, true);
+});
+
+test("reserved tool names and invalid new policy fields are refused before any pane", async (t) => {
+  const f = await fixture(t);
+  const bad: Partial<LaunchSpec>[] = [
+    { tools: ["read", "subagent_done"] },
+    { delegatedTools: [{ ...INTEGRATE, name: "caller_ping" }] },
+    { denyTools: ["bad name"] },
+    { userInput: "sometimes" as any },
+    { exit: "never" as any },
+    { skills: ["ok", "bad skill"] },
+    { isolation: "sandbox" as any },
+    { session: { kind: "file", path: "relative.jsonl" } },
+    { session: { kind: "other" } as any },
+  ];
+  for (const [index, patch] of bad.entries())
+    await assert.rejects(
+      f.transport.launch({ ...f.input, agentId: `bad-${index}`, ...patch }),
+      errorCode("unsupported"),
+      JSON.stringify(patch),
+    );
+  assert.equal(f.fake.createCount, 0);
+});
+
+test("an existing or seeded session file is opened exactly, with its header id as identity", async (t) => {
+  const f = await fixture(t);
+  const file = join(f.root, "seeded session.jsonl");
+  await writeFile(file, JSON.stringify({ type: "session", version: 3, id: "seeded-id", cwd: f.cwd }) + "\n");
+  const h = await f.transport.launch({ ...f.input, ...GENERIC, session: { kind: "file", path: file } });
+  const run = f.fake.calls.find((c) => c.argv[1] === "run")!.argv[3];
+  assert.ok(run.includes(`'--session' '${file}'`));
+  assert.ok(!run.includes("--session-id"));
+  assert.equal(h.sessionId, "seeded-id");
+  assert.equal(h.sessionPath, file);
+  // The child refuses to start on any other session file.
+  f.fake.runtime!.dispose();
+  const wrong = new ChildRuntime(f.fake.boot!, {
+    sessionId: "seeded-id",
+    sessionPath: join(f.fake.boot!.protocolDir, "sessions", "seeded-id.jsonl"),
+    cwd: f.cwd,
+    pid: f.fake.pid,
+    model: f.input.model,
+    effort: f.input.thinking,
+    isIdle: () => true,
+    sendPrompt: () => assert.fail("must not prompt"),
+    abort: () => {},
+    shutdown: () => {},
+  });
+  await assert.rejects(wrong.start(false), /identity mismatch/);
+  wrong.dispose();
+  // A file without a session header is unusable and creates nothing.
+  const g = await fixture(t);
+  const junk = join(g.root, "junk.jsonl");
+  await writeFile(junk, "not json\n");
+  await assert.rejects(
+    g.transport.launch({ ...g.input, session: { kind: "file", path: junk } }),
+    errorCode("unsupported"),
+  );
+  assert.equal(g.fake.createCount, 0);
+});
+
+test("skills travel with the task and reach the child before the prompt", async (t) => {
+  const f = await fixture(t);
+  const h = await f.transport.launch({ ...f.input, ...MERGER, skills: ["pdf-tools", "review"] });
+  assert.deepEqual(f.fake.skills, [["pdf-tools", "review"]]);
+  assert.deepEqual(f.fake.prompts, [f.input.prompt]);
+  await f.fake.settle();
+  await f.transport.dispatch(h, { taskId: "task-2", prompt: "next", skills: ["review"] });
+  await f.fake.runtime!.tick();
+  assert.deepEqual(f.fake.skills, [["pdf-tools", "review"], ["review"]]);
+});
+
+test("exit auto: a normal run ends the child with exit evidence; an aborted run stays open", async (t) => {
+  const f = await fixture(t);
+  const h = await f.transport.launch({ ...f.input, ...GENERIC });
+  f.fake.suppressShutdown = false;
+  await f.fake.settle("aborted");
+  assert.equal(f.fake.shutdowns, 0);
+  assert.equal((await f.transport.observe(h)).exit, undefined);
+  // The user continues in the pane; the next normal run ends it.
+  await f.fake.settle("stop");
+  assert.equal(f.fake.shutdowns, 1);
+  const o = await f.transport.observe(h);
+  assert.equal(o.kind, "stopped");
+  assert.equal(o.exit?.reason, "done");
+  assert.equal(o.exit?.status, "success");
+  await f.transport.close(h);
+  assert.equal(f.fake.closes, 1);
+  // A provider failure ends it as an error.
+  const g = await fixture(t);
+  const gh = await g.transport.launch({ ...g.input, ...GENERIC });
+  await g.fake.settle("error", "overloaded");
+  const go = await g.transport.observe(gh);
+  assert.equal(go.exit?.reason, "error");
+  assert.equal(go.exit?.error, "overloaded");
+});
+
+test("exit tool: subagent_done/caller_ping end the child; parent-ended children cannot end themselves", async (t) => {
+  const f = await fixture(t);
+  const h = await f.transport.launch({ ...f.input, ...GENERIC, exit: "tool" });
+  await f.fake.settle();
+  assert.equal(f.fake.shutdowns, 0);
+  await f.fake.runtime!.exitWith("ping", { message: "Need the API key" });
+  assert.equal(f.fake.shutdowns, 1);
+  const o = await f.transport.observe(h);
+  assert.equal(o.kind, "stopped");
+  assert.equal(o.exit?.reason, "ping");
+  assert.equal(o.exit?.message, "Need the API key");
+  await f.transport.close(h);
+  const g = await fixture(t);
+  await g.transport.launch(g.input);
+  await assert.rejects(g.fake.runtime!.exitWith("done"), /ended by its parent/);
+});
+
+test("userInput allowed: a user who quits pi ends the child and its pane can be closed", async (t) => {
+  const f = await fixture(t);
+  const h = await f.transport.launch({ ...f.input, ...GENERIC, exit: "tool" });
+  f.fake.alive = false; // user quit, no acknowledgement
+  const o = await f.transport.observe(h);
+  assert.equal(o.kind, "unavailable");
+  assert.equal(o.exited, true);
+  await f.transport.close(h);
+  assert.equal(f.fake.closes, 1);
+  // A workflow child (takeover policy) still needs the orderly acknowledgement.
+  const g = await fixture(t);
+  const gh = await g.transport.launch(g.input);
+  g.fake.alive = false;
+  await assert.rejects(g.transport.close(gh), errorCode("cleanup_blocked"));
+  assert.equal(g.fake.closes, 0);
+});
+
+test("move: the observed tab becomes the handle identity; old handles are refused", async (t) => {
+  const f = await fixture(t);
+  const h = await f.transport.launch({ ...f.input, ...GENERIC });
+  let tab = "tab-1";
+  let lose = false;
+  let fail = false;
+  const base = f.fake.pane.bind(f.fake);
+  f.fake.pane = () => ({ ...base(), tab_id: tab });
+  f.fake.onCall = (call) => {
+    if (call.argv[1] !== "move") return;
+    if (fail) return { exitCode: 1, stdout: "", stderr: JSON.stringify({ error: { code: "refused", message: "no" } }) };
+    tab = call.argv.includes("--new-tab") ? "tab-parked" : "tab-1";
+    if (lose) return { exitCode: 0, stdout: "lost" };
+    return f.fake.result({ move_result: { changed: true } });
+  };
+  const parked = await f.transport.move(h, { newTab: { label: "scout" } });
+  assert.equal(parked.tabId, "tab-parked");
+  assert.equal(parked.placement, undefined);
+  assert.equal((await f.transport.observe(parked)).kind, "active");
+  assert.equal((await f.transport.observe(h)).kind, "changed");
+  // A lost answer is resolved by observation.
+  lose = true;
+  const shown = await f.transport.move(parked, { split: { targetPane: "master-pane", ratio: 0.5 } });
+  assert.equal(shown.tabId, "tab-1");
+  assert.equal(shown.placement, "split-right");
+  assert.equal(shown.parentPaneId, "master-pane");
+  // A refused move with no observed change is "busy"; identity drift blocks.
+  lose = false;
+  fail = true;
+  await assert.rejects(f.transport.move(shown, { newTab: { label: "x" } }), errorCode("busy"));
+  fail = false;
+  f.fake.onCall = (call) => {
+    if (call.argv[1] === "move") f.fake.terminal = "other-terminal";
+    return call.argv[1] === "move" ? f.fake.result({}) : undefined;
+  };
+  await assert.rejects(f.transport.move(shown, { newTab: { label: "x" } }), errorCode("cleanup_blocked"));
+});
+
+test("activity snapshots written by the child are readable through the handle", async (t) => {
+  const { createSubagentActivityRecorder } = await import("../../pi-extension/subagents/activity.ts");
+  const f = await fixture(t);
+  const h = await f.transport.launch({ ...f.input, ...GENERIC });
+  assert.equal(f.transport.activity(h).ok, false);
+  const recorder = createSubagentActivityRecorder({
+    runningChildId: h.nonce,
+    activityFile: join(h.protocolDir, "activity.json"),
+  });
+  recorder.sessionStart();
+  recorder.agentStart();
+  recorder.toolExecutionStart("call-1", "bash");
+  await new Promise((r) => setTimeout(r, 30));
+  const read = f.transport.activity(h);
+  assert.equal(read.ok, true);
+  if (read.ok) assert.equal(read.activity.phase, "active");
+});
+
+test("boot records of 0.2.0 (without the new policy fields) keep their meaning", async () => {
+  const { normalizePolicy, validPolicy } = await import("../../pi-extension/subagents/runtime/protocol.ts");
+  const old = normalizePolicy({ tools: ["read"], bash: "readonly", question: true, delegatedTools: [] });
+  assert.ok(validPolicy(old));
+  assert.deepEqual(old, {
+    tools: ["read"],
+    denyTools: [],
+    bash: "readonly",
+    question: true,
+    delegatedTools: [],
+    userInput: "takeover",
+    exit: "parent",
+  });
 });

@@ -19,6 +19,7 @@ import {
   record,
   validTask,
   validPolicy,
+  normalizePolicy,
   activeTools,
   within,
   privateDirectory,
@@ -36,6 +37,9 @@ import type {
   BashPolicy,
   DelegatedToolSpec,
   ThinkingLevel,
+  Isolation,
+  UserInputPolicy,
+  ExitPolicy,
 } from "./protocol.ts";
 import {
   nodeRunner,
@@ -45,6 +49,8 @@ import {
 } from "./runner.ts";
 import type { Runner, RunResult } from "./runner.ts";
 import { presence } from "./presence.ts";
+import { readSubagentActivityFile } from "../activity.ts";
+import type { ActivityReadResult } from "../activity.ts";
 import type { PresenceState } from "./presence.ts";
 import { CHILD_ENV } from "./child/env.ts";
 
@@ -78,11 +84,26 @@ export interface LaunchSpec {
   /** Exact provider/model-id. */
   model: string;
   thinking: ThinkingLevel;
-  isolation?: "isolated";
-  tools: string[];
+  /** "isolated" (default): -ne -ns -np --no-approve --no-themes. "profile": the child loads its normal profile. */
+  isolation?: Isolation;
+  /** PI_CODING_AGENT_DIR of this child (existing directory); overrides RuntimeConfig.agentDir. */
+  agentDir?: string;
+  /** Allowlist. Required for isolated children; omitted in profile mode = the profile's normal tools. */
+  tools?: string[];
+  denyTools?: string[];
   bash?: BashPolicy;
   question?: boolean;
   delegatedTools?: DelegatedToolSpec[];
+  /** "takeover" (default) or "allowed": whether the user may drive the child without blocking control. */
+  userInput?: UserInputPolicy;
+  /** "parent" (default), "auto" or "tool": see docs/runtime.md. */
+  exit?: ExitPolicy;
+  /** Skill names sent as `/skill:<name>` before the first prompt. */
+  skills?: string[];
+  /** New session (default) or an existing/seeded session file the child must open. */
+  session?: { kind: "new" } | { kind: "file"; path: string };
+  /** Extra environment of this child (same rules as hostEnv). */
+  env?: Record<string, string>;
   /** Absolute files passed with --append-system-prompt. */
   appendSystemPrompt?: string[];
   /** "worktree" opens the existing checkout `cwd` as a Herdr worktree space (falls back to "tab"
@@ -117,6 +138,8 @@ export interface Observation {
   exited?: true;
   /** Latest human question of a triage/planner child (pending = awaiting the answer). */
   question?: { id: string; text: string; pending: boolean };
+  /** The child ended itself (exit policy auto/tool): reason done | ping | error, ping message. */
+  exit?: ChildRecord;
 }
 type RuntimeErrorCode =
   | "unsupported"
@@ -378,14 +401,23 @@ export class AgentRuntime {
         "unsupported",
         "Explicit provider/model, thinking, positive attempt, identities, prompt and display label required",
       );
-    if ((input.isolation ?? "isolated") !== "isolated")
-      throw new RuntimeError("unsupported", "Only isolated children are supported");
+    const isolation: Isolation = input.isolation ?? "isolated";
+    if (isolation !== "isolated" && isolation !== "profile")
+      throw new RuntimeError("unsupported", `Unknown isolation: ${isolation}`);
+    if (isolation === "isolated" && !Array.isArray(input.tools))
+      throw new RuntimeError("unsupported", "Isolated children require a tool allowlist");
     const policy: ChildPolicy = {
-      tools: [...(input.tools ?? [])],
+      tools: Array.isArray(input.tools) ? [...input.tools] : null,
+      denyTools: [...(input.denyTools ?? [])],
       bash: input.bash ?? "unrestricted",
       question: input.question === true,
       delegatedTools: [...(input.delegatedTools ?? [])],
+      userInput: input.userInput ?? "takeover",
+      exit: input.exit ?? "parent",
     };
+    const skills = [...(input.skills ?? [])];
+    if (!skills.every((skill) => typeof skill === "string" && /^[A-Za-z0-9_.:-]+$/.test(skill)))
+      throw new RuntimeError("unsupported", "Invalid skill names");
     if (!validPolicy(policy))
       throw new RuntimeError(
         "unsupported",
@@ -422,10 +454,41 @@ export class AgentRuntime {
     const extension =
       this.config.childExtension ??
       fileURLToPath(new URL("./child/extension.ts", import.meta.url));
-    const profile = this.config.agentDir
-      ? resolve(this.config.agentDir)
-      : join(this.root, "profile");
-    await privateDirectory(profile);
+    let profile: string;
+    if (input.agentDir) {
+      // A caller-chosen agent dir (e.g. the user's own profile) is used as is, never re-permissioned.
+      profile = resolve(input.agentDir);
+      if (!(await stat(profile).catch(() => undefined))?.isDirectory())
+        throw new RuntimeError("unsupported", `Agent directory unavailable: ${profile}`);
+    } else {
+      profile = this.config.agentDir
+        ? resolve(this.config.agentDir)
+        : join(this.root, "profile");
+      await privateDirectory(profile);
+    }
+    // Existing/seeded session file: its header id is the session identity the child must report.
+    let sessionFile: string | undefined;
+    let fileSessionId: string | undefined;
+    if (input.session?.kind === "file") {
+      const path = input.session.path;
+      if (typeof path !== "string" || !path.startsWith("/"))
+        throw new RuntimeError("unsupported", "Session file must be an absolute path");
+      try {
+        sessionFile = await realpath(path);
+        const header = JSON.parse(
+          (await readFile(sessionFile, "utf8")).split("\n", 1)[0],
+        );
+        if (header?.type !== "session" || typeof header.id !== "string" || !header.id)
+          throw new Error("missing session header");
+        fileSessionId = header.id;
+      } catch (error) {
+        throw new RuntimeError(
+          "unsupported",
+          `Session file unusable: ${path} (${String(error)})`,
+        );
+      }
+    } else if (input.session && input.session.kind !== "new")
+      throw new RuntimeError("unsupported", "Unknown session kind");
     await readFile(extension, "utf8");
     for (const file of input.appendSystemPrompt ?? [])
       await readFile(file, "utf8").catch(() => {
@@ -448,7 +511,10 @@ export class AgentRuntime {
         );
       });
     }
-    const extraEnv = Object.entries(this.config.hostEnv ?? {});
+    const extraEnv = Object.entries({
+      ...(this.config.hostEnv ?? {}),
+      ...(input.env ?? {}),
+    });
     for (const [name, value] of extraEnv)
       if (
         !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ||
@@ -797,7 +863,7 @@ export class AgentRuntime {
         agentId: input.agentId,
         attempt: input.attempt,
         nonce: randomUUID(),
-        sessionId: randomUUID(),
+        sessionId: fileSessionId ?? randomUUID(),
         paneId: paneId!,
         ...(input.labels ? { labels: { ...input.labels } } : {}),
         cwd,
@@ -805,6 +871,8 @@ export class AgentRuntime {
         model: input.model,
         effort: input.thinking,
         policy,
+        isolation,
+        ...(sessionFile ? { sessionFile } : {}),
         display: { ...input.display },
         launchedAt: Date.now(),
       };
@@ -820,31 +888,30 @@ export class AgentRuntime {
         taskToken: randomUUID(),
         previousToken: null,
         prompt: input.prompt,
+        ...(skills.length ? { skills } : {}),
       };
       await publish(join(protocolDir, "boot.json"), boot);
       await publish(join(protocolDir, "task.json"), task);
       await publish(taskFile(protocolDir, input.taskId, "dispatch"), task);
       const sessionDir = join(protocolDir, "sessions");
       await mkdir(sessionDir, { mode: 0o700 });
+      const allowlist = activeTools(policy);
       const args = [
-        "--session-id",
-        boot.sessionId,
-        "--session-dir",
-        sessionDir,
+        ...(sessionFile
+          ? ["--session", sessionFile]
+          : ["--session-id", boot.sessionId, "--session-dir", sessionDir]),
         "--model",
         input.model,
         "--thinking",
         input.thinking,
-        "-ne",
+        ...(isolation === "isolated" ? ["-ne"] : []),
         "-e",
         extension,
         ...extraExtensions.flatMap((extra) => ["-e", extra]),
-        "-ns",
-        "-np",
-        "--no-approve",
-        "--no-themes",
-        "--tools",
-        activeTools(policy).join(","),
+        ...(isolation === "isolated"
+          ? ["-ns", "-np", "--no-approve", "--no-themes"]
+          : []),
+        ...(allowlist ? ["--tools", allowlist.join(",")] : []),
         ...(input.appendSystemPrompt ?? []).flatMap((file) => [
           "--append-system-prompt",
           file,
@@ -871,7 +938,9 @@ export class AgentRuntime {
             ready.cwd !== cwd ||
             !Number.isSafeInteger(ready.pid) ||
             ready.pid <= 0 ||
-            !within(sessionDir, ready.sessionPath)
+            (sessionFile
+              ? ready.sessionPath !== sessionFile
+              : !within(sessionDir, ready.sessionPath))
           )
             throw new Error("Child ready identity invalid");
           const processIdentity = await this.process(ready.pid);
@@ -975,7 +1044,7 @@ export class AgentRuntime {
   }
   async dispatch(
     h: AgentHandle,
-    input: { taskId: string; prompt: string },
+    input: { taskId: string; prompt: string; skills?: string[] },
   ): Promise<AgentHandle> {
     return this.guarded(h, async () => {
       await this.ownership(h);
@@ -1004,6 +1073,7 @@ export class AgentRuntime {
         kind: "task",
         previousToken: h.taskToken,
         prompt: input.prompt,
+        ...(input.skills?.length ? { skills: [...input.skills] } : {}),
       };
       await publish(taskFile(h.protocolDir, input.taskId, "dispatch"), cmd); // refuse old task IDs even after restart
       try {
@@ -1093,6 +1163,80 @@ export class AgentRuntime {
       throw new RuntimeError("cleanup_uncertain", String(error));
     }
   }
+  /**
+   * Move the child's pane to another tab of the same workspace (pane selector). The outcome is
+   * observed, not inferred from Herdr's answer: the returned handle carries the new tab and must
+   * replace the stored one. Pane, terminal and workspace identity never change.
+   */
+  async move(
+    h: AgentHandle,
+    to:
+      | { newTab: { label: string } }
+      | { split: { targetPane: string; direction?: "right" | "down"; ratio?: number } },
+  ): Promise<AgentHandle> {
+    return this.guarded(h, async () => {
+      await this.ownership(h);
+      const argv =
+        "newTab" in to
+          ? ["pane", "move", h.paneId, "--new-tab", "--label", to.newTab.label, "--no-focus"]
+          : [
+              "pane",
+              "move",
+              h.paneId,
+              "--target-pane",
+              to.split.targetPane,
+              "--split",
+              to.split.direction ?? "right",
+              ...(to.split.ratio ? ["--ratio", String(to.split.ratio)] : []),
+              "--no-focus",
+            ];
+      let moveError: unknown;
+      try {
+        await this.herdr(argv, h.cwd);
+      } catch (error) {
+        moveError = error;
+      }
+      let pane: Pane;
+      try {
+        pane = (await this.herdr(["pane", "get", h.paneId], h.cwd)).pane as Pane;
+      } catch (error) {
+        throw new RuntimeError("cleanup_blocked", `Pane not observable after move: ${String(error)}`);
+      }
+      if (
+        !pane ||
+        pane.pane_id !== h.paneId ||
+        pane.terminal_id !== h.terminalId ||
+        pane.workspace_id !== h.workspaceId
+      )
+        throw new RuntimeError("cleanup_blocked", "Pane identity changed during move");
+      if (moveError && pane.tab_id === h.tabId)
+        throw new RuntimeError("busy", `Pane not moved: ${String(moveError)}`);
+      const { parentPaneId: _parent, placement: _placement, ...rest } = h;
+      const next: AgentHandle = {
+        ...rest,
+        tabId: pane.tab_id,
+        ...("split" in to
+          ? {
+              parentPaneId: to.split.targetPane,
+              placement: to.split.direction === "down" ? ("split-down" as const) : ("split-right" as const),
+            }
+          : {}),
+      };
+      await publish(join(h.protocolDir, `move-${randomUUID()}.json`), {
+        version: 1,
+        at: new Date().toISOString(),
+        paneId: h.paneId,
+        fromTab: h.tabId,
+        toTab: pane.tab_id,
+      });
+      return next;
+    });
+  }
+  /** Display-only activity snapshot written by the child (phase, active tool, provider). */
+  activity(h: AgentHandle): ActivityReadResult {
+    this.checkHandle(h);
+    return readSubagentActivityFile(join(h.protocolDir, "activity.json"), h.nonce);
+  }
   /** Display only: workflow status of the agent row in the memo-subagents widget. */
   annotate(h: AgentHandle, note: { status?: string; active?: boolean }): void {
     presence().update(h.protocolDir, {
@@ -1146,8 +1290,10 @@ export class AgentRuntime {
       taskFile(h.protocolDir, h.taskId, "settled"),
     );
     const asked = await json<ChildRecord>(join(h.protocolDir, questionFile));
+    const exit = await json<ChildRecord>(join(h.protocolDir, "exit.json"));
     const evidence = {
       requests,
+      ...(validTask(exit, h, "exit") ? { exit } : {}),
       ...(validTask(asked, h, "question") || validTask(asked, h, "answer")
         ? {
             question: {
@@ -1380,8 +1526,13 @@ export class AgentRuntime {
       const ack = await json<ChildRecord>(
         join(h.protocolDir, "shutdown-ack.json"),
       );
+      // A user-driven child (userInput "allowed") may also end because the user quit pi:
+      // its exact exit is enough. Workflow children need the orderly acknowledgement.
+      const boot = await json<Boot>(join(h.protocolDir, "boot.json"));
+      const userMayQuit =
+        !!boot && sameAgent(boot, h) && normalizePolicy(boot.policy)?.userInput === "allowed";
       if (
-        !validTask(ack, h, "shutdown-ack") ||
+        (!validTask(ack, h, "shutdown-ack") && !userMayQuit) ||
         (await this.process(h.pid)) !== undefined
       )
         throw new RuntimeError(

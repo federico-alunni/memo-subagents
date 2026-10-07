@@ -84,8 +84,15 @@ interface LaunchSpec {
   cwd: string;
   model: string;              // exact provider/model-id
   thinking: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-  isolation?: "isolated";     // -ne -ns -np --no-approve --no-themes (only mode in this version)
-  tools: string[];            // allowlist: --tools, setActiveTools and a tool_call block in the child
+  isolation?: "isolated" | "profile"; // isolated (default): -ne -ns -np --no-approve --no-themes; profile: normal profile
+  agentDir?: string;          // PI_CODING_AGENT_DIR of this child (existing dir, used as is); overrides RuntimeConfig.agentDir
+  tools?: string[];           // allowlist (--tools, setActiveTools, tool_call block); required when isolated
+  denyTools?: string[];       // deactivated and blocked, also without an allowlist
+  userInput?: "takeover" | "allowed"; // default takeover: manual input/user bash/model change blocks automatic control
+  exit?: "parent" | "auto" | "tool";   // default parent: see "Exit policy"
+  skills?: string[];          // sent as /skill:<name> messages before the first prompt, in the same run
+  session?: { kind: "new" } | { kind: "file"; path: string }; // file: existing or seeded session, opened with --session
+  env?: Record<string, string>; // extra child environment (same rules as hostEnv)
   bash?: "unrestricted" | "readonly"; // readonly: one plain argv from an explicit read-only allowlist
   question?: boolean;         // enables the `question` tool (asks the human in the child's pane)
   delegatedTools?: DelegatedToolSpec[];
@@ -127,13 +134,33 @@ interface DelegatedToolSpec {
 - Launch requires the pi CLI to advertise `--session-id --session-dir --no-extensions --no-skills
   --no-prompt-templates --no-approve` before any pane is created.
 
+### Exit policy and user input
+
+- `exit: "parent"` (workflow agents): the child never ends itself; the parent uses `stop` + `close`.
+- `exit: "auto"`: after every normal run (a task or a user turn) the child publishes an immutable `exit` record
+  (`reason: "done"`, or `"error"` with the provider error) and the usual `shutdown-ack`, then exits. An aborted run
+  (Escape) leaves it open. It also gets the `subagent_done` and `caller_ping` tools.
+- `exit: "tool"`: the child ends only through `subagent_done` (`reason: "done"`) or `caller_ping`
+  (`reason: "ping"`, `message`), or when the user quits pi.
+- `observe` reports the record as `exit`; after it the agent observes `stopped` and `close` works as usual.
+- `userInput: "allowed"` (user-driven subagents): typing, user bash and model/thinking changes in the child pane do
+  not block control, and a child that ended because the user quit pi (no acknowledgement) can still be closed.
+- `question`, `subagent_done` and `caller_ping` exist only through their policy flags; they cannot be listed in
+  `tools`, declared as delegated tools or used without the policy.
+
+### Sessions
+
+`session: { kind: "file", path }` opens an existing session (resume) or one seeded by the caller (lineage/fork) with
+`--session`; its header `id` becomes the handle's `sessionId` and the child must report exactly that file.
+The runtime never starts two children on purpose on the same file: preventing it is the caller's job.
+
 ## API
 
 ```ts
 class AgentRuntime {
   constructor(config: RuntimeConfig);
   launch(spec: LaunchSpec): Promise<AgentHandle>;
-  dispatch(h: AgentHandle, task: { taskId: string; prompt: string }): Promise<AgentHandle>;
+  dispatch(h: AgentHandle, task: { taskId: string; prompt: string; skills?: string[] }): Promise<AgentHandle>;
   observe(h: AgentHandle): Promise<Observation>;
   watch(h: AgentHandle, onObservation: (o: Observation) => void | Promise<void>, intervalMs?: number): () => void;
   drainRequests(h: AgentHandle): Promise<ChildRecord[]>;
@@ -144,6 +171,8 @@ class AgentRuntime {
   close(h: AgentHandle): Promise<void>;
   inspectShutdown(h: AgentHandle): Promise<{ acknowledged: boolean; exited: boolean; pidReused: boolean; takenOver: boolean }>;
   focus(h: AgentHandle, target: "child" | "parent"): Promise<boolean>;
+  move(h: AgentHandle, to: { newTab: { label: string } } | { split: { targetPane: string; direction?: "right" | "down"; ratio?: number } }): Promise<AgentHandle>;
+  activity(h: AgentHandle): ActivityReadResult; // display-only phase/tool/provider snapshot
   annotate(h: AgentHandle, note: { status?: string; active?: boolean }): void; // display only
   forget(h: AgentHandle): void;                                                 // display only
   dispose(): void;                                                              // observers only, never kills children
@@ -163,6 +192,7 @@ class AgentRuntime {
 | `close` | After `stop`. Checks shell/tty/occupant, closes only that pane, verifies `pane_not_found`. |
 | `inspectShutdown` | Reconciliation evidence: exact `shutdown-ack`, exact child gone (`exited` is true when the PID is free **or** reused by another process; `pidReused` tells which), user takeover. `ps` failures → `cleanup_uncertain`. |
 | `focus` | Display only, split placements: moves focus between caller and child if the layout still matches. |
+| `move` | Moves the child's pane to a new tab or beside a target pane (pane selector). The new tab is **observed** (a lost answer is resolved by `pane get`); pane, terminal and workspace must not change. Returns the handle with the new `tabId`, which must replace the stored one: the old handle observes `changed`. Nothing changed after an error → `busy`. |
 
 Error codes (`RuntimeError.code`): `unsupported`, `launch_uncertain`, `launch_failed`, `dispatch_uncertain`,
 `cleanup_blocked`, `cleanup_uncertain`, `busy`.
@@ -204,7 +234,8 @@ read-only bash guard; registers the declared delegated tools and, if enabled, `q
 `launch-NNNN-<phase>.json` (launch phases), `boot.json`, `ready.json`, `task.json` (current, replaced),
 `<key>.dispatch.json`, `<key>.accepted.json`, `<key>.settled.json` (key = sha256(taskId)),
 `<key>.request.json` / `<key>.response.json` (key = sha256(requestId)), `interrupt.json` / `interrupt-ack.json`,
-`shutdown.json` / `shutdown-ack.json`, `takeover.json`, `question.json`, `sessions/`. The prompt lives only in
+`shutdown.json` / `shutdown-ack.json`, `takeover.json`, `question.json`, `exit.json`, `activity.json`,
+`move-<uuid>.json`, `sessions/`. The prompt lives only in
 `task.json` and the immutable `<key>.dispatch.json`. `boot.json` also keeps the policy, labels and display data.
 
 ## Presence (widget)

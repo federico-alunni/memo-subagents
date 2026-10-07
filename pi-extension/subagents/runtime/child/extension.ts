@@ -5,13 +5,20 @@ import { Type } from "@sinclair/typebox";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { json, activeTools, validPolicy } from "../protocol.ts";
+import {
+  json,
+  activeTools,
+  normalizePolicy,
+  toolAllowed,
+  validPolicy,
+} from "../protocol.ts";
 import type { Boot, ChildPolicy } from "../protocol.ts";
 import { ChildRuntime } from "./runtime.ts";
 import { answerText, questionComponent } from "./question-dialog.ts";
 import type { QuestionAnswer } from "./question-dialog.ts";
 import { readonlyBashRejection, readonlyCommand } from "./readonly-bash.ts";
 import { CHILD_ENV } from "./env.ts";
+import { createSubagentActivityRecorder } from "../../activity.ts";
 
 export { CHILD_ENV };
 
@@ -21,7 +28,7 @@ export function childToolCall(
   toolName: string,
   input: unknown,
 ): { block: true; reason: string } | undefined {
-  if (!policy || !activeTools(policy).includes(toolName))
+  if (!policy || !toolAllowed(policy, toolName))
     return {
       block: true,
       reason:
@@ -40,7 +47,8 @@ function bootPolicy(): ChildPolicy | undefined {
   if (!dir) return undefined;
   try {
     const boot = JSON.parse(readFileSync(join(dir, "boot.json"), "utf8")) as Boot;
-    return validPolicy(boot.policy) ? boot.policy : undefined;
+    const policy = normalizePolicy(boot.policy);
+    return validPolicy(policy) ? policy : undefined;
   } catch {
     return undefined;
   }
@@ -50,6 +58,52 @@ export default function childExtension(pi: ExtensionAPI): void {
   let runtime: ChildRuntime | undefined;
   let boot: Boot | undefined;
   const declared = bootPolicy();
+  const protocolDir = process.env[CHILD_ENV.protocolDir];
+  // Display-only activity snapshots for the parent's widget/stall detection.
+  const recorder = createSubagentActivityRecorder({
+    runningChildId: process.env[CHILD_ENV.nonce],
+    activityFile: protocolDir ? join(protocolDir, "activity.json") : undefined,
+  });
+  if (declared && declared.exit !== "parent") {
+    pi.registerTool({
+      name: "caller_ping",
+      label: "Caller Ping",
+      description:
+        "Send a help request to the parent agent and exit this session. " +
+        "The parent will be notified with your message and can resume this session with a response. " +
+        "Use when you're stuck, need clarification, or need the parent to take action.",
+      parameters: Type.Object({
+        message: Type.String({ description: "What you need help with" }),
+      }),
+      async execute(_id, params) {
+        if (!runtime) throw new Error("Not an owned runtime child");
+        recorder.callerPing();
+        await runtime.exitWith("ping", { message: params.message });
+        return {
+          content: [{ type: "text", text: "Ping sent. Session will exit and parent will be notified." }],
+          details: {},
+        };
+      },
+    });
+    pi.registerTool({
+      name: "subagent_done",
+      label: "Subagent Done",
+      description:
+        "Call this tool when you have completed your task. " +
+        "It will close this session and return your results to the main session. " +
+        "Your LAST assistant message before calling this becomes the summary returned to the caller.",
+      parameters: Type.Object({}),
+      async execute() {
+        if (!runtime) throw new Error("Not an owned runtime child");
+        recorder.subagentDone();
+        await runtime.exitWith("done");
+        return {
+          content: [{ type: "text", text: "Shutting down subagent session." }],
+          details: {},
+        };
+      },
+    });
+  }
   for (const spec of declared?.delegatedTools ?? []) {
     pi.registerTool({
       name: spec.name,
@@ -139,11 +193,13 @@ export default function childExtension(pi: ExtensionAPI): void {
       boot.agentId !== process.env[CHILD_ENV.agentId] ||
       boot.scope !== process.env[CHILD_ENV.scope] ||
       String(boot.attempt) !== process.env[CHILD_ENV.attempt] ||
-      !validPolicy(boot.policy) ||
-      JSON.stringify(boot.policy) !== JSON.stringify(declared)
+      !validPolicy(normalizePolicy(boot.policy)) ||
+      JSON.stringify(normalizePolicy(boot.policy)) !== JSON.stringify(declared)
     )
       throw new Error("Runtime child environment/boot mismatch");
+    boot = { ...boot, policy: declared! };
     runtime?.dispose();
+    recorder.sessionStart();
     const sessionPath = ctx.sessionManager.getSessionFile();
     if (!sessionPath)
       throw new Error("Runtime children require persistent sessions");
@@ -155,37 +211,76 @@ export default function childExtension(pi: ExtensionAPI): void {
       model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "",
       effort: pi.getThinkingLevel(),
       isIdle: () => ctx.isIdle(),
-      sendPrompt: (prompt) => pi.sendUserMessage(prompt),
+      sendPrompt: (prompt, skills = []) => {
+        // `/skill:<name>` is expanded by pi only with expandPromptTemplates; later messages queue as follow-ups.
+        [...skills.map((skill) => `/skill:${skill}`), prompt].forEach((text, index) =>
+          pi.sendUserMessage(text, {
+            expandPromptTemplates: index < skills.length,
+            ...(index > 0 ? { deliverAs: "followUp" as const } : {}),
+          }),
+        );
+      },
       abort: () => ctx.abort(),
       shutdown: () => ctx.shutdown(),
     });
-    pi.setActiveTools(activeTools(boot.policy));
+    const allowlist = activeTools(boot.policy);
+    pi.setActiveTools(
+      allowlist ??
+        pi.getActiveTools().filter((tool) => !boot!.policy.denyTools.includes(tool)),
+    );
     await runtime.start();
   });
-  pi.on("tool_call", (event) =>
-    childToolCall(boot?.policy, event.toolName, event.input),
-  );
+  pi.on("tool_call", (event) => {
+    recorder.toolCall(event.toolCallId, event.toolName);
+    return childToolCall(boot?.policy, event.toolName, event.input);
+  });
+  // With userInput "allowed" the user drives the child; otherwise any manual control is a takeover.
+  const takeover = async () => {
+    if (boot?.policy.userInput === "takeover") await runtime?.takeover();
+  };
   pi.on("input", async (event) => {
-    if (event.source !== "extension") await runtime?.takeover();
+    recorder.input();
+    if (event.source !== "extension") await takeover();
     return { action: "continue" as const };
   });
   pi.on("user_bash", async () => {
-    await runtime?.takeover();
+    await takeover();
   });
   pi.on("model_select", async (event) => {
     if (boot && `${event.model.provider}/${event.model.id}` !== boot.model)
-      await runtime?.takeover();
+      await takeover();
   });
   pi.on("thinking_level_select", async (event) => {
-    if (boot && event.level !== boot.effort) await runtime?.takeover();
+    if (boot && event.level !== boot.effort) await takeover();
   });
+  pi.on("before_agent_start", () => recorder.beforeAgentStart());
+  pi.on("agent_start", () => recorder.agentStart());
+  pi.on("turn_start", (event) => recorder.turnStart((event as any).turnIndex));
+  pi.on("turn_end", (event) => recorder.turnEnd((event as any).turnIndex));
+  pi.on("before_provider_request", () => recorder.beforeProviderRequest());
+  pi.on("after_provider_response", () => recorder.afterProviderResponse());
+  pi.on("message_update", (event) =>
+    recorder.messageUpdate((event as any).assistantMessageEvent?.type),
+  );
+  pi.on("tool_execution_start", (event) =>
+    recorder.toolExecutionStart(event.toolCallId, event.toolName),
+  );
+  pi.on("tool_execution_update", (event) =>
+    recorder.toolExecutionUpdate(event.toolCallId, event.toolName),
+  );
+  pi.on("tool_result", (event) => recorder.toolResult(event.toolCallId, event.toolName));
+  pi.on("tool_execution_end", (event) =>
+    recorder.toolExecutionEnd(event.toolCallId, event.toolName),
+  );
   pi.on("agent_end", (event) => {
+    recorder.agentEndWaiting();
     runtime?.agentEnd(event.messages);
   });
   pi.on("agent_settled", async () => {
     await runtime?.agentSettled();
   });
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", (event) => {
+    recorder.sessionShutdown((event as any).reason);
     runtime?.dispose();
     runtime = undefined;
   });

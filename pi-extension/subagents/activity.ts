@@ -299,6 +299,7 @@ export function createSubagentActivityRecorder(params: {
   const runningChildId = params.runningChildId?.trim();
   const activityFile = params.activityFile?.trim();
   if (!runningChildId || !activityFile) return createNoopRecorder();
+  const file: string = activityFile;
 
   const now = params.now ?? (() => Date.now());
   const createdAt = now();
@@ -335,7 +336,7 @@ export function createSubagentActivityRecorder(params: {
   function flushNow(): void {
     if (disabled) return;
     try {
-      writeSubagentActivityFile(activityFile, activity);
+      writeSubagentActivityFile(file, activity);
       lastFlushAt = now();
       failureCount = 0;
     } catch {
