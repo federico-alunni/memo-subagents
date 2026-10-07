@@ -1,0 +1,30 @@
+// Public surface of `memo-subagents/runtime`. Contract: docs/runtime.md.
+export { AgentRuntime, RuntimeError, treeDisplayName } from "./agent-runtime.ts";
+export type { RuntimeConfig, LaunchSpec, Observation } from "./agent-runtime.ts";
+export {
+  nodeRunner,
+  readProcessTerminal,
+  processIdentity,
+  terminalName,
+  hostCompositionFromEnv,
+} from "./runner.ts";
+export type { Runner, RunInput, RunResult } from "./runner.ts";
+export {
+  sameAgent,
+  sameTask,
+  validTask,
+  taskKey,
+  onceRequestId,
+  THINKING_LEVELS,
+} from "./protocol.ts";
+export type {
+  AgentHandle,
+  ChildRecord,
+  DelegatedToolSpec,
+  Labels,
+  Placement,
+  BashPolicy,
+  ThinkingLevel,
+} from "./protocol.ts";
+export { presence, presenceActive } from "./presence.ts";
+export type { PresenceEntry, PresenceRegistry, PresenceState } from "./presence.ts";

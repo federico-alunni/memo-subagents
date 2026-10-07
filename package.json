@@ -2,7 +2,9 @@
   "name": "memo-subagents",
   "version": "0.1.0",
   "description": "Interactive pi subagents in Herdr: external agent definitions, pane selector, optional git worktrees",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "license": "MIT",
   "author": "Federico Alunni",
   "repository": {
@@ -10,9 +12,23 @@
     "url": "https://github.com/federico-alunni/memo-subagents"
   },
   "type": "module",
-  "files": ["pi-extension", "config.json.example", "docs", "LICENSE", "THIRD_PARTY_NOTICES.md", "provenance.json", "README.md", "CHANGELOG.md"],
+  "exports": {
+    ".": "./pi-extension/subagents/index.ts",
+    "./runtime": "./pi-extension/subagents/runtime/index.ts",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "pi-extension",
+    "config.json.example",
+    "docs",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "provenance.json",
+    "README.md",
+    "CHANGELOG.md"
+  ],
   "scripts": {
-    "test": "node --import ./test/host-aliases.mjs --test test/*.test.ts test/test.ts test/*.test.mjs",
+    "test": "node --import ./test/host-aliases.mjs --test test/*.test.ts test/test.ts test/*.test.mjs test/runtime/*.test.ts",
     "test:live": "node test/pane-selector-live.mjs",
     "test:integration": "node --import ./test/host-aliases.mjs --test --test-concurrency=1 test/integration/*.test.ts"
   },
@@ -23,6 +39,8 @@
     "@sinclair/typebox": "*"
   },
   "pi": {
-    "extensions": ["./pi-extension/subagents/index.ts"]
+    "extensions": [
+      "./pi-extension/subagents/index.ts"
+    ]
   }
 }
