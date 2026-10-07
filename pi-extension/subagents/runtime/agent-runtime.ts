@@ -92,6 +92,13 @@ export interface LaunchSpec {
   tools?: string[];
   denyTools?: string[];
   bash?: BashPolicy;
+  /** Extra exact command prefixes allowed with bash "readonly" (e.g. "npm test", "gh issue view"). */
+  bashAllow?: string[];
+  /**
+   * Bash "readonly" + userInput "allowed" only: a plain command outside the read-only list and `bashAllow` is
+   * asked to the user in the child's pane (deny / once / always for this child process) instead of blocked.
+   */
+  bashAsk?: boolean;
   question?: boolean;
   delegatedTools?: DelegatedToolSpec[];
   /** "takeover" (default) or "allowed": whether the user may drive the child without blocking control. */
@@ -426,6 +433,10 @@ export class AgentRuntime {
       tools: Array.isArray(input.tools) ? [...input.tools] : null,
       denyTools: [...(input.denyTools ?? [])],
       bash: input.bash ?? "unrestricted",
+      bashAllow: Array.isArray(input.bashAllow)
+        ? input.bashAllow.map((entry) => (typeof entry === "string" ? entry.trim().split(/[ \t]+/).join(" ") : entry)).filter((e) => e !== "")
+        : ((input.bashAllow ?? []) as string[]),
+      bashAsk: (input.bashAsk ?? false) as boolean,
       question: input.question === true,
       delegatedTools: [...(input.delegatedTools ?? [])],
       userInput: input.userInput ?? "takeover",

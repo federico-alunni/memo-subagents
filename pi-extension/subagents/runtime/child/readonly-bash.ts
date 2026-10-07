@@ -213,17 +213,37 @@ function gitAllowed(argv: string[]): boolean {
   return !!spec && argvAllowed(args, spec);
 }
 
+/** One plain argv without shell grammar (no pipes, redirections, quotes, globs, `$`, comments), or undefined. */
+export function plainArgv(command: string): string[] | undefined {
+  if (typeof command !== "string" || !command.trim() || unsafe.test(command)) return undefined;
+  const argv = command.trim().split(/[ \t]+/);
+  if (!argv.every((arg) => token.test(arg))) return undefined;
+  // A word starting with `#` begins a bash comment: bash would run only a prefix
+  // of the validated argv (e.g. `git branch new #x --list` creates a branch).
+  if (argv.some((arg) => arg.startsWith("#"))) return undefined;
+  return argv;
+}
+
+/**
+ * True when a plain argv starts with one of the extra allowed command prefixes (e.g. "npm test",
+ * "gh issue view"). The rest of the argv must be plain tokens too.
+ */
+export function allowedExtraCommand(command: string, allow: readonly string[]): boolean {
+  const argv = plainArgv(command);
+  if (!argv) return false;
+  return allow.some((entry) => {
+    const prefix = typeof entry === "string" ? entry.trim().split(/[ \t]+/).filter(Boolean) : [];
+    return prefix.length > 0 && prefix.length <= argv.length && prefix.every((word, i) => argv[i] === word);
+  });
+}
+
 /**
  * True only for one validated, read-only argv with no shell grammar. No `gh`:
  * a read-only child gets external data from its parent.
  */
 export function readonlyCommand(command: string): boolean {
-  if (typeof command !== "string" || !command.trim() || unsafe.test(command)) return false;
-  const argv = command.trim().split(/[ \t]+/);
-  if (!argv.every((arg) => token.test(arg))) return false;
-  // A word starting with `#` begins a bash comment: bash would run only a prefix
-  // of the validated argv (e.g. `git branch new #x --list` creates a branch).
-  if (argv.some((arg) => arg.startsWith("#"))) return false;
+  const argv = plainArgv(command);
+  if (!argv) return false;
   const cmd = argv[0];
   if (cmd === "git") return gitAllowed(argv);
   const spec = Object.hasOwn(COMMANDS, cmd) ? COMMANDS[cmd] : undefined;

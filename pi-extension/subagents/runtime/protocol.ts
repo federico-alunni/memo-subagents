@@ -90,10 +90,25 @@ export interface ChildPolicy {
   /** Tools deactivated and blocked even when present in the profile. */
   denyTools: string[];
   bash: BashPolicy;
+  /** Extra exact command prefixes allowed on top of the read-only bash policy (e.g. "npm test"). */
+  bashAllow: string[];
+  /** Read-only bash with userInput "allowed": a plain command outside the lists is asked to the user in the pane. */
+  bashAsk: boolean;
   question: boolean;
   delegatedTools: DelegatedToolSpec[];
   userInput: UserInputPolicy;
   exit: ExitPolicy;
+}
+/**
+ * One `bashAllow` entry: a non-empty sequence of plain words (no shell grammar, quotes, globs, `$`, comments),
+ * matched as an exact word prefix of the command (e.g. "npm test", "gh issue view").
+ */
+export function validBashAllowEntry(entry: unknown): entry is string {
+  return (
+    typeof entry === "string" &&
+    entry.trim() !== "" &&
+    entry.trim().split(/[ \t]+/).every((word) => /^[a-zA-Z0-9_./,:+=@%~^-]+$/.test(word))
+  );
 }
 /** Fill the defaults of fields added after 0.2.0, so older boot records keep their meaning. */
 export function normalizePolicy(raw: unknown): ChildPolicy | undefined {
@@ -103,6 +118,8 @@ export function normalizePolicy(raw: unknown): ChildPolicy | undefined {
     tools: p.tools === null ? null : (p.tools as string[]),
     denyTools: p.denyTools ?? [],
     bash: p.bash as BashPolicy,
+    bashAllow: p.bashAllow ?? [],
+    bashAsk: p.bashAsk ?? false,
     question: p.question as boolean,
     delegatedTools: p.delegatedTools as DelegatedToolSpec[],
     userInput: p.userInput ?? "takeover",
@@ -345,6 +362,13 @@ export function validPolicy(policy: ChildPolicy | undefined): policy is ChildPol
     (policy.userInput === "takeover" || policy.userInput === "allowed") &&
     (policy.exit === "parent" || policy.exit === "auto" || policy.exit === "tool") &&
     (policy.bash === "unrestricted" || policy.bash === "readonly") &&
+    Array.isArray(policy.bashAllow) &&
+    // Extra commands only make sense on top of the read-only policy; each is a plain word sequence.
+    (policy.bashAllow.length === 0 || policy.bash === "readonly") &&
+    policy.bashAllow.every(validBashAllowEntry) &&
+    // Asking needs the read-only guard and a user who drives the child (never workflow agents).
+    typeof policy.bashAsk === "boolean" &&
+    (!policy.bashAsk || (policy.bash === "readonly" && policy.userInput === "allowed")) &&
     typeof policy.question === "boolean" &&
     Array.isArray(policy.delegatedTools) &&
     policy.delegatedTools.every(

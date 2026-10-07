@@ -1283,6 +1283,8 @@ const policyOf = (spec: {
   tools: spec.tools,
   denyTools: [] as string[],
   bash: spec.bash ?? ("unrestricted" as const),
+  bashAllow: [] as string[],
+  bashAsk: false,
   question: spec.question === true,
   delegatedTools: spec.delegatedTools ?? [],
   userInput: "takeover" as const,
@@ -1868,6 +1870,8 @@ test("boot records of 0.2.0 (without the new policy fields) keep their meaning",
     tools: ["read"],
     denyTools: [],
     bash: "readonly",
+    bashAllow: [],
+    bashAsk: false,
     question: true,
     delegatedTools: [],
     userInput: "takeover",
@@ -1920,4 +1924,66 @@ test("a user-driven child may be moved to another tab by the user; a workflow ch
     f.fake.pane = () => ({ ...base(), tab_id: "tab-moved-by-user" });
     assert.equal((await f.transport.observe(h)).kind, userDriven ? "active" : "changed");
   }
+});
+
+test("bash-allow adds exact command prefixes on top of the read-only policy, nothing else", () => {
+  const policy = { ...REVIEWER_POLICY, bashAllow: ["npm test", "gh issue view"] };
+  const allowed = (command: string) => childToolCall(policy, "bash", { command }) === undefined;
+  assert.ok(allowed("git log -5 --oneline")); // read-only list still applies
+  assert.ok(allowed("npm test"));
+  assert.ok(allowed("npm test -- --grep runtime"));
+  assert.ok(allowed("gh issue view 12"));
+  for (const command of [
+    "npm testx",
+    "npm run build",
+    "gh issue create --title x",
+    "gh issue view 12 | head",
+    "npm test && rm -rf x",
+    "npm test $(whoami)",
+    "gh issue view 'quoted'",
+  ])
+    assert.equal(allowed(command), false, command);
+  assert.match(childToolCall(policy, "bash", { command: "npm run build" })?.reason ?? "", /Also allowed: npm test; gh issue view/);
+});
+
+test("bash-allow requires the read-only policy and plain words", async (t) => {
+  const f = await fixture(t);
+  for (const [index, patch] of [
+    { bashAllow: ["npm test"] }, // unrestricted bash: meaningless
+    { bash: "readonly" as const, bashAllow: ["npm test | cat"] },
+    { bash: "readonly" as const, bashAllow: ["rm $HOME"] },
+  ].entries())
+    await assert.rejects(
+      f.transport.launch({ ...f.input, agentId: `allow-${index}`, ...patch }),
+      errorCode("unsupported"),
+    );
+  assert.equal(f.fake.createCount, 0);
+  await f.transport.launch({ ...f.input, bash: "readonly", bashAllow: [" npm test ", ""] });
+  assert.deepEqual(f.fake.boot!.policy.bashAllow, ["npm test"]);
+});
+
+test("bash-ask requires the read-only policy and a user-driven child; old boot records never ask", async (t) => {
+  const f = await fixture(t);
+  for (const [index, patch] of [
+    { bashAsk: true, userInput: "allowed" as const }, // unrestricted bash: nothing to ask
+    { bashAsk: true, bash: "readonly" as const }, // takeover (workflow) children never ask
+    { bashAsk: true, bash: "readonly" as const, userInput: "takeover" as const },
+    { bashAsk: "yes" as unknown as boolean, bash: "readonly" as const, userInput: "allowed" as const },
+    { bash: "readonly" as const, bashAllow: "npm test" as unknown as string[] },
+    { bash: "readonly" as const, bashAllow: [42 as unknown as string] },
+  ].entries())
+    await assert.rejects(
+      f.transport.launch({ ...f.input, agentId: `ask-${index}`, ...patch }),
+      errorCode("unsupported"),
+    );
+  assert.equal(f.fake.createCount, 0);
+  await f.transport.launch({
+    ...f.input,
+    bash: "readonly",
+    userInput: "allowed",
+    bashAsk: true,
+    bashAllow: ["npm  test", "gh issue view"],
+  });
+  assert.equal(f.fake.boot!.policy.bashAsk, true);
+  assert.deepEqual(f.fake.boot!.policy.bashAllow, ["npm test", "gh issue view"]);
 });

@@ -16,18 +16,23 @@ import type { Boot, ChildPolicy } from "../protocol.ts";
 import { ChildRuntime } from "./runtime.ts";
 import { answerText, questionComponent } from "./question-dialog.ts";
 import type { QuestionAnswer } from "./question-dialog.ts";
-import { readonlyBashRejection, readonlyCommand } from "./readonly-bash.ts";
+import { bashDecision, createBashApprovals, readonlyBlockReason } from "./bash-policy.ts";
+import type { BashAskContext } from "./bash-policy.ts";
 import { CHILD_ENV } from "./env.ts";
 import { createSubagentActivityRecorder } from "../../activity.ts";
 import { installIdentityWidget } from "./identity-widget.ts";
 
 export { CHILD_ENV };
 
-/** Allowlist + read-only bash guard. Anything not activated by the policy is blocked. */
+/**
+ * Allowlist + read-only bash guard. Anything not activated by the policy is blocked. Synchronous: a bash
+ * command the policy would ask about is blocked here (no UI); `createChildToolGuard` asks instead.
+ */
 export function childToolCall(
   policy: ChildPolicy | undefined,
   toolName: string,
   input: unknown,
+  sessionAllow: readonly string[] = [],
 ): { block: true; reason: string } | undefined {
   if (!policy || !toolAllowed(policy, toolName))
     return {
@@ -37,9 +42,28 @@ export function childToolCall(
     };
   if (toolName === "bash" && policy.bash === "readonly") {
     const command = (input as { command?: unknown } | undefined)?.command;
-    if (typeof command !== "string" || !readonlyCommand(command))
-      return { block: true, reason: readonlyBashRejection("Read-only agent") };
+    if (bashDecision(policy, command, sessionAllow) !== "allow")
+      return { block: true, reason: readonlyBlockReason(policy, sessionAllow) };
   }
+}
+
+/**
+ * The child's `tool_call` guard: `childToolCall`, plus the bash question for policies with `bashAsk`
+ * (user-driven read-only children). "Always" answers are remembered by this guard, i.e. per child process.
+ */
+export function createChildToolGuard() {
+  const approvals = createBashApprovals();
+  return async (
+    policy: ChildPolicy | undefined,
+    toolName: string,
+    input: unknown,
+    ctx: BashAskContext,
+  ): Promise<{ block: true; reason: string } | undefined> => {
+    const blocked = childToolCall(policy, toolName, input, approvals.prefixes());
+    if (!blocked || !policy || toolName !== "bash" || !policy.bashAsk || !toolAllowed(policy, toolName))
+      return blocked;
+    return approvals.check(policy, (input as { command?: unknown } | undefined)?.command, ctx);
+  };
 }
 
 type SendUserMessage = (
@@ -105,6 +129,7 @@ export default function childExtension(pi: ExtensionAPI): void {
     activityFile: protocolDir ? join(protocolDir, "activity.json") : undefined,
   });
   const delivery = createTaskDelivery((text, options) => pi.sendUserMessage(text, options));
+  const toolGuard = createChildToolGuard();
   // Identity widget (and its Ctrl+J) only for user-driven children: workflow children keep pi's keys.
   const widget = declared?.userInput === "allowed"
     ? installIdentityWidget(pi, () =>
@@ -271,9 +296,9 @@ export default function childExtension(pi: ExtensionAPI): void {
     await runtime.start();
     widget?.show(ctx);
   });
-  pi.on("tool_call", (event) => {
+  pi.on("tool_call", (event, ctx) => {
     recorder.toolCall(event.toolCallId, event.toolName);
-    return childToolCall(boot?.policy, event.toolName, event.input);
+    return toolGuard(boot?.policy, event.toolName, event.input, ctx);
   });
   // With userInput "allowed" the user drives the child; otherwise any manual control is a takeover.
   const takeover = async () => {

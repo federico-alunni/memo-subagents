@@ -94,6 +94,8 @@ interface LaunchSpec {
   session?: { kind: "new" } | { kind: "file"; path: string }; // file: existing or seeded session, opened with --session
   env?: Record<string, string>; // extra child environment (same rules as hostEnv)
   bash?: "unrestricted" | "readonly"; // readonly: one plain argv from an explicit read-only allowlist
+  bashAllow?: string[];       // readonly only: extra exact word prefixes, e.g. ["npm test", "gh issue view"]
+  bashAsk?: boolean;          // readonly + userInput "allowed" only: ask the user instead of blocking (see "Bash policy")
   question?: boolean;         // enables the `question` tool (asks the human in the child's pane)
   delegatedTools?: DelegatedToolSpec[];
   appendSystemPrompt?: string[]; // absolute, readable files passed with --append-system-prompt
@@ -140,6 +142,23 @@ interface DelegatedToolSpec {
   the prompt) are queued as follow-ups once pi reports the run started, so the whole task is one run.
 - Launch requires the pi CLI to advertise `--session-id --session-dir --no-extensions --no-skills
   --no-prompt-templates --no-approve` before any pane is created.
+
+### Bash policy
+
+- `bash: "readonly"` accepts one plain argv (no pipes, redirections, quotes, globs, `$`, `#` comments) from an
+  explicit read-only allowlist (`git log/show/diff/status`, `rg`, `cat`, `ls`, …); anything else is blocked with
+  guidance for the model.
+- `bashAllow` adds exact word prefixes on top of it: `"npm test"` allows `npm test` and `npm test -- --grep x`,
+  not `npm testx` or `npm run build`. The command must still be one plain argv. Entries are trimmed and
+  whitespace-normalized; each must be plain words (`[A-Za-z0-9_./,:+=@%~^-]`). Non-empty `bashAllow` requires
+  `bash: "readonly"`, otherwise `unsupported`.
+- `bashAsk: true` (requires `bash: "readonly"` and `userInput: "allowed"`, otherwise `unsupported`): a plain
+  command outside the allowlist and `bashAllow` is asked in the child's pane (`ctx.ui.select`), options in this
+  order: `Rifiuta` (default), `Permetti una volta`, `Permetti sempre in questa sessione dell'agente`. "Always" allows
+  later commands with the same first two words (or the same single word) for the rest of that child process only;
+  it is never persisted. Questions are asked one at a time. No UI (`ctx.hasUI` false), cancel or abort → blocked;
+  commands with shell grammar are blocked without asking. Workflow children (`takeover`) never ask.
+- Boot records without `bashAllow`/`bashAsk` (0.2.0) mean `[]`/`false`.
 
 ### Exit policy and user input
 
@@ -239,7 +258,7 @@ per-launch environment and `MEMO_RUNTIME_PROTOCOL_DIR / _NONCE / _SCOPE / _AGENT
 The child extension: verifies boot identity, model, thinking, session and cwd; publishes `ready`; accepts each task
 exactly once; publishes `settled` only on `agent_settled` (provider errors and aborts stay distinct; no assistant
 outcome is an error); handles interrupt/shutdown requests; records takeover; enforces the tool allowlist and the
-read-only bash guard; registers the declared delegated tools and, if enabled, `question` and the exit tools; writes
+read-only bash guard (with `bashAllow`, and the user question for `bashAsk`); registers the declared delegated tools and, if enabled, `question` and the exit tools; writes
 display-only activity snapshots (0600). User-driven children (`userInput: "allowed"`) also get an identity widget
 (label, tools, denied tools; Ctrl+J toggles the list); workflow children keep pi's own Ctrl+J.
 
