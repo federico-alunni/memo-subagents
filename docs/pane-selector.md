@@ -11,7 +11,7 @@ pi-memo-subagents keeps one agent visible next to the main pane and runs the oth
 - Placement is decided by the runtime (`placement: "auto"` for the `subagent` tool; Issue Round's triage and planner use `"visible"`, which parks the agent shown beside the main pane in a tab): the split is reserved synchronously (concurrent launches never get two splits), the runtime creates the pane there.
 - The menu lists this session's subagents and the other runtime agents in the main pane's workspace (e.g. `Issue Round › planner`). Each move goes through the runtime that launched the agent, which observes the new tab; the owner's handle stays valid (recorded move). Agents in other workspaces (Herdr worktree spaces) are never moved.
 - `/subagent <agent> [task]` keeps the spawn behaviour.
-- `Ctrl+Alt+X` opens the same menu without issuing a model request.
+- `Ctrl+Alt+X` cycles without a menu: it shows the open agent after the visible one in the menu order (wrapping around; the first one when none is visible). No model request.
 - The widget marks the selected agent with `▶`, Issue Round rows included (and worktree children with `⎇ <branch>`); the `/subagent · Ctrl+Alt+X` hint is shown once, also when only Issue Round agents are open.
 - Completion/result delivery is unchanged. Finished children close normally. If the visible child finishes, the right split disappears until you select another open child (or a new first child starts). There is no automatic selection change.
 - Existing unrelated splits, zoomed tabs and panes moved to another workspace are never reorganized; the selector refuses and explains why.

@@ -17,6 +17,8 @@
 
 ### Changed
 
+- `Ctrl+Alt+X` cycles to the next open agent (menu order, wrapping around) instead of opening the `/subagent` menu.
+
 - The `subagent` tool requires `thinking` unless the named agent declares a `thinking` default in its frontmatter: the caller's level is no longer inherited, so the master decides the effort of every spawn. A missing value is refused before any worktree or pane (`thinking is required…`, with the guidance scale). `subagent_resume` keeps the session's level, and runtime clients (Issue Round) are unchanged.
 - Renamed from `memo-subagents` to **pi-memo-subagents**: package name (`pi-memo-subagents/runtime`), repository and checkout directory. Runtime state (`$TMPDIR/pi-memo-subagents-<uid>`), the worktree registry (`<agent dir>/pi-memo-subagents/worktrees`), the Herdr metadata source and the process-wide `Symbol.for` keys use the new name: agents launched by an older copy are not adopted after `/reload`. Environment variables too: `MEMO_SUBAGENTS_CHILD_EXTENSIONS` / `MEMO_SUBAGENTS_CHILD_ENV` are now `PI_MEMO_SUBAGENTS_CHILD_EXTENSIONS` / `PI_MEMO_SUBAGENTS_CHILD_ENV` (the old names are no longer read), and the child identity variables `MEMO_RUNTIME_*` are `PI_MEMO_RUNTIME_*`.
 - Herdr Agents panel name of every subagent: `<caller workspace>-<caller tab>-sub<n>` (e.g. `local-app-PLAN-sub1`) instead of `└─ <label>`. `n` is the first index not used by the caller pane's live subagents of any runtime client (active + 1 without gaps); concurrent launches in one process get distinct indices. Display only: unreadable labels are omitted and failures never affect the launch. `treeDisplayName` is replaced by `subagentPanelName` and `nextSubagentIndex`.

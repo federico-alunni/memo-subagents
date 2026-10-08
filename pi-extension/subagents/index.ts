@@ -895,7 +895,7 @@ function presenceRowLine(entry: PresenceEntry, width: number, accent: string, no
   return borderLine(left, ` ${modelId}|${entry.thinking} · ${presenceStatus(entry, now)} `, width, accent);
 }
 
-const SELECTOR_HINT = " /subagent · Ctrl+Alt+X: select visible agent ";
+const SELECTOR_HINT = " /subagent · Ctrl+Alt+X: next agent ";
 
 /** Runtime agents of other clients, one box per display group (e.g. "Issue Round"); `hint` in the last. */
 function renderPresenceGroupLines(entries: PresenceEntry[], width: number, hint = false, now = Date.now()): string[] {
@@ -2941,7 +2941,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
   // User-only layout selector: no model turn and no changes to child lifecycle. Lists this session's
   // subagents and the other runtime agents of this process beside the main pane (e.g. Issue Round).
-  const selectSubagentView = async (args: string, ctx: ExtensionContext) => {
+  // `cycle`: no menu, show the agent after the visible one (wrapping around; the first when none is visible).
+  const selectSubagentView = async (args: string, ctx: ExtensionContext, cycle = false) => {
     if (ctx.mode !== "tui" || !isTerminalAvailable()) {
       ctx.ui.notify("Subagent view requires Pi running interactively inside Herdr", "warning");
       return;
@@ -2962,6 +2963,13 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           return;
         }
         chosen = matches[0];
+      } else if (cycle) {
+        const current = choices.findIndex((choice) => choice.paneId === visible);
+        if (current !== -1 && choices.length === 1) {
+          ctx.ui.notify(`${choices[0].label} is the only open agent`, "info");
+          return;
+        }
+        chosen = choices[(current + 1) % choices.length];
       } else {
         const labels = choices.map((choice) => `${choice.paneId === visible ? "▶ " : "  "}${choice.label}`);
         const selected = await ctx.ui.select("Subagents — choose the terminal shown on the right", labels);
@@ -2984,8 +2992,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     }
   };
   pi.registerShortcut("ctrl+alt+x", {
-    description: "Choose the visible subagent terminal",
-    handler: (ctx) => selectSubagentView("", ctx),
+    description: "Cycle the visible subagent terminal",
+    handler: (ctx) => selectSubagentView("", ctx, true),
   });
 
   // /iterate command — fork the session into a subagent

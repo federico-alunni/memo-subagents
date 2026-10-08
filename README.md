@@ -32,7 +32,7 @@ For a profile launched with `pi -ne` (packages disabled), load it explicitly wit
 
 ## Herdr UX
 
-The default surface is `selector` (`PI_SUBAGENT_SURFACE`): the first child opens a half-width split on the right, further children run in background tabs of the same workspace. `/subagent` without arguments (or `Ctrl+Alt+X`) picks which open child is shown on the right without restarting anything. `PI_SUBAGENT_SURFACE=split` or `tab` restore the upstream behaviours. Details: [docs/pane-selector.md](docs/pane-selector.md).
+The default surface is `selector` (`PI_SUBAGENT_SURFACE`): the first child opens a half-width split on the right, further children run in background tabs of the same workspace. `/subagent` without arguments picks which open child is shown on the right without restarting anything; `Ctrl+Alt+X` cycles to the next one. `PI_SUBAGENT_SURFACE=split` or `tab` restore the upstream behaviours. Details: [docs/pane-selector.md](docs/pane-selector.md).
 
 ## Tools and commands
 
@@ -46,7 +46,7 @@ The default surface is `selector` (`PI_SUBAGENT_SURFACE`): the first child opens
 | `/subagent [agent task]` | command | Pick the visible child, or spawn `agent` with `task`. |
 | `/iterate [task]` | command | Fork the session into an interactive child. |
 | `/subagent-worktrees` | command | Interactive list/remove of subagent worktrees. |
-| `Ctrl+Alt+X` | shortcut | Same picker as `/subagent`. |
+| `Ctrl+Alt+X` | shortcut | Cycles the agent shown on the right (next open agent, wrapping around), no menu. |
 
 `spawning: false` in agent frontmatter denies all of `subagent`, `subagent_interrupt`, `subagents_list`, `subagent_resume` and `subagent_worktrees` to that child; `deny-tools` denies individual tools.
 
