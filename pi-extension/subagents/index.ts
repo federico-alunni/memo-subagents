@@ -925,7 +925,7 @@ function renderSubagentWidgetLines(
   }
   for (const row of runtimeRows) lines.push(presenceRowLine(row, width, accent, now));
 
-  lines.push(borderLine(" /subagent · Ctrl+Alt+S: select visible agent ", "", width, accent));
+  lines.push(borderLine(" /subagent · Ctrl+Alt+X: select visible agent ", "", width, accent));
   lines.push(borderBottom(width, accent));
   return lines;
 }
@@ -2872,7 +2872,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       ctx.ui.notify(`Unable to switch subagent: ${error instanceof Error ? error.message : String(error)}`, "error");
     }
   };
-  pi.registerShortcut("ctrl+alt+s", {
+  pi.registerShortcut("ctrl+alt+x", {
     description: "Choose the visible subagent terminal",
     handler: (ctx) => selectSubagentView("", ctx),
   });

@@ -10,7 +10,7 @@ memo-subagents keeps one child visible next to the main pane and runs the others
 - `/subagent` with no arguments opens a pi selection dialog listing tracked, open children. Selecting a child moves its existing terminal to the right and parks the previously visible child in a background tab. No process or conversation is restarted and pane IDs stay stable, so watchers keep working.
 - The selector only decides placement: it reserves the visible split synchronously (concurrent launches never get two splits), the agent runtime creates the pane there, and moves go through the runtime's `move`, which observes the new tab and updates the child's handle. Agents of other runtime clients (e.g. issue-round) are never moved.
 - `/subagent <agent> [task]` keeps the spawn behaviour.
-- `Ctrl+Alt+S` opens the same menu without issuing a model request.
+- `Ctrl+Alt+X` opens the same menu without issuing a model request.
 - The widget marks the selected child with `▶` (and worktree children with `⎇ <branch>`).
 - Completion/result delivery is unchanged. Finished children close normally. If the visible child finishes, the right split disappears until you select another open child (or a new first child starts). There is no automatic selection change.
 - Existing unrelated splits, zoomed tabs and panes moved to another workspace are never reorganized; the selector refuses and explains why.

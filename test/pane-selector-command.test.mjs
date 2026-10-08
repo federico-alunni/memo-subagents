@@ -28,7 +28,7 @@ test('/subagent without arguments selects a live child, not a model turn or sepa
     assert.match(title, /Subagents/);
     assert.equal(selected, child.surface);
     assert.equal(f.sent.length, 0);
-    assert.ok(f.shortcuts.has('ctrl+alt+s'));
+    assert.ok(f.shortcuts.has('ctrl+alt+x'));
   } finally {
     paneSelector.visible = oldVisible;
     paneSelector.select = oldSelect;
