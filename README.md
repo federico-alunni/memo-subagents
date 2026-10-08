@@ -30,7 +30,7 @@ pi update --extensions                                       # pull new versions
 ```
 
 Without a `@ref` pi follows `main`, so `pi update --extensions` picks up every new release. Pinning a release
-(`…pi-memo-subagents@v0.2.0`) freezes that tag: `pi update` will not move it, re-run `pi install` with the new tag.
+(`…pi-memo-subagents@v0.3.0`) freezes that tag: `pi update` will not move it, re-run `pi install` with the new tag.
 The `pi-memo-question` dependency is fetched from GitHub automatically when pi installs the package.
 
 The `question` tool comes from [pi-memo-question](https://github.com/federico-alunni/pi-memo-question). For the main agent install it too (`pi install git:github.com/federico-alunni/pi-memo-question`); children use that installed copy when it exists (so the tool is loaded once) and fall back to the dependency bundled with this package otherwise.

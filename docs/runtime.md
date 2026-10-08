@@ -17,7 +17,7 @@ scheduling and its own durable state; runtime records are **evidence**, not anot
 ## Consuming it from another package
 
 ```json
-"dependencies": { "pi-memo-subagents": "git+https://github.com/federico-alunni/pi-memo-subagents.git#semver:^0.2.0" }
+"dependencies": { "pi-memo-subagents": "git+https://github.com/federico-alunni/pi-memo-subagents.git#semver:^0.3.0" }
 ```
 
 Import only `pi-memo-subagents/runtime` (never the extension entry). Under pi, extensions are loaded with jiti and
