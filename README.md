@@ -109,7 +109,7 @@ the same widget, grouped by client. The `subagent` tool is a client of the same 
 - `models`: default model per agent name (tool argument → frontmatter → `models.agents` → `models.default` → parent).
 - `worktrees` (optional, both keys optional): `root` puts worktrees under `<root>/<repoName>/`; `branchPrefix` changes the generated branch prefix. Unknown keys are rejected.
 
-Environment: `PI_SUBAGENT_SURFACE` (`selector` | `split` | `tab`) and the host composition variables `MEMO_SUBAGENTS_CHILD_EXTENSIONS` / `MEMO_SUBAGENTS_CHILD_ENV` ([docs/child-host.md](docs/child-host.md)).
+Environment: `PI_SUBAGENT_SURFACE` (`selector` | `split` | `tab`) and the host composition variables `PI_MEMO_SUBAGENTS_CHILD_EXTENSIONS` / `PI_MEMO_SUBAGENTS_CHILD_ENV` ([docs/child-host.md](docs/child-host.md)).
 
 ## Development
 

@@ -4,8 +4,8 @@ A pi child runs in a new Herdr pane. It does **not** inherit the parent pi proce
 
 | Variable | Format | Effect |
 | --- | --- | --- |
-| `MEMO_SUBAGENTS_CHILD_EXTENSIONS` | `:`-separated **absolute** paths | Each path is passed to the child as `-e <path>`, right after the runtime child extension. Relative or empty entries are ignored; duplicates are removed. |
-| `MEMO_SUBAGENTS_CHILD_ENV` | `,`-separated variable names | Each listed variable that is defined in the parent process is forwarded into the child command as `NAME=value` (shell-quoted). Invalid names, undefined variables, `PI_*` and `MEMO_SUBAGENTS_*` names are ignored. |
+| `PI_MEMO_SUBAGENTS_CHILD_EXTENSIONS` | `:`-separated **absolute** paths | Each path is passed to the child as `-e <path>`, right after the runtime child extension. Relative or empty entries are ignored; duplicates are removed. |
+| `PI_MEMO_SUBAGENTS_CHILD_ENV` | `,`-separated variable names | Each listed variable that is defined in the parent process is forwarded into the child command as `NAME=value` (shell-quoted). Invalid names, undefined variables and `PI_*` names (including `PI_MEMO_*`) are ignored. |
 
 They apply to:
 
@@ -24,8 +24,8 @@ Without the variables, children get no extra extension or variable.
 - **Profiles started with `-ne`**: needed for anything the children must load that is not a package of their profile, for example a model-provider extension and its configuration file:
 
   ```bash
-  export MEMO_SUBAGENTS_CHILD_EXTENSIONS="/abs/path/provider-extension"
-  export MEMO_SUBAGENTS_CHILD_ENV="PROVIDER_CONFIG"
+  export PI_MEMO_SUBAGENTS_CHILD_EXTENSIONS="/abs/path/provider-extension"
+  export PI_MEMO_SUBAGENTS_CHILD_ENV="PROVIDER_CONFIG"
   exec pi -ne -e /abs/path/host-extension -e /abs/path/pi-memo-subagents "$@"
   ```
 
@@ -33,4 +33,4 @@ Do not put these in `config.json`: the package root (and therefore `config.json`
 
 ## Reserved variables
 
-Launch commands set, after the host variables (resume sets the applicable subset): `PI_DENY_TOOLS` (when frontmatter denies tools), `PI_SUBAGENT_NAME`, `PI_SUBAGENT_AGENT`, `PI_SUBAGENT_AUTO_EXIT`, `PI_SUBAGENT_SESSION`, `PI_SUBAGENT_ID`, `PI_SUBAGENT_ACTIVITY_FILE`, `PI_SUBAGENT_SURFACE`. These cannot be overridden through `MEMO_SUBAGENTS_CHILD_ENV`.
+Launch commands set, after the host variables (resume sets the applicable subset): `PI_DENY_TOOLS` (when frontmatter denies tools), `PI_SUBAGENT_NAME`, `PI_SUBAGENT_AGENT`, `PI_SUBAGENT_AUTO_EXIT`, `PI_SUBAGENT_SESSION`, `PI_SUBAGENT_ID`, `PI_SUBAGENT_ACTIVITY_FILE`, `PI_SUBAGENT_SURFACE`. These cannot be overridden through `PI_MEMO_SUBAGENTS_CHILD_ENV`.

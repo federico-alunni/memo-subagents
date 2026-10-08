@@ -11,7 +11,7 @@ pi-memo-subagents is a modified copy of MIT-licensed software. The full license 
    - `pane-selector.ts`: selector surface (default), `/subagent` picker, `Ctrl+Alt+X`, `▶` widget marker, `randomBytes(12)` child ids.
    - bundled `agents/`, `/plan` and `plan-skill.md` removed.
 4. **pi-memo-subagents 0.1.0** (Federico Alunni):
-   - `child-host.ts`: `MEMO_SUBAGENTS_CHILD_EXTENSIONS` / `MEMO_SUBAGENTS_CHILD_ENV`, applied to launch and resume (replaces the vendored `IR_CHILD_*` patch).
+   - `child-host.ts`: `PI_MEMO_SUBAGENTS_CHILD_EXTENSIONS` / `PI_MEMO_SUBAGENTS_CHILD_ENV`, applied to launch and resume (replaces the vendored `IR_CHILD_*` patch).
    - `worktree.ts` and `index.ts`: optional git worktree isolation, `subagent_worktrees` tool, `/subagent-worktrees` command.
    - `terminal.ts` / `herdr.ts`: optional pane cwd.
 5. **Unreleased** (Federico Alunni):

@@ -76,7 +76,7 @@ export interface RuntimeConfig {
   agentDir?: string;
   /** Absolute extensions loaded by every child after the runtime child extension (e.g. a provider). */
   hostExtensions?: string[];
-  /** Environment forwarded to every child; no MEMO_RUNTIME_* or PI_CODING_AGENT_DIR. */
+  /** Environment forwarded to every child; no PI_MEMO_RUNTIME_* or PI_CODING_AGENT_DIR. */
   hostEnv?: Record<string, string>;
   piExecutable?: string;
   herdrExecutable?: string;
@@ -718,7 +718,7 @@ export class AgentRuntime {
     for (const [name, value] of extraEnv)
       if (
         !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ||
-        name.startsWith("MEMO_RUNTIME_") ||
+        name.startsWith("PI_MEMO_RUNTIME_") ||
         name === "PI_CODING_AGENT_DIR" ||
         typeof value !== "string"
       )

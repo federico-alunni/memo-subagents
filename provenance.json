@@ -20,7 +20,7 @@
     "pi-memo-subagents 0.1.0: see changes"
   ],
   "changes": [
-    "child-host.ts: MEMO_SUBAGENTS_CHILD_EXTENSIONS / MEMO_SUBAGENTS_CHILD_ENV replace IR_CHILD_* (which is no longer read); applied to fresh pi launches and to subagent_resume (buildResumeCommand).",
+    "child-host.ts: PI_MEMO_SUBAGENTS_CHILD_EXTENSIONS / PI_MEMO_SUBAGENTS_CHILD_ENV replace IR_CHILD_* (which is no longer read); applied to fresh pi launches and to subagent_resume (buildResumeCommand).",
     "worktree.ts: optional git worktree isolation (plan/create/rollback/state/remove/registry, config.json `worktrees`).",
     "index.ts: worktree / worktreeBranch / worktreeBase parameters, dirty-source prompt, details.worktree in results, worktree-aware resume, subagent_worktrees tool (in SPAWNING_TOOLS), /subagent-worktrees command, widget/renderer badges.",
     "terminal.ts / herdr.ts: optional pane cwd argument (defaults to process.cwd() as before).",

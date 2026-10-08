@@ -6,18 +6,18 @@
  * Hosts that need their children to load extra extensions (for example a
  * custom model provider) or to see extra variables declare them here:
  *
- * - `MEMO_SUBAGENTS_CHILD_EXTENSIONS`: ':'-separated absolute extension paths,
+ * - `PI_MEMO_SUBAGENTS_CHILD_EXTENSIONS`: ':'-separated absolute extension paths,
  *   each passed to the child as `-e <path>` after the runtime child extension.
- * - `MEMO_SUBAGENTS_CHILD_ENV`: ','-separated variable names forwarded from
- *   this process into the child command. `PI_*` and `MEMO_SUBAGENTS_*` names
- *   are refused (those are owned by pi and by this package).
+ * - `PI_MEMO_SUBAGENTS_CHILD_ENV`: ','-separated variable names forwarded from
+ *   this process into the child command. `PI_*` names (including
+ *   `PI_MEMO_*`) are refused: they are owned by pi and by this package.
  *
  * Applied by the agent runtime (hostCompositionFromEnv) to `subagent` launches and `subagent_resume`.
  * No other variable family is read: in particular `IR_CHILD_*` is ignored.
  */
 
-export const CHILD_EXTENSIONS_ENV = "MEMO_SUBAGENTS_CHILD_EXTENSIONS";
-export const CHILD_ENV_ENV = "MEMO_SUBAGENTS_CHILD_ENV";
+export const CHILD_EXTENSIONS_ENV = "PI_MEMO_SUBAGENTS_CHILD_EXTENSIONS";
+export const CHILD_ENV_ENV = "PI_MEMO_SUBAGENTS_CHILD_ENV";
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -38,7 +38,7 @@ export function hostChildEnv(env: NodeJS.ProcessEnv = process.env): [string, str
   for (const raw of (env[CHILD_ENV_ENV] ?? "").split(",")) {
     const name = raw.trim();
     if (!ENV_NAME.test(name) || seen.has(name)) continue;
-    if (name.startsWith("PI_") || name.startsWith("MEMO_SUBAGENTS_")) continue;
+    if (name.startsWith("PI_")) continue; // includes PI_MEMO_SUBAGENTS_* and PI_MEMO_RUNTIME_*
     const value = env[name];
     if (value === undefined) continue;
     seen.add(name);

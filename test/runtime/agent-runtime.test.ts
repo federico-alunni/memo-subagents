@@ -207,7 +207,7 @@ class FakeHerdr {
       return this.result({ root_pane: this.pane() });
     }
     if (a[1] === "run") {
-      const dir = a[3].match(/MEMO_RUNTIME_PROTOCOL_DIR='([^']+)'/)?.[1];
+      const dir = a[3].match(/PI_MEMO_RUNTIME_PROTOCOL_DIR='([^']+)'/)?.[1];
       assert.ok(dir);
       this.boot = await json<Boot>(join(dir, "boot.json"));
       assert.ok(this.boot);
@@ -591,7 +591,7 @@ test("host child extensions and forwarded env are passed quoted; reserved env na
   assert.ok(run.includes(`'-e' '${provider}' '-ns'`));
   assert.ok(run.includes(`CPA_PROXY_CONFIG='/cfg/it'\\''s.yaml' PI_CODING_AGENT_DIR=`));
   const refused: Record<string, string>[] = [
-    { MEMO_RUNTIME_SCOPE: "other" },
+    { PI_MEMO_RUNTIME_SCOPE: "other" },
     { PI_CODING_AGENT_DIR: "/x" },
     { "A;B": "x" },
   ];

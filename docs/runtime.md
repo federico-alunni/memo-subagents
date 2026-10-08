@@ -54,7 +54,7 @@ interface RuntimeConfig {
   agentDir?: string;
   /** Absolute extensions loaded with -e after the runtime child extension (e.g. a provider). */
   hostExtensions?: string[];
-  /** Environment forwarded to children. MEMO_RUNTIME_* and PI_CODING_AGENT_DIR are refused. */
+  /** Environment forwarded to children. PI_MEMO_RUNTIME_* and PI_CODING_AGENT_DIR are refused. */
   hostEnv?: Record<string, string>;
   piExecutable?: string;       // "pi"
   herdrExecutable?: string;    // "herdr"
@@ -64,7 +64,7 @@ interface RuntimeConfig {
   shutdownTimeoutMs?: number;   // 5000
 }
 
-/** MEMO_SUBAGENTS_CHILD_EXTENSIONS (':'-separated) / MEMO_SUBAGENTS_CHILD_ENV (comma-separated names). */
+/** PI_MEMO_SUBAGENTS_CHILD_EXTENSIONS (':'-separated) / PI_MEMO_SUBAGENTS_CHILD_ENV (comma-separated names). */
 function hostCompositionFromEnv(env?: NodeJS.ProcessEnv): { hostExtensions: string[]; hostEnv: Record<string, string> };
 
 type Runner = (input: { executable: string; argv: string[]; cwd?: string; env?: Record<string, string>; timeoutMs?: number })
@@ -268,7 +268,7 @@ child extension> [-e host…] -ns -np --no-approve --no-themes --tools <allowlis
 [--append-system-prompt <file>…]`. Profile children run `pi (--session <file> | --session-id … --session-dir …)
 --model <m> --thinking <t> -e <runtime child extension> [-e host…] [--tools <allowlist>] [--system-prompt …]
 [--append-system-prompt …]` and load their profile normally. Both get `PI_CODING_AGENT_DIR=<agentDir>`, the host and
-per-launch environment and `MEMO_RUNTIME_PROTOCOL_DIR / _NONCE / _SCOPE / _AGENT_ID / _ATTEMPT`.
+per-launch environment and `PI_MEMO_RUNTIME_PROTOCOL_DIR / _NONCE / _SCOPE / _AGENT_ID / _ATTEMPT`.
 
 The child extension: verifies boot identity, model, thinking, session and cwd; publishes `ready`; accepts each task
 exactly once; publishes `settled` only on `agent_settled` (provider errors and aborts stay distinct; no assistant

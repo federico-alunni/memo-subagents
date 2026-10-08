@@ -1,4 +1,4 @@
-// pi-memo-subagents host composition: MEMO_SUBAGENTS_CHILD_EXTENSIONS / MEMO_SUBAGENTS_CHILD_ENV.
+// pi-memo-subagents host composition: PI_MEMO_SUBAGENTS_CHILD_EXTENSIONS / PI_MEMO_SUBAGENTS_CHILD_ENV.
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { readFileSync } from "node:fs";
@@ -6,8 +6,8 @@ import { hostChildEnv, hostChildExtensions } from "../pi-extension/subagents/chi
 import { subagentRuntimeConfig } from "../pi-extension/subagents/runtime-client.ts";
 
 const HOST_VARS = [
-  "MEMO_SUBAGENTS_CHILD_EXTENSIONS",
-  "MEMO_SUBAGENTS_CHILD_ENV",
+  "PI_MEMO_SUBAGENTS_CHILD_EXTENSIONS",
+  "PI_MEMO_SUBAGENTS_CHILD_ENV",
   "IR_CHILD_EXTENSIONS",
   "IR_CHILD_ENV",
   "CPA_PROXY_CONFIG",
@@ -34,7 +34,7 @@ function withEnv<T>(vars: Record<string, string | undefined>, run: () => T): T {
 describe("pi-memo-subagents host child composition", () => {
   it("parses only absolute, de-duplicated extensions", () => {
     assert.deepEqual(
-      hostChildExtensions({ MEMO_SUBAGENTS_CHILD_EXTENSIONS: "/a/ext::relative:/b/ext:/a/ext: /c " }),
+      hostChildExtensions({ PI_MEMO_SUBAGENTS_CHILD_EXTENSIONS: "/a/ext::relative:/b/ext:/a/ext: /c " }),
       ["/a/ext", "/b/ext", "/c"],
     );
     assert.deepEqual(hostChildExtensions({}), []);
@@ -43,11 +43,11 @@ describe("pi-memo-subagents host child composition", () => {
   it("forwards only listed, present, valid, non-reserved variables", () => {
     assert.deepEqual(
       hostChildEnv({
-        MEMO_SUBAGENTS_CHILD_ENV:
-          "CPA_PROXY_CONFIG, MISSING,PI_CODING_AGENT_DIR,bad-name,MEMO_SUBAGENTS_CHILD_EXTENSIONS,CPA_PROXY_CONFIG,EMPTY",
+        PI_MEMO_SUBAGENTS_CHILD_ENV:
+          "CPA_PROXY_CONFIG, MISSING,PI_CODING_AGENT_DIR,bad-name,PI_MEMO_SUBAGENTS_CHILD_EXTENSIONS,CPA_PROXY_CONFIG,EMPTY",
         CPA_PROXY_CONFIG: "/x/config.yaml",
         PI_CODING_AGENT_DIR: "/profile",
-        MEMO_SUBAGENTS_CHILD_EXTENSIONS: "/ext",
+        PI_MEMO_SUBAGENTS_CHILD_EXTENSIONS: "/ext",
         EMPTY: "",
       }),
       [["CPA_PROXY_CONFIG", "/x/config.yaml"], ["EMPTY", ""]],
@@ -68,8 +68,8 @@ describe("pi-memo-subagents host child composition", () => {
   it("the subagent runtime gets the host composition and a private per-user state dir", () => {
     const config = withEnv(
       {
-        MEMO_SUBAGENTS_CHILD_EXTENSIONS: "/host/cpa ext",
-        MEMO_SUBAGENTS_CHILD_ENV: "CPA_PROXY_CONFIG",
+        PI_MEMO_SUBAGENTS_CHILD_EXTENSIONS: "/host/cpa ext",
+        PI_MEMO_SUBAGENTS_CHILD_ENV: "CPA_PROXY_CONFIG",
         CPA_PROXY_CONFIG: "/host/config.yaml",
       },
       () => subagentRuntimeConfig(),

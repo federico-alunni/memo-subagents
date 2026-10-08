@@ -101,7 +101,7 @@ export async function processIdentity(
   return r.stdout.trim();
 }
 
-/** Host composition declared with MEMO_SUBAGENTS_CHILD_EXTENSIONS / MEMO_SUBAGENTS_CHILD_ENV (see docs/child-host.md). */
+/** Host composition declared with PI_MEMO_SUBAGENTS_CHILD_EXTENSIONS / PI_MEMO_SUBAGENTS_CHILD_ENV (see docs/child-host.md). */
 export function hostCompositionFromEnv(env: NodeJS.ProcessEnv = process.env): {
   hostExtensions: string[];
   hostEnv: Record<string, string>;
