@@ -15,11 +15,12 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Tag must be on main
+      - name: Tag must be on main or beta
         run: |
-          git fetch origin main
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
-            || { echo "::error::Tag $GITHUB_REF_NAME is not on main"; exit 1; }
+          git fetch origin main beta 2>/dev/null || git fetch origin main 2>/dev/null || true
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main 2>/dev/null \
+            || git merge-base --is-ancestor "$GITHUB_SHA" origin/beta 2>/dev/null \
+            || { echo "::error::Tag $GITHUB_REF_NAME is not on main or beta"; exit 1; }
 
       - name: Tag must match package.json version
         run: |
@@ -37,4 +38,7 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+        run: |
+          FLAGS=""
+          if echo "$GITHUB_REF_NAME" | grep -q -- "-"; then FLAGS="--prerelease"; fi
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" $FLAGS --generate-notes

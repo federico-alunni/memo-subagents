@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.4.0-beta.1 — 2026-10-08
+
 ### Added
 
 - **Worktree-space mirror & delegated handoff**: `subagent({ ..., worktree: true, worktreeSpace: true })` opens the child in its own Herdr workspace and shows a read-only mirror pane beside the main pane.
