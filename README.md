@@ -25,7 +25,7 @@ Requires pi and Herdr (start `herdr`, then run `pi` inside it).
 ```bash
 pi install /path/to/memo-subagents
 # or
-pi install git:github.com/federico-alunni/memo-subagents
+pi install git:github.com/federico-alunni/pi-memo-subagents
 ```
 
 For a profile launched with `pi -ne` (packages disabled), load it explicitly with `pi -ne -e /path/to/memo-subagents …`; see [docs/child-host.md](docs/child-host.md) for host extensions/variables that children need.

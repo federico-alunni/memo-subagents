@@ -9,7 +9,7 @@
   "author": "Federico Alunni",
   "repository": {
     "type": "git",
-    "url": "https://github.com/federico-alunni/memo-subagents"
+    "url": "https://github.com/federico-alunni/pi-memo-subagents"
   },
   "type": "module",
   "exports": {
