@@ -141,6 +141,11 @@ export interface LaunchSpec {
   /** "worktree" placement only: the checkout root to open as a Herdr worktree space when `cwd` is a
    * sub-directory of it (default `cwd`). The child still starts in `cwd`. */
   spaceRoot?: string;
+  /** Split placements only: the pane to split (default the caller's pane), e.g. the bottom of a column
+   * of agents. It must exist; the new pane lands in its tab. */
+  splitTarget?: string;
+  /** Split placements only: the share of the split pane's size the target keeps (0..1, exclusive). */
+  splitRatio?: number;
   /** Read-only terminal program instead of a pi child (a mirror viewer): the same exact identity,
    * readiness and shutdown contract, but no model, no prompt, no session and no presence row. */
   viewer?: { script: string; args?: string[]; env?: Record<string, string> };
@@ -612,6 +617,17 @@ export class AgentRuntime {
     const requested = input.placement ?? "tab";
     if (!["split-right", "split-down", "tab", "worktree", "auto", "visible"].includes(requested))
       throw new RuntimeError("unsupported", `Unknown placement: ${requested}`);
+    if (input.splitTarget !== undefined || input.splitRatio !== undefined) {
+      if (requested !== "split-right" && requested !== "split-down")
+        throw new RuntimeError("unsupported", "splitTarget/splitRatio require a split placement");
+      if (input.splitTarget !== undefined && (typeof input.splitTarget !== "string" || !input.splitTarget.trim()))
+        throw new RuntimeError("unsupported", "splitTarget must be a pane id");
+      if (
+        input.splitRatio !== undefined &&
+        (typeof input.splitRatio !== "number" || !(input.splitRatio > 0 && input.splitRatio < 1))
+      )
+        throw new RuntimeError("unsupported", "splitRatio must be between 0 and 1 (exclusive)");
+    }
     // A mirror viewer is a read-only terminal program under the child contract: no model work at all.
     const viewer = input.viewer;
     if (viewer) {
@@ -816,14 +832,22 @@ export class AgentRuntime {
         placement = reservation.placement;
       }
       const split = placement === "split-right" || placement === "split-down";
-      if (split && (!parent.pane_id || !parent.tab_id))
+      // The pane a split is made from: the caller's, or an explicit target (e.g. the bottom of a column).
+      let base: Pane = parent;
+      if (split && input.splitTarget) {
+        const target = (await this.herdr(["pane", "get", input.splitTarget], cwd)).pane as Pane | undefined;
+        if (!target || target.pane_id !== input.splitTarget || !target.tab_id || !target.workspace_id)
+          throw new Error("Split target pane identity mismatch");
+        base = target;
+      }
+      if (split && (!base.pane_id || !base.tab_id))
         throw new Error("Herdr current pane identity missing for split");
       const label = input.display.label.replace(/[\r\n\t]+/g, " ").trim();
       phase = "create";
       await evidence("create-intent", {
-        workspaceId: parent.workspace_id,
+        workspaceId: split ? base.workspace_id : parent.workspace_id,
         placement,
-        ...(split ? { parentPaneId: parent.pane_id } : {}),
+        ...(split ? { parentPaneId: base.pane_id } : {}),
       });
       // Existing checkout as a Herdr worktree space under the caller's space. A clean
       // Herdr refusal has no effect and falls back to a background tab; a lost response
@@ -880,9 +904,10 @@ export class AgentRuntime {
             ? [
               "pane",
               "split",
-              parent.pane_id,
+              base.pane_id,
               "--direction",
               placement === "split-down" ? "down" : "right",
+              ...(input.splitRatio !== undefined ? ["--ratio", String(input.splitRatio)] : []),
               "--cwd",
               cwd,
               "--no-focus",
@@ -908,8 +933,8 @@ export class AgentRuntime {
         !paneId ||
         !p?.terminal_id ||
         !p.tab_id ||
-        p.workspace_id !== (space?.workspaceId ?? parent.workspace_id) ||
-        (split && (p.tab_id !== parent.tab_id || paneId === parent.pane_id))
+        p.workspace_id !== (space?.workspaceId ?? (split ? base.workspace_id : parent.workspace_id)) ||
+        (split && (p.tab_id !== base.tab_id || paneId === base.pane_id))
       )
         throw new Error("Herdr lacks exact pane/terminal identity");
       // Cosmetic only; identity is the returned pane/terminal.
@@ -1211,7 +1236,7 @@ export class AgentRuntime {
             // Display only: focus moves between caller and child, never identity.
             ...(split
               ? {
-                  parentPaneId: parent.pane_id,
+                  parentPaneId: base.pane_id,
                   placement: placement as "split-right" | "split-down",
                 }
               : {}),

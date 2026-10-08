@@ -78,6 +78,8 @@ The default surface is `selector` (`PI_SUBAGENT_SURFACE`): the first child opens
 | `worktreeBranch` | string | New branch name (requires `worktree: true`). Default `memo/<name>-<id8>`. |
 | `worktreeBase` | string | Start commit-ish (requires `worktree: true`). Default the source `HEAD`. |
 | `worktreeSpace` | boolean | Open the worktree as its own Herdr workspace and show a mirror pane beside the main pane (requires `worktree: true`). |
+| `spawning` | boolean | Grant delegated spawning: this child can start sub-agents through the main session. They open in a column under it, the main session supervises them, and each result goes back to this child as a separate task. |
+| `spawningDepth` | number | With `spawning: true`: how many levels of sub-agents may exist below this one (1–4, default 2). Each delegated spawn with `spawning: true` consumes 1 level. |
 | `handoff` | `"wait"` \| `"replace"` | Start an agent in a new tab of your own worktree space (worktree-space children only). `wait`: wait for result; `replace`: hand off and exit. |
 
 Agent frontmatter supports `name`, `description`, `model`, `thinking`, `tools`, `skills`, `session-mode` (`standalone` / `lineage-only` / `fork`), `spawning`, `deny-tools`, `bash`, `bash-allow` (see below), `auto-exit`, `interactive`, `system-prompt` (`append` / `replace`), `cwd` and `disable-model-invocation`, as upstream ([reference](https://github.com/0xRichardH/pi-herdr-subagents/blob/v0.2.0/README.md#frontmatter-reference)). `worktree` is **not** read from frontmatter in this version.

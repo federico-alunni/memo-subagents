@@ -97,7 +97,10 @@ export function renderConvoyPanel(
   for (let i = 0; i < data.total; i++) {
     prog += i < data.done ? theme.fg("success", "▰") : theme.fg("muted", "▱");
   }
-  const barRight = ` ${prog} ${theme.bold(theme.fg("text", `${data.done}/${data.total}`))} ${theme.fg("accent", "─╮")}`;
+  // Without tasks yet (e.g. planning) there is nothing to count: no progress bar.
+  const barRight = data.total > 0
+    ? ` ${prog} ${theme.bold(theme.fg("text", `${data.done}/${data.total}`))} ${theme.fg("accent", "─╮")}`
+    : ` ${theme.fg("accent", "─╮")}`;
   const barFill = Math.max(1, width - visibleWidth(barLeft) - visibleWidth(barRight));
   lines.push(barLeft + theme.fg("accent", "─".repeat(barFill)) + barRight);
 
@@ -330,7 +333,7 @@ export function buildConvoyPanelDataFromAgents(
   }
 
   return {
-    title: "panel-refresh",
+    title: "subagents",
     phase: tasks.some((t) => t.dot === "accent" || t.dot === "warning") ? "execution" : "idle",
     done: doneCount,
     total: Math.max(1, tasks.length),

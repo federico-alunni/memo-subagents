@@ -2327,3 +2327,53 @@ test("viewer: relative scripts and pi-only options are unsupported before any pa
   assert.equal(f.fake.createCount, 0, "nothing was created");
   assert.ok(!f.fake.calls.some((c) => c.executable === "fake-herdr"), "Herdr was never called");
 });
+
+// ── Column placement: a split under a given pane (not the caller's), with an explicit ratio.
+
+test("split placement under an explicit target pane, with ratio; identity checked against the target's tab", async (t) => {
+  const f = await fixture(t);
+  const target = { pane_id: "column-pane", tab_id: "tab-1", workspace_id: "workspace-1", terminal_id: "term-col" };
+  f.fake.onCall = (input) => {
+    const a = input.argv;
+    if (input.executable === "fake-herdr" && a[0] === "pane" && a[1] === "get" && a[2] === "column-pane")
+      return f.fake.result({ pane: target });
+  };
+  const h = await f.transport.launch({
+    ...f.input,
+    ...SCOUT,
+    placement: "split-down",
+    splitTarget: "column-pane",
+    splitRatio: 0.5,
+  });
+  const split = f.fake.calls.find((c) => c.argv[0] === "pane" && c.argv[1] === "split");
+  assert.ok(split);
+  assert.equal(split.argv[2], "column-pane", "split under the target, not the caller");
+  assert.equal(split.argv[split.argv.indexOf("--direction") + 1], "down");
+  assert.equal(split.argv[split.argv.indexOf("--ratio") + 1], "0.5");
+  assert.ok(split.argv.includes("--no-focus"));
+  assert.equal(h.parentPaneId, "column-pane");
+  assert.equal(h.placement, "split-down");
+  assert.equal((await f.transport.observe(h)).kind, "active");
+});
+
+test("split target and ratio are validated before anything is created", async (t) => {
+  const f = await fixture(t);
+  for (const bad of [
+    { placement: "tab" as const, splitTarget: "x" },
+    { placement: "split-down" as const, splitRatio: 0 },
+    { placement: "split-down" as const, splitRatio: 1 },
+    { placement: "split-down" as const, splitTarget: "" },
+  ])
+    await assert.rejects(f.transport.launch({ ...f.input, ...SCOUT, ...bad }), errorCode("unsupported"), JSON.stringify(bad));
+  assert.equal(f.fake.createCount, 0);
+  // A target that is not the pane Herdr returns (or is in another workspace) is refused, nothing created.
+  f.fake.onCall = (input) => {
+    if (input.executable === "fake-herdr" && input.argv[1] === "get" && input.argv[2] === "column-pane")
+      return f.fake.result({ pane: { pane_id: "other", tab_id: "tab-1", workspace_id: "workspace-1" } });
+  };
+  await assert.rejects(
+    f.transport.launch({ ...f.input, ...SCOUT, placement: "split-down", splitTarget: "column-pane" }),
+    (error: unknown) => error instanceof RuntimeError && (error.code === "launch_failed" || error.code === "launch_uncertain"),
+  );
+  assert.equal(f.fake.createCount, 0);
+});

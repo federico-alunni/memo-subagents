@@ -29,7 +29,7 @@
   ],
   "scripts": {
     "test": "node --import ./test/host-aliases.mjs --test test/*.test.ts test/test.ts test/*.test.mjs test/runtime/*.test.ts",
-    "test:live": "node test/pane-selector-live.mjs"
+    "test:live": "node test/pane-selector-live.mjs && node --import ./test/host-aliases.mjs test/mirror-live.mjs && node --import ./test/host-aliases.mjs test/column-live.mjs"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

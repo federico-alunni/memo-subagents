@@ -12,6 +12,7 @@ import {
   mkdirSync,
 } from "node:fs";
 import { homedir } from "node:os";
+import { isAbsolute, resolve as resolvePath } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import {
@@ -24,19 +25,22 @@ import {
 import type { CompletionResult } from "./completion.ts";
 import { paneSelector } from "./pane-selector.ts";
 import {
-  HANDOFF_SPEC,
-  HANDOFF_TOOL,
+  SPAWN_SPEC,
+  SPAWN_TOOL,
   childDelegateHook,
-  createHandoffServer,
+  createSpawnServer,
   deliverHandoffResult,
   deliverReplacedResult,
   shouldSuppressDelivery,
 } from "./handoff.ts";
-import type { HandoffParams } from "./handoff.ts";
+import type { SpawnMode, SpawnRequest } from "./handoff.ts";
+import { applyColumnLayout, nextColumnSplit, orderColumn } from "./runtime/column-layout.ts";
+import type { PaneLayoutSnapshot } from "./runtime/column-layout.ts";
 import { MirrorManager } from "./runtime/mirror-manager.ts";
 import type { MirrorSlot } from "./runtime/mirror-manager.ts";
 import { themePalette, paletteTheme } from "./runtime/mirror-view.ts";
 import { buildConvoyPanelDataFromAgents, renderConvoyPanel } from "./runtime/convoy-panel.ts";
+import type { ConvoyPanelData, ConvoyPlanningItem } from "./runtime/convoy-panel.ts";
 import type { MirrorStatus } from "./runtime/mirror-view.ts";
 import { randomBytes, randomUUID } from "node:crypto";
 import {
@@ -233,6 +237,19 @@ const SubagentParams = Type.Object({
     Type.Boolean({
       description:
         "With worktree: true, open the worktree as its own Herdr workspace. The main tab shows a read-only mirror of the sub-agent (promote it with /subagent or Ctrl+Alt+X). That sub-agent can start further agents in its own workspace with handoff.",
+    }),
+  ),
+  spawning: Type.Optional(
+    Type.Boolean({
+      description:
+        "Let this sub-agent start its own sub-agents through you: they open in a column under its pane, you supervise them, and each of their results goes back to the sub-agent that started it (not to you). Its children may start further agents only if it passes spawning: true to them, up to spawningDepth levels.",
+    }),
+  ),
+  spawningDepth: Type.Optional(
+    Type.Integer({
+      minimum: 1,
+      maximum: 4,
+      description: "With spawning: how many levels of sub-agents may exist below this one (1-4, default 2).",
     }),
   ),
   handoff: Type.Optional(
@@ -701,8 +718,12 @@ interface RunningSubagent {
   worktree?: WorktreeInfo;
   /** Worktree-space agents: the slot (one mirror, one widget row) this agent belongs to. */
   slot?: AgentSlot;
-  /** The slot's handoff mode that created this agent (undefined for the slot's first agent). */
-  handoff?: { mode: "wait" | "replace"; parentId: string };
+  /** Started for another agent (delegated spawn or handoff): how, and by whom; its end is routed to it. */
+  spawnedBy?: { mode: SpawnMode; parentId: string };
+  /** Granted delegated spawning: how many levels may still exist below this agent. */
+  spawning?: { depth: number };
+  /** Member of a column of panes (a root agent and the agents started under it). */
+  column?: { rootId: string };
   /** replace: this agent ended by handing its work to `replacedBy`; its own result never reaches the model. */
   replacedBy?: string;
   /** Request ids of delegated handoff requests already served (dedup across /reload). */
@@ -965,6 +986,36 @@ function renderPresenceGroupLines(entries: PresenceEntry[], width: number, hint 
   return lines;
 }
 
+/**
+ * Issue #86 planning rows (scenario 1) for agents outside worktree spaces, in start order: icon by state
+ * (`?` waits for the user, `◐` working, `○` idle, `●` stalled, `✓` done), name, status, and `↳ requester`.
+ */
+function convoyPlanningData(agents: RunningSubagent[]): ConvoyPanelData {
+  const now = Date.now();
+  const byId = new Map(agents.map((agent) => [agent.id, agent]));
+  const planning: ConvoyPlanningItem[] = [...agents]
+    .sort((a, b) => a.startTime - b.startTime)
+    .map((agent) => {
+      const projection = projectLifecycle(ensureLifecycle(agent), now);
+      const [icon, iconColor] =
+        projection.kind === "blocked" ? ["?", "warning"]
+        : projection.kind === "completed" || projection.kind === "finalizing" ? ["✓", "success"]
+        : projection.kind === "stalled" ? ["●", "error"]
+        : projection.kind === "waiting" || projection.kind === "interrupted" ? ["○", "muted"]
+        : ["◐", "accent"];
+      const parentId = agent.spawnedBy?.parentId;
+      const parent = parentId ? (byId.get(parentId)?.name ?? runningSubagents.get(parentId)?.name ?? parentId) : undefined;
+      return {
+        icon,
+        iconColor: iconColor as ConvoyPlanningItem["iconColor"],
+        label: agent.name,
+        text: formatLifecycleWidgetLabel(projection, now).trim().replace(/^❓\s*/, ""),
+        ...(parent ? { extra: `↳ ${parent}` } : {}),
+      };
+    });
+  return { title: "subagents", phase: "planning", done: 0, total: 0, planning };
+}
+
 /** The single widget: generic subagents (legacy + ungrouped runtime rows), then one box per runtime group. */
 function renderWidgetLines(
   agents: RunningSubagent[],
@@ -973,7 +1024,10 @@ function renderWidgetLines(
   theme?: any,
 ): string[] {
   if (surfaceMode() === "convoy") {
-    const data = buildConvoyPanelDataFromAgents(agents, runtime.selectedSlotId);
+    // Worktree slots: the #86 execution grid. Otherwise (planner, research, challengers): the planning rows.
+    const data = agents.some((agent) => agent.slot)
+      ? buildConvoyPanelDataFromAgents(agents, runtime.selectedSlotId)
+      : convoyPlanningData(agents);
     const p = currentPalette();
     const mirrorTheme = theme?.fg ? theme : p ? paletteTheme(p) : paletteTheme({});
     return renderConvoyPanel(data, width, mirrorTheme);
@@ -1059,12 +1113,14 @@ function renderSubagentWidgetLines(
     const elapsed = formatElapsedMMSS(agent.startTime, projection.runtimeEndedAt ?? now);
     const agentTag = agent.agent ? ` (${agent.agent})` : "";
     const worktreeTag = agent.worktree ? ` ⎇ ${agent.worktree.branch}` : "";
+    const requester = agent.spawnedBy ? runningSubagents.get(agent.spawnedBy.parentId)?.name : undefined;
+    const requesterTag = requester ? ` ↳ ${requester}` : "";
     const selected = paneSelector.state.selected === agent.surface ? "▶" : " ";
     const runtimeTag = agent.runtimePlan
       ? `${agent.runtimePlan.modelId}|${agent.runtimePlan.thinking} · `
       : "";
     rows.push({
-      left: ` ${selected} ${elapsed}  ${agent.name}${agentTag}${worktreeTag} `,
+      left: ` ${selected} ${elapsed}  ${agent.name}${agentTag}${requesterTag}${worktreeTag} `,
       right: statusConfig.enabled
         ? ` ${runtimeTag}${formatLifecycleWidgetLabel(projection, now).trim()} `
         : ` ${runtimeTag}starting… `,
@@ -1549,6 +1605,88 @@ function validateWorktreeParams(params: {
 }
 
 /** `handoff` is a wait/replace mode, only available inside a worktree space (the caller passes that fact). */
+export const DEFAULT_SPAWNING_DEPTH = 2;
+
+/** `spawningDepth` is 1..4 and only meaningful with `spawning: true`. */
+function validateSpawningParams(params: { spawning?: boolean; spawningDepth?: number }): string | undefined {
+  if (params.spawningDepth !== undefined && params.spawning !== true) return "spawningDepth requires spawning: true.";
+  if (
+    params.spawningDepth !== undefined &&
+    !(Number.isInteger(params.spawningDepth) && params.spawningDepth >= 1 && params.spawningDepth <= 4)
+  )
+    return "spawningDepth must be an integer between 1 and 4.";
+  return undefined;
+}
+
+/**
+ * How the `subagent` tool of this process starts an agent: a handoff in a worktree space, a delegated spawn
+ * when this sub-agent was granted spawning, or (undefined) locally like the main session.
+ */
+function childSpawnMode(params: { handoff?: string }, env: NodeJS.ProcessEnv = process.env): SpawnMode | undefined {
+  if (!env.PI_SUBAGENT_ID) return undefined;
+  if (params.handoff === "wait" || params.handoff === "replace")
+    return env.PI_SUBAGENT_WORKTREE_SPACE === "1" ? params.handoff : undefined;
+  return env.PI_SUBAGENT_SPAWNING === "1" ? "delegate" : undefined;
+}
+
+type SpawnParams = typeof SubagentParams.static;
+interface AuthorizedSpawn {
+  error?: string;
+  mode?: SpawnMode;
+  params?: SpawnParams;
+  childSpawning?: { depth: number };
+}
+
+/**
+ * The main session's check of a spawn requested by one of its agents (child input is untrusted): the mode
+ * must be granted to the requester, and the parameters are normalized (cwd of the requester, no fork).
+ */
+function authorizeSpawn(
+  parent: Pick<RunningSubagent, "id" | "handle" | "slot" | "worktree" | "spawning">,
+  request: { mode?: unknown; spawn?: unknown },
+): AuthorizedSpawn {
+  const spawn = (request?.spawn ?? {}) as Record<string, unknown>;
+  if (typeof spawn.name !== "string" || !spawn.name || typeof spawn.task !== "string")
+    return { error: "A spawn needs a name and a task for the new agent." };
+  const mode = request?.mode;
+  if (mode === "wait" || mode === "replace") {
+    if (!parent.slot || !parent.worktree) return { error: "handoff is only available to an agent that runs in a worktree space." };
+    const params = { ...spawn, cwd: parent.worktree.cwd } as SpawnParams;
+    delete (params as Record<string, unknown>).handoff;
+    return { mode, params };
+  }
+  if (mode !== "delegate") return { error: `Unknown spawn mode: ${String(mode)}` };
+  if (!parent.spawning || parent.spawning.depth < 1) return { error: "This agent is not allowed to start sub-agents (no spawning grant)." };
+  if (spawn.fork === true) return { error: "fork is not available for agents started by a sub-agent." };
+  if (spawn.handoff !== undefined) return { error: "handoff is only available inside a worktree space." };
+  const base = parent.handle?.cwd;
+  const cwd = typeof spawn.cwd === "string" && spawn.cwd
+    ? (isAbsolute(spawn.cwd) || !base ? spawn.cwd : resolvePath(base, spawn.cwd))
+    : base;
+  const params = { ...spawn, ...(cwd ? { cwd } : {}) } as SpawnParams;
+  let childSpawning: { depth: number } | undefined;
+  if (spawn.spawning === true) {
+    if (parent.spawning.depth <= 1) return { error: "This agent has no spawning depth left: its sub-agents cannot start further agents." };
+    childSpawning = { depth: parent.spawning.depth - 1 };
+  }
+  delete (params as Record<string, unknown>).spawning;
+  delete (params as Record<string, unknown>).spawningDepth;
+  return { mode, params, ...(childSpawning ? { childSpawning } : {}) };
+}
+
+/** The column an agent belongs to (its root's id), or a new one rooted at itself. */
+function columnRootOf(agent: Pick<RunningSubagent, "id" | "column">): string {
+  return agent.column?.rootId ?? agent.id;
+}
+
+/** Panes of a column: its root (while alive) and the members started under it, in start (= top-down) order. */
+function columnPanes(rootId: string, agents: RunningSubagent[] = [...runningSubagents.values()]): string[] {
+  return agents
+    .filter((agent) => agent.id === rootId || agent.column?.rootId === rootId)
+    .sort((a, b) => a.startTime - b.startTime)
+    .map((agent) => agent.surface);
+}
+
 function validateHandoffParams(handoff: unknown, context: { worktreeSpace?: boolean } = {}): string | undefined {
   if (!context.worktreeSpace)
     return handoff === undefined || handoff === null
@@ -1815,12 +1953,18 @@ export const __test__ = {
   validateHandoffParams,
   slotSelectorChoices,
   promoteSlot,
+  validateSpawningParams,
+  childSpawnMode,
+  authorizeSpawn,
+  columnPanes,
+  columnRootOf,
+  createSpawnServer,
+  convoyPlanningData,
   renderConvoyPanel,
   buildConvoyPanelDataFromAgents,
   deliverHandoffResult,
   deliverReplacedResult,
   shouldSuppressDelivery,
-  createHandoffServer,
   validateThinkingParam,
   confirmDirtyWorktreeSource,
   insertBeforeSessionRef,
@@ -1851,13 +1995,17 @@ function startWidgetRefresh() {
  */
 type LaunchContext = Parameters<typeof launchSubagentInner>[1];
 
-/** Launch variants beyond a plain subagent: a planned worktree, a worktree space, or a handoff into one. */
+/** Launch variants beyond a plain subagent: a worktree, a worktree space, an agent started for another one. */
 interface LaunchOptions {
   worktreePlan?: WorktreePlan;
   /** Open the worktree as its own Herdr workspace (the main tab shows a mirror). */
   worktreeSpace?: boolean;
-  /** B of a handoff: the parent's slot and worktree; no worktree is created, the checkout is the parent's. */
-  handoff?: { mode: "wait" | "replace"; parent: RunningSubagent };
+  /** Started for another agent. wait/replace (handoff): in its slot and worktree, nothing is created. */
+  spawnedBy?: { mode: SpawnMode; parent: RunningSubagent };
+  /** Grant delegated spawning to the new agent. */
+  spawning?: { depth: number };
+  /** Open in a column: split the column's bottom pane (`target`) down, keeping `ratio` for it. */
+  column?: { rootId: string; target: string; ratio: number };
 }
 
 interface LaunchState {
@@ -1967,11 +2115,13 @@ function subagentEnv(options: {
   id: string;
   denySet?: Set<string>;
   worktreeSpace?: boolean;
+  spawning?: { depth: number };
 }): Record<string, string> {
   return {
     PI_SUBAGENT_NAME: options.name,
     PI_SUBAGENT_ID: options.id,
     ...(options.worktreeSpace ? { PI_SUBAGENT_WORKTREE_SPACE: "1" } : {}),
+    ...(options.spawning ? { PI_SUBAGENT_SPAWNING: "1", PI_SUBAGENT_SPAWNING_DEPTH: String(options.spawning.depth) } : {}),
     ...(options.agent ? { PI_SUBAGENT_AGENT: options.agent } : {}),
     ...(options.denySet && options.denySet.size > 0 ? { PI_DENY_TOOLS: [...options.denySet].join(",") } : {}),
   };
@@ -2048,7 +2198,8 @@ async function launchSubagentInner(
     launchState.worktree = await createWorktree(options.worktreePlan);
   }
   // A handoff runs in its parent's checkout: nothing is created or rolled back for it.
-  const worktree = options?.handoff ? options.handoff.parent.worktree : launchState.worktree;
+  const handoff = options?.spawnedBy && options.spawnedBy.mode !== "delegate" ? options.spawnedBy : undefined;
+  const worktree = handoff ? handoff.parent.worktree : launchState.worktree;
   const { effectiveCwd, effectiveAgentDir } = worktree
     ? resolveWorktreePaths(worktree.cwd)
     : resolvedPaths;
@@ -2111,7 +2262,9 @@ async function launchSubagentInner(
 
   // A worktree-space agent (and every agent a handoff adds to its space) lives in its own Herdr workspace:
   // the main tab shows a mirror of it, and it may hand work to further agents of that space.
-  const inSlot = !!worktree && (options?.worktreeSpace === true || !!options?.handoff);
+  const inSlot = !!worktree && (options?.worktreeSpace === true || !!handoff);
+  // The internal spawn transport: handoff in a worktree space, delegated spawns with a spawning grant.
+  const spawnTransport = inSlot || !!options?.spawning;
   const spec: LaunchSpec = {
     scope: sessionId,
     agentId: id,
@@ -2132,8 +2285,8 @@ async function launchSubagentInner(
     exit: effectiveAutoExit ? "auto" : "tool",
     skills: splitList(params.skills ?? agentDefs?.skills),
     session: { kind: "file", path: subagentSessionFile },
-    env: subagentEnv({ name: params.name, agent: params.agent, id, denySet, worktreeSpace: inSlot }),
-    ...(inSlot ? { delegatedTools: [HANDOFF_SPEC] } : {}),
+    env: subagentEnv({ name: params.name, agent: params.agent, id, denySet, worktreeSpace: inSlot, spawning: options?.spawning }),
+    ...(spawnTransport ? { delegatedTools: [SPAWN_SPEC] } : {}),
     ...(systemPromptFile
       ? systemPromptMode === "replace"
         ? { systemPrompt: systemPromptFile }
@@ -2141,7 +2294,9 @@ async function launchSubagentInner(
       : {}),
     ...(inSlot && worktree
       ? { placement: "worktree" as const, spaceRoot: worktree.path }
-      : { placement: surfacePlacement() }),
+      : options?.column
+        ? { placement: "split-down" as const, splitTarget: options.column.target, splitRatio: options.column.ratio }
+        : { placement: surfacePlacement() }),
     display: { label: params.name },
   };
   const handle = await subagentRuntime().launch(spec);
@@ -2163,20 +2318,22 @@ async function launchSubagentInner(
     ...(worktree ? { worktree } : {}),
   };
   if (inSlot) {
-    if (options?.handoff) {
+    if (handoff) {
       // B joins its parent's slot: same mirror, same widget row, the chain grows.
-      const slot = options.handoff.parent.slot!;
+      const slot = handoff.parent.slot!;
       slot.chain.push(params.name);
       running.slot = slot;
-      running.handoff = { mode: options.handoff.mode, parentId: options.handoff.parent.id };
     } else {
       running.slot = { id, name: params.name, startTime, chain: [params.name], worktree: worktree! };
     }
   }
+  if (options?.spawnedBy) running.spawnedBy = { mode: options.spawnedBy.mode, parentId: options.spawnedBy.parent.id };
+  if (options?.spawning) running.spawning = { ...options.spawning };
+  if (options?.column) running.column = { rootId: options.column.rootId };
 
   runningSubagents.set(id, running);
   // A handoff agent shares its parent's worktree and registry record.
-  if (worktree && !options?.handoff) {
+  if (worktree && !handoff) {
     try {
       writeWorktreeRecord(getWorktreeRegistryDir(), {
         id: worktree.id,
@@ -2258,7 +2415,7 @@ async function watchSubagent(
       signal,
       onObservation: (o) => {
         observeSubagentObservation(running, o);
-        if (running.slot && o.requests.length > 0) void serveHandoff(running, o.requests);
+        if ((running.slot || running.spawning) && o.requests.length > 0) void serveSpawns(running, o.requests);
       },
     });
     paneSelector.forget(running.surface);
@@ -2339,13 +2496,14 @@ async function watchSubagent(
 }
 
 /** Serves the handoff requests of a slot member (once each); needs the process' extension API. */
-async function serveHandoff(running: RunningSubagent, requests: ChildRecord[]): Promise<void> {
+/** Serves the spawn requests of an agent (once each); needs the process' extension API. */
+async function serveSpawns(running: RunningSubagent, requests: ChildRecord[]): Promise<void> {
   const pi = runtime.pi;
   if (!pi) return;
   running.servedRequests ??= new Set();
-  const serve = createHandoffServer({
+  const serve = createSpawnServer({
     runtime: subagentRuntime(),
-    launch: (parent, params) => launchHandoff(parent as RunningSubagent, params, pi),
+    launch: (parent, request) => launchRequested(parent as RunningSubagent, request, pi),
   });
   await serve(running, requests, running.servedRequests);
 }
@@ -2422,24 +2580,54 @@ async function syncMirrors(): Promise<void> {
   }
 }
 
+/** Plans a worktree for a spawn and asks about a dirty source (interactive TUI only). No side effects. */
+async function planSpawnWorktree(
+  params: SpawnParams,
+  ctx: { cwd: string },
+): Promise<{ plan: WorktreePlan } | { error: string; cancelled?: boolean }> {
+  let plan: WorktreePlan;
+  try {
+    const agentDefs = params.agent ? loadAgentDefaults(params.agent) : null;
+    const sourceCwd = resolveSubagentPaths(params, agentDefs).effectiveCwd ?? ctx.cwd;
+    plan = await planWorktree({
+      sourceCwd,
+      id: randomBytes(12).toString("hex"),
+      name: params.name,
+      branch: params.worktreeBranch,
+      base: params.worktreeBase,
+      config: loadWorktreeConfig(),
+    });
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+  if (!(await confirmDirtyWorktreeSource(plan, ctx as DirtySourcePromptContext)))
+    return {
+      error: "Cancelled by the user: the source checkout has uncommitted changes. No worktree or subagent was created.",
+      cancelled: true,
+    };
+  return { plan };
+}
+
 /**
- * Child side of a handoff: the request goes to the main session (which owns the new agent and its mirror)
- * through the runtime's delegated-tool protocol. wait: this agent must end its turn and leave the checkout
- * alone until the result arrives as its next task (its auto exit is held once). replace: this agent ends.
+ * Child side of a delegated spawn or handoff: the request goes to the main session (which owns and
+ * supervises the new agent) through the runtime's delegated-tool protocol.
+ *   delegate / wait: this agent ends its turn; each result arrives as its next task (auto exit held once).
+ *   replace:         this agent hands its work over and ends.
  */
-async function requestHandoff(params: typeof SubagentParams.static & { handoff: "wait" | "replace" }) {
+async function requestSpawn(params: SpawnParams, mode: SpawnMode) {
   const fail = (message: string) => ({
     content: [{ type: "text" as const, text: `Error: ${message}` }],
     details: { error: message },
   });
   const hook = childDelegateHook();
-  if (!hook) return fail("handoff is not available: this session is not a worktree-space subagent of a pi-memo-subagents main session.");
-  const { handoff: mode, ...spawn } = params;
+  if (!hook) return fail("this session cannot start sub-agents through the main session (no spawn transport).");
+  if (mode === "delegate" && params.fork === true) return fail("fork is not available for agents started by a sub-agent.");
+  const { handoff: _handoff, ...spawn } = params;
   let answer: any;
   try {
-    answer = await hook.request(HANDOFF_TOOL, { mode, spawn });
+    answer = await hook.request(SPAWN_TOOL, { mode, spawn } satisfies SpawnRequest);
   } catch (error) {
-    return fail(`the handoff request failed (${error instanceof Error ? error.message : String(error)}). Nothing was started; do not retry blindly.`);
+    return fail(`the spawn request failed (${error instanceof Error ? error.message : String(error)}). Nothing was started; do not retry blindly.`);
   }
   if (answer?.error) return fail(`the main session could not start "${params.name}": ${answer.error}`);
   if (mode === "replace") {
@@ -2452,17 +2640,20 @@ async function requestHandoff(params: typeof SubagentParams.static & { handoff: 
     };
   }
   hook.holdAutoExit();
+  const where = mode === "wait"
+    ? "in a new tab of this worktree space (same checkout and branch). Do not touch the checkout until its result arrives."
+    : "in a pane under yours. You can start more agents now; when you are done starting them, end your turn.";
   return {
     content: [
       {
         type: "text" as const,
         text:
-          `"${params.name}" was started in a new tab of this worktree space (same checkout and branch). ` +
-          `End your turn now and do not touch the checkout until its result arrives as your next task. ` +
+          `"${params.name}" was started ${where} ` +
+          `Its result will arrive as your next task (each started agent's result arrives as a separate task). ` +
           `Do NOT poll or assume what it will do.`,
       },
     ],
-    details: { handoff: "wait", name: params.name, id: answer?.id },
+    details: { spawn: mode, name: params.name, id: answer?.id },
   };
 }
 
@@ -2472,14 +2663,14 @@ function slotMembers(slotId: string): RunningSubagent[] {
 }
 
 /**
- * The end of a slot member. Returns true when the slot handled it (the caller then delivers nothing):
+ * The end of an agent started for another one (or of a slot member). Returns true when handled here (the
+ * caller then delivers nothing):
  *  - a parent that ended by `replace` is dropped: its work continues in the agent that replaced it;
- *  - the last agent of a slot that was replaced reports to the main session with the whole chain;
- *  - a handoff agent started with `wait` gives its result to its parent as the parent's next task
- *    (when the parent is gone, the result goes to the main session like any other).
+ *  - delegate / wait: the result goes to the requester as its next task (to the main session when the
+ *    requester is gone or cannot take it);
+ *  - replace: the last agent of the slot reports to the main session with the whole chain.
  */
-async function routeSlotEnd(running: RunningSubagent, result: SubagentResult, pi: ExtensionAPI): Promise<boolean> {
-  const slot = running.slot!;
+async function routeRequestedEnd(running: RunningSubagent, result: SubagentResult, pi: ExtensionAPI): Promise<boolean> {
   const finish = (delivery: "suppressed" | "delivered") => {
     running.lifecycle = markDelivery(running.lifecycle, delivery);
     runningSubagents.delete(running.id);
@@ -2490,10 +2681,10 @@ async function routeSlotEnd(running: RunningSubagent, result: SubagentResult, pi
     finish("suppressed");
     return true;
   }
-  const handoff = running.handoff;
-  if (!handoff) return false;
-  const parent = runningSubagents.get(handoff.parentId);
-  if (handoff.mode === "wait" && parent?.handle) {
+  const by = running.spawnedBy;
+  if (!by) return false;
+  const parent = runningSubagents.get(by.parentId);
+  if ((by.mode === "wait" || by.mode === "delegate") && parent?.handle) {
     finish("suppressed");
     try {
       await deliverHandoffResult(subagentRuntime(), parent, result, running.name);
@@ -2513,30 +2704,74 @@ async function routeSlotEnd(running: RunningSubagent, result: SubagentResult, pi
     }
     return true;
   }
-  if (handoff.mode === "replace") {
+  if (by.mode === "replace" && running.slot) {
     finish("delivered");
-    deliverReplacedResult(selectCompletionApi(pi, runtime.pi), { slot, result, agent: running.agent });
+    deliverReplacedResult(selectCompletionApi(pi, runtime.pi), { slot: running.slot, result, agent: running.agent });
     return true;
   }
   return false;
 }
 
-/** Launch B for a worktree-space agent that called `subagent` with `handoff` (served by the main session). */
-async function launchHandoff(parent: RunningSubagent, request: HandoffParams, pi: ExtensionAPI): Promise<{ id: string }> {
+/** Reads a pane layout through Herdr (cosmetic callers only). */
+function readLayout(paneId: string): PaneLayoutSnapshot | undefined {
+  try {
+    return (herdrCli(["pane", "layout", "--pane", paneId]) as { layout?: PaneLayoutSnapshot }).layout;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Brings a column to its targets (root's share, equal members); cosmetic, never throws. */
+function rebalanceColumn(rootId: string): void {
+  const panes = columnPanes(rootId);
+  if (panes.length === 0) return;
+  const root = runningSubagents.get(rootId)?.surface;
+  void applyColumnLayout(panes, root, (args) => herdrCli(args));
+}
+
+/** Launch the agent another agent asked for (served by the main session, which owns and supervises it). */
+async function launchRequested(parent: RunningSubagent, request: SpawnRequest, pi: ExtensionAPI): Promise<{ id: string }> {
   const ctx = runtime.latestCtx;
   if (!ctx) throw new Error("The main session is not available to start the agent");
-  if (!parent.slot || !parent.worktree) throw new Error("The requesting agent does not run in a worktree space");
-  const spawn = request.spawn as typeof SubagentParams.static;
-  if (!spawn?.name || !spawn?.task) throw new Error("A handoff needs a name and a task for the new agent");
-  const params = { ...spawn, cwd: parent.worktree.cwd } as typeof SubagentParams.static;
-  delete (params as Record<string, unknown>).handoff;
-  const parentThinking = pi.getThinkingLevel();
-  const running = await launchSubagent(params, ctx as unknown as LaunchContext, parentThinking as ThinkingLevel, {
-    handoff: { mode: request.mode, parent },
+  const authorized = authorizeSpawn(parent, request);
+  if (authorized.error || !authorized.params || !authorized.mode) throw new Error(authorized.error ?? "Spawn refused");
+  const { params, mode } = authorized;
+  const paramError =
+    validateWorktreeParams(params) ??
+    validateThinkingParam(params, params.agent ? loadAgentDefaults(params.agent) : null) ??
+    undefined;
+  if (paramError) throw new Error(paramError);
+
+  let worktreePlan: WorktreePlan | undefined;
+  if (mode === "delegate" && params.worktree === true) {
+    const planned = await planSpawnWorktree(params, ctx);
+    if ("error" in planned) throw new Error(planned.error);
+    worktreePlan = planned.plan;
+  }
+  // Delegated agents open in a column under the requester (a worktree space opens its own workspace).
+  let column: LaunchOptions["column"];
+  if (mode === "delegate" && params.worktreeSpace !== true) {
+    const rootId = columnRootOf(parent);
+    const panes = columnPanes(rootId);
+    const layout = readLayout(parent.surface);
+    const ordered = layout ? orderColumn(panes, layout) : panes;
+    const next = nextColumnSplit(ordered.length > 0 ? ordered : [parent.surface]);
+    if (next) column = { rootId, ...next };
+  }
+  const running = await launchSubagent(params, ctx as unknown as LaunchContext, pi.getThinkingLevel() as ThinkingLevel, {
+    ...(worktreePlan ? { worktreePlan, ...(params.worktreeSpace === true ? { worktreeSpace: true } : {}) } : {}),
+    spawnedBy: { mode, parent },
+    ...(authorized.childSpawning ? { spawning: authorized.childSpawning } : {}),
+    ...(column ? { column } : {}),
   });
-  if (request.mode === "replace") {
+  if (mode === "replace") {
     // The parent ends itself right after this answer: remember who takes over, so its own end stays silent.
     parent.replacedBy = running.name;
+  }
+  if (column) {
+    // The requester becomes the column's root when it starts its first member.
+    if (column.rootId === parent.id) parent.column ??= { rootId: parent.id };
+    rebalanceColumn(column.rootId);
   }
   startSupervision(running, pi);
   void syncMirrors();
@@ -2567,8 +2802,10 @@ function startSupervision(running: RunningSubagent, pi: ExtensionAPI): void {
         updateWidget();
         return;
       }
-      // A worktree-space agent that ended after a handoff: the slot, not the model, decides what happens.
-      if (running.slot && (await routeSlotEnd(running, result, pi))) return;
+      // The column gives the space back (Herdr closed the pane): rebalance what is left of it.
+      if (running.column) setTimeout(() => rebalanceColumn(running.column!.rootId), 300);
+      // An agent started for another one, or a slot member: routed to its requester / slot, not the model.
+      if ((running.slot || running.spawnedBy) && (await routeRequestedEnd(running, result, pi))) return;
       running.lifecycle = markDelivery(running.lifecycle, "delivered");
       runningSubagents.delete(running.id);
       updateWidget();
@@ -2628,6 +2865,7 @@ function startSupervision(running: RunningSubagent, pi: ExtensionAPI): void {
       );
     })
     .catch((err) => {
+      if (running.column) setTimeout(() => rebalanceColumn(running.column!.rootId), 300);
       if (!shouldDeliverSubagentCompletion(running)) {
         running.lifecycle = markDelivery(running.lifecycle, "suppressed");
         runningSubagents.delete(running.id);
@@ -2760,7 +2998,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           };
         }
 
-        const worktreeParamError = validateWorktreeParams(params) ?? (params.handoff === undefined ? undefined : validateHandoffParams(params.handoff, { worktreeSpace: isWorktreeSpaceChild() }));
+        const worktreeParamError =
+          validateWorktreeParams(params) ??
+          validateSpawningParams(params) ??
+          (params.handoff === undefined ? undefined : validateHandoffParams(params.handoff, { worktreeSpace: isWorktreeSpaceChild() }));
         if (worktreeParamError) {
           return {
             content: [{ type: "text", text: `Error: ${worktreeParamError}` }],
@@ -2768,8 +3009,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           };
         }
 
-        // handoff: this agent runs in a worktree space and asks the main session to start `params` in it.
-        if (params.handoff) return requestHandoff(params as typeof SubagentParams.static & { handoff: "wait" | "replace" });
+        // A sub-agent granted spawning (or a handoff in a worktree space) asks the main session, which owns,
+        // places and supervises the new agent and routes its result back here.
+        const delegated = childSpawnMode(params);
+        if (delegated) return requestSpawn(params, delegated);
 
         const thinkingParamError = validateThinkingParam(
           params,
@@ -2802,33 +3045,19 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         // Optional worktree: plan (no side effects) and ask about a dirty source.
         let worktreePlan: WorktreePlan | undefined;
         if (params.worktree === true) {
-          try {
-            const agentDefs = params.agent ? loadAgentDefaults(params.agent) : null;
-            const sourceCwd = resolveSubagentPaths(params, agentDefs).effectiveCwd ?? ctx.cwd;
-            worktreePlan = await planWorktree({
-              sourceCwd,
-              id: randomBytes(12).toString("hex"),
-              name: params.name,
-              branch: params.worktreeBranch,
-              base: params.worktreeBase,
-              config: loadWorktreeConfig(),
-            });
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            return {
-              content: [{ type: "text", text: `Error: ${message}. No subagent was started.` }],
-              details: { error: message },
-            };
+          const planned = await planSpawnWorktree(params, ctx);
+          if ("error" in planned) {
+            return planned.cancelled
+              ? {
+                  content: [{ type: "text", text: planned.error }],
+                  details: { error: "worktree cancelled (dirty source)", worktreeCancelled: true },
+                }
+              : {
+                  content: [{ type: "text", text: `Error: ${planned.error}. No subagent was started.` }],
+                  details: { error: planned.error },
+                };
           }
-          if (!(await confirmDirtyWorktreeSource(worktreePlan, ctx as DirtySourcePromptContext))) {
-            const message =
-              `Cancelled by the user: the source checkout has uncommitted changes. ` +
-              `No worktree or subagent was created.`;
-            return {
-              content: [{ type: "text", text: message }],
-              details: { error: "worktree cancelled (dirty source)", worktreeCancelled: true },
-            };
-          }
+          worktreePlan = planned.plan;
         }
 
         // Launch the subagent (creates pane, sends command)
@@ -2850,9 +3079,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             params,
             ctx,
             parentThinking,
-            worktreePlan
-              ? { worktreePlan, ...(params.worktreeSpace === true ? { worktreeSpace: true } : {}) }
-              : undefined,
+            {
+              ...(worktreePlan ? { worktreePlan, ...(params.worktreeSpace === true ? { worktreeSpace: true } : {}) } : {}),
+              ...(params.spawning === true ? { spawning: { depth: params.spawningDepth ?? DEFAULT_SPAWNING_DEPTH } } : {}),
+            },
           );
         } catch (error) {
           if (!(error instanceof RuntimeError && error.code === "launch_uncertain")) throw error;

@@ -19,6 +19,15 @@
 - **Convoy surface mode & issue #86 panel**: Opt-in `PI_SUBAGENT_SURFACE=convoy` renders the approved issue #86 panel above the editor (`runtime/convoy-panel.ts`), featuring the `╭─ ⛟ Convoy │ <title> │ phase <phase> ...` header bar with progress indicators, stages grid (`B S R C ☑`), selection marker `▸` in the free cell before the dot without shifting alignment, stall durations (`⚠12m` or `?40s`), and selected worker detail row (`⎇ <branch> · <status>`).
   - Implemented as a pure, dependency-free function (`renderConvoyPanel(data, width, theme): string[]`) verified against golden byte-for-byte tests for all 3 scenarios (planning, execution, compact) at W=96 and W=140.
   - Leaves existing surfaces (`selector`, `split`, `tab`) and their tests completely unchanged.
+- **Delegated spawning & child columns** (`spawning: true`, `spawningDepth`): A sub-agent can start its own sub-agents (e.g. planner spawning researchers/challengers, each challenger spawning a researcher).
+  - The request travels through the unified internal transport (`SPAWN_TOOL`, `subagent_spawn`) to the main session, which launches, owns and supervises each child, guaranteeing clean shutdowns, durable evidence and widget visibility.
+  - The spawned children open in a vertical column under their requester (`runtime/column-layout.ts`), with incremental splits and automatic rebalancing: the root keeps its half, the members below share the rest equally, and space returns cleanly when a member ends.
+  - Results are routed directly to the requester as separate tasks via `dispatch` (with retry on busy, so multiple concurrent children queue cleanly); the requester ends its turn with `holdAutoExit`.
+  - Recursive spawning is capped by `spawningDepth` (1–4, default 2), decremented at each level.
+  - In `convoy` surface mode, non-worktree agents automatically render as the issue #86 scenario-1 planning rows (`? planner`, `✓ research`, `◐ challenger` with `↳ <requester>`).
+- `LaunchSpec.splitTarget` and `LaunchSpec.splitRatio`: Runtime support for splitting a specific pane (not the caller's) with an explicit ratio, enabling column stacks.
+- Pure column layout geometry module (`runtime/column-layout.ts`) with target ratios, top-to-bottom ordering, and Herdr resize planning.
+- Unified internal spawn transport (`handoff.ts`: `subagent_spawn`), covering `delegate`, `wait` and `replace` modes with validation, requester cwd resolution and server-side authorization.
 - Pure mirror rendering module (`runtime/mirror-view.ts`) and standalone viewer process (`runtime/mirror-viewer.ts`).
 
 ## 0.3.0 — 2026-10-08

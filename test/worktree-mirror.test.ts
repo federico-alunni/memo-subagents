@@ -142,15 +142,15 @@ describe("worktree-space mirror: handoff routing", () => {
   it("handoff requests of a slot member are served exactly once (requestId dedup)", async () => {
     const launched: any[] = [];
     const responses: any[] = [];
-    const serve = testApi.createHandoffServer({
+    const serve = testApi.createSpawnServer({
       launch: async (_parent: any, params: any) => (launched.push(params), { id: "b" }),
       runtime: { hasResponse: async () => false, respond: async (_h: any, id: string, result: any) => { responses.push([id, result]); } },
     });
     const parent = { id: "a", handle: { protocolDir: "/p", taskId: "t1", taskToken: "k1" } };
     const seen = new Set(["req-1"]); // served before a /reload
     const requests = [
-      { requestId: "req-1", tool: "subagent_handoff", params: { mode: "wait", name: "reviewer" } },
-      { requestId: "req-2", tool: "subagent_handoff", params: { mode: "replace", name: "reviewer" } },
+      { requestId: "req-1", tool: "subagent_spawn", params: { mode: "wait", name: "reviewer" } },
+      { requestId: "req-2", tool: "subagent_spawn", params: { mode: "replace", name: "reviewer" } },
       { requestId: "req-3", tool: "other_tool", params: {} },
     ];
     await serve(parent, requests, seen);
@@ -161,11 +161,11 @@ describe("worktree-space mirror: handoff routing", () => {
 
   it("a failing launch answers the request with the error instead of leaving the child waiting", async () => {
     const responses: any[] = [];
-    const serve = testApi.createHandoffServer({
+    const serve = testApi.createSpawnServer({
       launch: async () => { throw new Error("no worktree space"); },
       runtime: { hasResponse: async () => false, respond: async (_h: any, _id: string, result: any) => { responses.push(result); } },
     });
-    await serve({ id: "a", handle: {} }, [{ requestId: "r", tool: "subagent_handoff", params: {} }], new Set());
+    await serve({ id: "a", handle: {} }, [{ requestId: "r", tool: "subagent_spawn", params: {} }], new Set());
     assert.deepEqual(responses, [{ error: "no worktree space" }]);
   });
 });
