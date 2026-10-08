@@ -31,5 +31,7 @@ export type {
   BashPolicy,
   ThinkingLevel,
 } from "./protocol.ts";
+export { paneSelector, selectorState } from "./pane-selector.ts";
+export type { PlacementMode, SelectorState } from "./pane-selector.ts";
 export { presence, presenceActive } from "./presence.ts";
 export type { PresenceEntry, PresenceRegistry, PresenceState } from "./presence.ts";

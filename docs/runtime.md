@@ -100,7 +100,7 @@ interface LaunchSpec {
   delegatedTools?: DelegatedToolSpec[];
   appendSystemPrompt?: string[]; // absolute, readable files passed with --append-system-prompt
   systemPrompt?: string;      // absolute, readable file passed with --system-prompt (replaces pi's prompt)
-  placement?: "split-right" | "split-down" | "tab" | "worktree"; // default "tab"
+  placement?: "split-right" | "split-down" | "tab" | "worktree" | "auto" | "visible"; // default "tab"; see "Pane selector"
   display: {
     label: string;            // widget row / tab label
     group?: string;           // widget group title (default group = generic subagents)
@@ -236,7 +236,7 @@ class AgentRuntime {
 | `close` | After `stop`. Checks shell/tty/occupant, closes only that pane, verifies `pane_not_found`. |
 | `inspectShutdown` | Reconciliation evidence: exact `shutdown-ack`, exact child gone (`exited` is true when the PID is free **or** reused by another process; `pidReused` tells which), user takeover. `ps` failures → `cleanup_uncertain`. |
 | `focus` | Display only, split placements: moves focus between caller and child if the layout still matches. |
-| `move` | Moves the child's pane to a new tab or beside a target pane (pane selector). The new tab is **observed** (a lost answer is resolved by `pane get`); pane, terminal and workspace must not change. Returns the handle with the new `tabId`, which must replace the stored one: the old handle observes `changed`. Nothing changed after an error → `busy`. |
+| `move` | Moves the child's pane to a new tab or beside a target pane (pane selector). The new tab is **observed** (a lost answer is resolved by `pane get`); pane, terminal and workspace must not change, and the move is recorded (`move-<uuid>.json`). Returns the handle with the new `tabId`; older handles of the same task stay valid by following the recorded moves (the pane selector may move an agent through another client's runtime), while a tab change nobody recorded is `changed`. Nothing changed after an error → `busy`. |
 
 Error codes (`RuntimeError.code`): `unsupported`, `launch_uncertain`, `launch_failed`, `dispatch_uncertain`,
 `cleanup_blocked`, `cleanup_uncertain`, `busy`.
@@ -278,7 +278,7 @@ display-only activity snapshots (0600). User-driven children (`userInput: "allow
 (label, tools, denied tools; Ctrl+J toggles the list); workflow children keep pi's own Ctrl+J.
 
 For user-driven children the pane's **tab** is not identity: the user may move the pane (pane, terminal, workspace,
-shell and process must still match). For workflow children any tab change outside `move` is `changed`.
+shell and process must still match). For workflow children any tab change not recorded by `move` is `changed`.
 
 ## Evidence layout
 
@@ -298,7 +298,28 @@ The runtime updates rows itself (launch, observe/watch, dispatch, stop, close); 
 `annotate` (e.g. `{ status: "in verifica", active: false }`) and can retire a row early with `forget`.
 After a cold restart, observing a persisted handle of a live agent rebuilds its row from `boot.json`; a superseded
 handle (before `dispatch`) never repaints the row, and a closed agent is not resurrected.
-Rows are grouped by `display.group`. Rows of other clients are not selectable in the pane selector.
+Rows are grouped by `display.group`; the agent shown beside the caller is marked `▶`.
+
+## Pane selector
+
+One process-wide selector state (`selectorState()`, `Symbol.for("pi-subagents/pane-selector-v1")`, kept across
+`/reload`) is shared by every `AgentRuntime` of the process, whatever the client (`subagent` tool, Issue Round):
+
+- every launched agent whose pane is in the caller's workspace is **owned** (label) with a **control**: its latest
+  handle and the `move` of the runtime that launched it. Observing a live agent registers it again (cold restart,
+  `/reload`) and replaces the control's handle with a newer task's; `stopped`/`missing`/`changed`, `close` and
+  `forget` remove it;
+- `placement: "auto"`: beside the caller (`split-right`) only for the first agent of a single-pane, unzoomed caller
+  tab with no other owned agent of that workspace; otherwise a tab;
+- `placement: "visible"`: beside the caller; an owned agent shown there is first parked in a new tab through its own
+  runtime; a caller tab with another (foreign) split, a zoomed caller or a split already reserved by a concurrent
+  launch gives a tab. The decision is a synchronous check-and-set on the layout read just before, so concurrent
+  launches never get two splits. The handle carries the effective placement (`split-right`, or none for a tab);
+- the memo-subagents `/subagent` menu and Ctrl+Alt+X list this session's subagents and every other owned agent of the
+  caller's workspace, and move them through their controls (`PaneSelector.select`). Agents in other workspaces
+  (e.g. Herdr worktree spaces) are never moved.
+
+`RuntimeConfig.selector` replaces the shared state (tests).
 
 Clients change rows only through `annotate`/`forget`; `presence()` is for display (`list`, `get`, `subscribe`).
 Its `upsert`/`update`/`remove` are runtime internals.

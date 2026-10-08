@@ -20,7 +20,7 @@ import {
   setPaneTask,
 } from "./terminal.ts";
 import type { CompletionResult } from "./completion.ts";
-import { paneSelector, type PaneMover } from "./pane-selector.ts";
+import { paneSelector } from "./pane-selector.ts";
 import { randomBytes, randomUUID } from "node:crypto";
 import {
   buildAuthenticatedModelCatalog,
@@ -839,7 +839,8 @@ const PRESENCE_STATE_LABEL: Record<PresenceEntry["state"], string> = {
 /** One runtime agent row: elapsed, label, model|thinking · status (client annotation first). */
 function presenceRowLine(entry: PresenceEntry, width: number, accent: string, now: number): string {
   const elapsed = formatElapsedMMSS(entry.startedAt, now);
-  const left = `   ${elapsed}  ${entry.label} `;
+  const selected = entry.paneId && paneSelector.state.selected === entry.paneId ? "▶" : " ";
+  const left = ` ${selected} ${elapsed}  ${entry.label} `;
   const modelId = entry.model.includes("/") ? entry.model.slice(entry.model.indexOf("/") + 1) : entry.model;
   const status = entry.questionPending
     ? `❓ ${entry.status ?? "question"}`
@@ -847,8 +848,10 @@ function presenceRowLine(entry: PresenceEntry, width: number, accent: string, no
   return borderLine(left, ` ${modelId}|${entry.thinking} · ${status} `, width, accent);
 }
 
-/** Runtime agents of other clients, one box per display group (e.g. "Issue Round"). */
-function renderPresenceGroupLines(entries: PresenceEntry[], width: number, now = Date.now()): string[] {
+const SELECTOR_HINT = " /subagent · Ctrl+Alt+X: select visible agent ";
+
+/** Runtime agents of other clients, one box per display group (e.g. "Issue Round"); `hint` in the last. */
+function renderPresenceGroupLines(entries: PresenceEntry[], width: number, hint = false, now = Date.now()): string[] {
   const groups = new Map<string, PresenceEntry[]>();
   for (const entry of entries) {
     if (!entry.group) continue;
@@ -862,6 +865,7 @@ function renderPresenceGroupLines(entries: PresenceEntry[], width: number, now =
     const accent = active > 0 ? ACTIVE_ACCENT : OPEN_ACCENT;
     lines.push(borderTop(group, info, width, accent));
     for (const row of rows) lines.push(presenceRowLine(row, width, accent, now));
+    if (hint && group === [...groups.keys()].at(-1)) lines.push(borderLine(SELECTOR_HINT, "", width, accent));
     lines.push(borderBottom(width, accent));
   }
   return lines;
@@ -877,11 +881,11 @@ function renderWidgetLines(
   const own = new Set(agents.map((agent) => agent.handle?.protocolDir).filter(Boolean));
   entries = entries.filter((entry) => !own.has(entry.key));
   const ungrouped = entries.filter((entry) => !entry.group);
+  const subagentsBox = agents.length > 0 || ungrouped.length > 0;
   return [
-    ...(agents.length > 0 || ungrouped.length > 0
-      ? renderSubagentWidgetLines(agents, width, ungrouped)
-      : []),
-    ...renderPresenceGroupLines(entries, width),
+    ...(subagentsBox ? renderSubagentWidgetLines(agents, width, ungrouped) : []),
+    // The selector hint once: in the Subagents box, else in the last group box.
+    ...renderPresenceGroupLines(entries, width, !subagentsBox),
   ];
 }
 
@@ -925,7 +929,7 @@ function renderSubagentWidgetLines(
   }
   for (const row of runtimeRows) lines.push(presenceRowLine(row, width, accent, now));
 
-  lines.push(borderLine(" /subagent · Ctrl+Alt+X: select visible agent ", "", width, accent));
+  lines.push(borderLine(SELECTOR_HINT, "", width, accent));
   lines.push(borderBottom(width, accent));
   return lines;
 }
@@ -1060,15 +1064,56 @@ function resolveInterruptTarget(params: { id?: string; name?: string }):
   return { error: `Ambiguous subagent name "${requestedName}". Matches: ${candidates}` };
 }
 
+interface SelectorChoice {
+  paneId: string;
+  name: string;
+  label: string;
+  running?: RunningSubagent;
+}
+
+/** This session's subagents, then other runtime agents shown-able beside the main pane (same workspace). */
+function selectorChoices(): SelectorChoice[] {
+  const own = Array.from(runningSubagents.values());
+  const choices: SelectorChoice[] = own.map((agent) => ({
+    paneId: agent.surface,
+    name: agent.name,
+    running: agent,
+    label: `${agent.name} [${agent.id}] · ${projectLifecycle(ensureLifecycle(agent), Date.now()).kind}`,
+  }));
+  let selectable: Set<string>;
+  try {
+    selectable = new Set(paneSelector.selectable());
+  } catch {
+    return choices; // Layout unknown: only this session's subagents.
+  }
+  for (const entry of presence().list()) {
+    if (!entry.paneId || !selectable.has(entry.paneId) || own.some((agent) => agent.surface === entry.paneId))
+      continue;
+    const status = entry.questionPending ? "❓ question" : entry.status ?? PRESENCE_STATE_LABEL[entry.state] ?? entry.state;
+    choices.push({
+      paneId: entry.paneId,
+      name: entry.label,
+      label: `${entry.group ? `${entry.group} › ` : ""}${entry.label} · ${status}`,
+    });
+  }
+  return choices;
+}
+
 /**
- * Pane selector moves of runtime children go through the runtime: the observed new tab replaces the
- * stored handle (identity stays exact). Other panes are moved directly.
+ * Pane selector moves go through the runtime that owns each pane (also another client's, e.g. Issue
+ * Round): the observed new tab is kept in the selector's control. Take it over here too.
  */
-const subagentPaneMover: PaneMover = async (paneId, to) => {
-  const running = [...runningSubagents.values()].find((agent) => agent.surface === paneId);
-  if (!running?.handle) return paneSelector.herdrMover()(paneId, to);
-  running.handle = await subagentRuntime().move(running.handle, to);
-};
+function syncSelectorHandles(): void {
+  for (const running of runningSubagents.values()) {
+    const control = paneSelector.state.controls?.get(running.surface);
+    if (
+      running.handle &&
+      control?.handle.protocolDir === running.handle.protocolDir &&
+      control.handle.taskToken === running.handle.taskToken
+    )
+      running.handle = control.handle;
+  }
+}
 
 /** Runtime children get a correlated interrupt request (the child aborts its current run). */
 function interruptSubagentPane(surface: string): void {
@@ -1561,6 +1606,12 @@ function sessionHeaderCwd(sessionFile: string): string | undefined {
   }
 }
 
+/** Selector: the runtime's shared pane selector decides (first agent beside the main pane, others in tabs). */
+function surfacePlacement(): "auto" | "split-right" | "tab" {
+  const mode = surfaceMode();
+  return mode === "selector" ? "auto" : mode === "tab" ? "tab" : "split-right";
+}
+
 function surfaceMode(): "selector" | "split" | "tab" {
   const mode = process.env.PI_SUBAGENT_SURFACE ?? "selector";
   return mode === "tab" || mode === "split" ? mode : "selector";
@@ -1738,7 +1789,6 @@ async function launchSubagentInner(
     writeFileSync(systemPromptFile, identity, "utf8");
   }
 
-  const reservation = surfaceMode() === "selector" ? paneSelector.reserve() : undefined;
   const spec: LaunchSpec = {
     scope: sessionId,
     agentId: id,
@@ -1765,18 +1815,11 @@ async function launchSubagentInner(
         ? { systemPrompt: systemPromptFile }
         : { appendSystemPrompt: [systemPromptFile] }
       : {}),
-    placement: reservation?.placement ?? (surfaceMode() === "tab" ? "tab" : "split-right"),
+    placement: surfacePlacement(),
     display: { label: params.name },
   };
-  let handle: AgentHandle;
-  try {
-    handle = await subagentRuntime().launch(spec);
-  } catch (error) {
-    if (reservation) paneSelector.release(reservation);
-    throw error;
-  }
+  const handle = await subagentRuntime().launch(spec);
   launchState.surface = handle.paneId;
-  if (reservation) paneSelector.adopt(reservation, handle.paneId, params.name);
   if (params.task) setPaneTask(handle.paneId, params.task);
 
   const running: RunningSubagent = {
@@ -2594,7 +2637,6 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         // pi runs a resumed session in its header's cwd: the child must be launched there.
         const resumeCwd = realPathOr(worktree?.cwd ?? sessionHeaderCwd(params.sessionPath) ?? ctx.cwd);
         const localAgentDir = join(resumeCwd, ".pi", "agent");
-        const reservation = surfaceMode() === "selector" ? paneSelector.reserve() : undefined;
         let handle: AgentHandle;
         try {
           handle = await subagentRuntime().launch({
@@ -2612,18 +2654,16 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             exit: autoExit ? "auto" : "tool",
             session: { kind: "file", path: params.sessionPath },
             env: subagentEnv({ name, id }),
-            placement: reservation?.placement ?? (surfaceMode() === "tab" ? "tab" : "split-right"),
+            placement: surfacePlacement(),
             display: { label: name },
           });
         } catch (error) {
-          if (reservation) paneSelector.release(reservation);
           const message = error instanceof Error ? error.message : String(error);
           return {
             content: [{ type: "text", text: `Error: resume failed: ${message}` }],
             details: { error: message },
           };
         }
-        if (reservation) paneSelector.adopt(reservation, handle.paneId, name);
         if (params.message) setPaneTask(handle.paneId, params.message);
 
         // Register as a running subagent for widget tracking
@@ -2830,43 +2870,45 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     },
   });
 
-  // User-only layout selector: no model turn and no changes to child lifecycle.
+  // User-only layout selector: no model turn and no changes to child lifecycle. Lists this session's
+  // subagents and the other runtime agents of this process beside the main pane (e.g. Issue Round).
   const selectSubagentView = async (args: string, ctx: ExtensionContext) => {
     if (ctx.mode !== "tui" || !isTerminalAvailable()) {
       ctx.ui.notify("Subagent view requires Pi running interactively inside Herdr", "warning");
       return;
     }
-    const agents = Array.from(runningSubagents.values());
-    if (agents.length === 0) {
-      ctx.ui.notify("No open subagents to display", "info");
+    const choices = selectorChoices();
+    if (choices.length === 0) {
+      ctx.ui.notify("No open agents to display", "info");
       return;
     }
     try {
       const visible = paneSelector.visible();
-      let chosen: RunningSubagent | undefined;
+      let chosen: SelectorChoice | undefined;
       const query = args.trim();
       if (query) {
-        const matches = agents.filter((agent) => agent.id === query || agent.name === query);
+        const matches = choices.filter((choice) => choice.running?.id === query || choice.name === query);
         if (matches.length !== 1) {
           ctx.ui.notify("Use /subagent to pick an open agent", "warning");
           return;
         }
         chosen = matches[0];
       } else {
-        const labels = agents.map((agent) => {
-          const projection = projectLifecycle(ensureLifecycle(agent), Date.now());
-          return `${agent.surface === visible ? "▶ " : "  "}${agent.name} [${agent.id}] · ${projection.kind}`;
-        });
+        const labels = choices.map((choice) => `${choice.paneId === visible ? "▶ " : "  "}${choice.label}`);
         const selected = await ctx.ui.select("Subagents — choose the terminal shown on the right", labels);
         if (!selected) return;
-        chosen = agents[labels.indexOf(selected)];
+        chosen = choices[labels.indexOf(selected)];
       }
-      if (!chosen || runningSubagents.get(chosen.id) !== chosen) {
-        ctx.ui.notify("This subagent has already finished", "info");
+      const stillOpen = chosen?.running
+        ? runningSubagents.get(chosen.running.id) === chosen.running
+        : !!chosen && paneSelector.state.owned.has(chosen.paneId);
+      if (!chosen || !stillOpen) {
+        ctx.ui.notify("This agent has already finished", "info");
         return;
       }
-      paneSelector.state.owned.set(chosen.surface, chosen.name);
-      await paneSelector.select(chosen.surface, subagentPaneMover);
+      if (chosen.running) paneSelector.state.owned.set(chosen.paneId, chosen.name);
+      await paneSelector.select(chosen.paneId);
+      syncSelectorHandles();
       updateWidget();
     } catch (error) {
       ctx.ui.notify(`Unable to switch subagent: ${error instanceof Error ? error.message : String(error)}`, "error");

@@ -2381,11 +2381,31 @@ describe("subagents widget rendering", () => {
       assert.match(lines[1], /gpt-x\|high · al lavoro/);
       assert.match(lines[2], /gpt-y\|low · waiting/);
       assert.match(lines[3], /❓ domanda per te/);
-      assert.match(lines[4], /╰/);
+      // Issue Round agents are selectable too: the selector hint is in their box when it is the only one.
+      assert.match(lines[4], /\/subagent · Ctrl\+Alt\+X/);
+      assert.match(lines[5], /╰/);
       assert.ok(!lines.some((line: string) => line.includes("Subagents")));
-      assert.ok(!lines.some((line: string) => line.includes("/subagent")));
     } finally {
       Date.now = originalNow;
+    }
+  });
+
+  it("marks the runtime agent shown beside the main pane with ▶", async () => {
+    const testApi = (subagentsModule as any).__test__;
+    const { paneSelector } = await import("../pi-extension/subagents/pane-selector.ts");
+    const previous = paneSelector.state.selected;
+    paneSelector.state.selected = "pane-planner";
+    try {
+      const row = { group: "Issue Round", model: "prov/m", thinking: "low", startedAt: Date.now(), state: "active", updatedAt: 0 };
+      const lines = testApi.renderWidgetLines([], [
+        { ...row, key: "p", label: "planner", paneId: "pane-planner" },
+        { ...row, key: "m", label: "merger", paneId: "pane-merger" },
+      ], 80);
+      assert.match(lines[1], /▶ \d\d:\d\d  planner/);
+      assert.match(lines[2], /merger/);
+      assert.ok(!lines[2].includes("▶"));
+    } finally {
+      paneSelector.state.selected = previous;
     }
   });
 

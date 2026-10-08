@@ -54,6 +54,20 @@ import type { ActivityReadResult } from "../activity.ts";
 import type { PresenceState } from "./presence.ts";
 import { CHILD_ENV } from "./child/env.ts";
 import { resolveQuestionExtension } from "./question-extension.ts";
+import {
+  adoptPane,
+  forgetPane,
+  releasePlacement,
+  reservePlacement,
+  selectorState,
+} from "./pane-selector.ts";
+import type {
+  PaneLayout,
+  PaneMoveTarget,
+  PlacementMode,
+  PlacementReservation,
+  SelectorState,
+} from "./pane-selector.ts";
 
 export interface RuntimeConfig {
   /** Private (0700) state root, outside every child cwd. Attempts live in <stateDir>/runtime/<sha256>. */
@@ -70,6 +84,8 @@ export interface RuntimeConfig {
   childExtension?: string;
   /** Override of pi-memo-question's extension path (null: not installed). Default: resolved dependency. */
   questionExtension?: string | null;
+  /** Pane selector state (visible split, owned panes). Default: the process-wide one shared by every client. */
+  selector?: SelectorState;
   runner?: Runner;
   startupTimeoutMs?: number;
   shellReadyTimeoutMs?: number;
@@ -119,8 +135,9 @@ export interface LaunchSpec {
   /** Absolute file passed with --system-prompt (replaces pi's system prompt). */
   systemPrompt?: string;
   /** "worktree" opens the existing checkout `cwd` as a Herdr worktree space (falls back to "tab"
-   * when Herdr refuses, e.g. older server or a non-Git caller space). Default "tab". */
-  placement?: Placement;
+   * when Herdr refuses, e.g. older server or a non-Git caller space). "auto"/"visible": the pane
+   * selector decides between the visible split and a tab (see pane-selector.ts). Default "tab". */
+  placement?: Placement | PlacementMode;
   display: {
     label: string;
     group?: string;
@@ -192,6 +209,12 @@ export class RuntimeError extends Error {
     this.code = code;
     this.evidence = evidence;
   }
+}
+interface MoveRecord {
+  at: string;
+  paneId: string;
+  fromTab: string;
+  toTab: string;
 }
 interface Pane {
   pane_id: string;
@@ -380,11 +403,75 @@ export class AgentRuntime {
     this.userDrivenCache.set(h.protocolDir, allowed);
     return allowed;
   }
+  private get selector(): SelectorState {
+    return this.config.selector ?? selectorState();
+  }
+  /** Pane control registered with the selector: moves go through this runtime with the latest handle. */
+  private control(h: AgentHandle) {
+    return { handle: h, move: (current: AgentHandle, to: PaneMoveTarget) => this.move(current, to) };
+  }
+  /** Keep the selector's handle current (same pane, newer task or tab) without registering new panes. */
+  private refreshControl(h: AgentHandle): void {
+    const control = this.selector.controls?.get(h.paneId);
+    if (control && control.handle.protocolDir === h.protocolDir) control.handle = h;
+  }
+  /** "auto"/"visible" placement on the caller's current layout; unknown layout never splits. */
+  private async reservePlacement(
+    parent: Pane,
+    mode: PlacementMode,
+    cwd: string,
+  ): Promise<PlacementReservation> {
+    let layout: PaneLayout | undefined;
+    try {
+      layout = (await this.herdr(["pane", "layout", "--pane", parent.pane_id], cwd)).layout;
+    } catch {
+      layout = undefined;
+    }
+    const state = this.selector;
+    const reservation = reservePlacement(state, parent, layout, mode);
+    if (!reservation.park) return reservation;
+    // "visible": park our agent currently beside the caller, through the runtime that owns it.
+    const control = state.controls?.get(reservation.park);
+    try {
+      if (!control) throw new Error("not a runtime agent");
+      control.handle = await control.move(control.handle, {
+        newTab: { label: state.owned.get(reservation.park) ?? "agent" },
+      });
+      if (state.selected === reservation.park) state.selected = undefined;
+      return reservation;
+    } catch {
+      releasePlacement(state, reservation);
+      return { token: reservation.token, placement: "tab" };
+    }
+  }
+  /** Tab changes this or another runtime recorded with `move`, followed from the handle's tab. */
+  private async movedTo(h: AgentHandle, tabId: string | undefined): Promise<boolean> {
+    if (!tabId) return false;
+    let names: string[];
+    try {
+      names = (await readdir(h.protocolDir)).filter((n) => n.startsWith("move-") && n.endsWith(".json"));
+    } catch {
+      return false;
+    }
+    const moves = (
+      await Promise.all(names.map((n) => json<MoveRecord>(join(h.protocolDir, n)).catch(() => undefined)))
+    )
+      .filter((m): m is MoveRecord => !!m && m.paneId === h.paneId && typeof m.at === "string")
+      .sort((a, b) => a.at.localeCompare(b.at));
+    let tab = h.tabId;
+    for (const m of moves) if (m.fromTab === tab) tab = m.toTab;
+    return tab === tabId;
+  }
   private async pane(h: AgentHandle): Promise<Pane> {
     const pane = (await this.herdr(["pane", "get", h.paneId])).pane as Pane;
-    // The tab is identity for workflow children; a user-driven child's pane may be moved by the user
-    // (pane, terminal, workspace, shell and process identity still have to match exactly).
-    const tabOk = pane?.tab_id === h.tabId || (await this.userDriven(h));
+    // The tab is identity for workflow children, changed only by a recorded `move` (e.g. the pane
+    // selector, possibly through another client's runtime, while the owner keeps its older handle);
+    // a user-driven child's pane may be moved by the user (pane, terminal, workspace, shell and process
+    // identity still have to match exactly).
+    const tabOk =
+      pane?.tab_id === h.tabId ||
+      (await this.userDriven(h)) ||
+      (await this.movedTo(h, pane?.tab_id));
     if (
       !pane ||
       pane.pane_id !== h.paneId ||
@@ -516,9 +603,13 @@ export class AgentRuntime {
         "unsupported",
         "Invalid tool policy (names, bash policy, delegated tool specs or name clashes)",
       );
-    const placement: Placement = input.placement ?? "tab";
-    if (!["split-right", "split-down", "tab", "worktree"].includes(placement))
-      throw new RuntimeError("unsupported", `Unknown placement: ${placement}`);
+    const requested = input.placement ?? "tab";
+    if (!["split-right", "split-down", "tab", "worktree", "auto", "visible"].includes(requested))
+      throw new RuntimeError("unsupported", `Unknown placement: ${requested}`);
+    // "auto"/"visible" become "split-right" or "tab" once the caller's layout is read.
+    let placement: Placement =
+      requested === "auto" || requested === "visible" ? "tab" : requested;
+    let reservation: PlacementReservation | undefined;
     for (const file of [...(input.appendSystemPrompt ?? []), ...(input.systemPrompt !== undefined ? [input.systemPrompt] : [])])
       if (typeof file !== "string" || !file.startsWith("/"))
         throw new RuntimeError(
@@ -695,6 +786,10 @@ export class AgentRuntime {
         .pane;
       if (!parent?.workspace_id)
         throw new Error("Herdr current workspace missing");
+      if ((requested === "auto" || requested === "visible") && parent.pane_id && parent.tab_id) {
+        reservation = await this.reservePlacement(parent, requested, cwd);
+        placement = reservation.placement;
+      }
       const split = placement === "split-right" || placement === "split-down";
       if (split && (!parent.pane_id || !parent.tab_id))
         throw new Error("Herdr current pane identity missing for split");
@@ -1093,12 +1188,17 @@ export class AgentRuntime {
           await this.ownership(h);
           await evidence("ready", { pid: h.pid, sessionPath: h.sessionPath });
           presence().update(protocolDir, { state: "starting" });
+          // Panes of the caller's workspace can be shown beside it by the pane selector (any client).
+          if (h.workspaceId === parent.workspace_id)
+            adoptPane(this.selector, reservation, h.paneId, label, this.control(h));
+          else releasePlacement(this.selector, reservation);
           return h;
         }
         await delay(25);
       } while (Date.now() < deadline);
       throw new Error("Child readiness timed out; launch outcome uncertain");
     } catch (error) {
+      releasePlacement(this.selector, reservation);
       // The shell never became ready and nothing was typed: retire our own unused pane
       // (exact identity only), so a failed launch leaves no hidden residual tab.
       let paneClosed = false;
@@ -1197,6 +1297,7 @@ export class AgentRuntime {
         throw new RuntimeError("dispatch_uncertain", String(e), next);
       }
       presence().update(h.protocolDir, { state: "starting", questionPending: false });
+      this.refreshControl(next);
       return next; // Persist this handle before observing. No replay on timeout.
     });
   }
@@ -1345,6 +1446,7 @@ export class AgentRuntime {
         fromTab: h.tabId,
         toTab: pane.tab_id,
       });
+      this.refreshControl(next);
       return next;
     });
   }
@@ -1363,11 +1465,36 @@ export class AgentRuntime {
   /** Display only: retire the agent row before close. */
   forget(h: AgentHandle): void {
     presence().remove(h.protocolDir);
+    this.forgetPane(h);
+  }
+  private forgetPane(h: AgentHandle): void {
+    if (this.selector.controls?.get(h.paneId)?.handle.protocolDir === h.protocolDir)
+      forgetPane(this.selector, h.paneId);
   }
   async observe(h: AgentHandle): Promise<Observation> {
     const observation = await this.observeOnce(h);
     await this.reflectPresence(h, observation).catch(() => {});
+    await this.reflectControl(h, observation).catch(() => {});
     return observation;
+  }
+  /** Selector registration of observed agents: after a restart or /reload, and for newer tasks. */
+  private async reflectControl(h: AgentHandle, o: Observation): Promise<void> {
+    if (o.kind === "stopped" || o.kind === "missing" || o.kind === "changed")
+      return this.forgetPane(h);
+    if (!["starting", "active", "settled"].includes(o.kind)) return;
+    const current = await json<TaskCommand>(join(h.protocolDir, "task.json"));
+    if (!current || !sameTask(current, h)) return;
+    const state = this.selector;
+    const control = state.controls?.get(h.paneId);
+    if (control?.handle.protocolDir === h.protocolDir) {
+      // A newer task replaces the handle; the same task keeps the (possibly newer) moved tab.
+      if (control.handle.taskToken !== h.taskToken) control.handle = h;
+      return;
+    }
+    if (control) return;
+    const boot = await json<Boot>(join(h.protocolDir, "boot.json"));
+    if (!boot?.display?.label || !sameAgent(boot, h)) return;
+    adoptPane(state, undefined, h.paneId, state.owned.get(h.paneId) ?? boot.display.label, this.control(h));
   }
   /** Display only; the presence row never feeds back into control. */
   private async reflectPresence(h: AgentHandle, o: Observation): Promise<void> {
@@ -1663,6 +1790,7 @@ export class AgentRuntime {
       } catch (error) {
         if (["pane_not_found", "not_found"].includes((error as any).herdrCode)) {
           presence().remove(h.protocolDir);
+          this.forgetPane(h);
           return;
         }
         throw new RuntimeError("cleanup_blocked", String(error));
@@ -1683,6 +1811,7 @@ export class AgentRuntime {
         ) {
           observers.get(h.protocolDir)?.();
           presence().remove(h.protocolDir);
+          this.forgetPane(h);
           return;
         }
         throw new RuntimeError("cleanup_uncertain", String(error));

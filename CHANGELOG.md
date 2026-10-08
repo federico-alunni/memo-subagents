@@ -2,15 +2,17 @@
 
 ## Unreleased
 
-### Changed
-
-- Herdr Agents panel name of every subagent: `<caller workspace>-<caller tab>-sub<n>` (e.g. `local-app-PLAN-sub1`) instead of `└─ <label>`. `n` is the first index not used by the caller pane's live subagents of any runtime client (active + 1 without gaps); concurrent launches in one process get distinct indices. Display only: unreadable labels are omitted and failures never affect the launch. `treeDisplayName` is replaced by `subagentPanelName` and `nextSubagentIndex`.
-- One `question` tool for the main agent and every child: **pi-memo-question** (new dependency). The runtime loads it with `-e` in isolated children with `question: true` and in every profile child; its dialogs become `question.json` records for any child (pending question in `observe`, ❓ in the widget), and it emits `herdr:blocked` everywhere. Answer texts and dialog are the master profile's (English).
-
 ### Removed
 
 - The runtime's own `question` tool and `runtime/child/question-dialog.ts`: the `question` tool now comes from the **pi-memo-question** package (see Changed).
 - The old launch path: pi harness driver, `subagent-done.ts`, launch scripts and the terminal sentinel/`.exit` sidecar, the fixed shell delay `PI_SUBAGENT_SHELL_READY_DELAY_MS` (the runtime waits for a stable shell), pane creation in `herdr.ts`/`terminal.ts`, and the upstream live suite (`npm run test:integration`), which tested that path.
+
+### Changed
+
+- Herdr Agents panel name of every subagent: `<caller workspace>-<caller tab>-sub<n>` (e.g. `local-app-PLAN-sub1`) instead of `└─ <label>`. `n` is the first index not used by the caller pane's live subagents of any runtime client (active + 1 without gaps); concurrent launches in one process get distinct indices. Display only: unreadable labels are omitted and failures never affect the launch. `treeDisplayName` is replaced by `subagentPanelName` and `nextSubagentIndex`.
+- The pane selector moved into the agent runtime (`runtime/pane-selector.ts`, re-exported from `pane-selector.ts`) and is shared by every runtime client of the process: placements `auto` (the `subagent` tool) and `visible` (beside the caller, parking the agent shown there; Issue Round's triage and planner); every agent of the caller's workspace is registered with a control that moves it through its own runtime. `/subagent` and Ctrl+Alt+X list Issue Round agents too; the widget marks them with `▶` and shows the hint also without generic subagents.
+- `move` is recorded and older handles of the same task follow recorded moves (a tab change nobody recorded is still `changed`), so a client keeps working when the selector moves its agent through another client's runtime.
+- One `question` tool for the main agent and every child: **pi-memo-question** (new dependency). The runtime loads it with `-e` in isolated children with `question: true` and in every profile child; its dialogs become `question.json` records for any child (pending question in `observe`, ❓ in the widget), and it emits `herdr:blocked` everywhere. Answer texts and dialog are the master profile's (English).
 
 ### Added
 

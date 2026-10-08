@@ -44,6 +44,8 @@ import type {
   DelegatedToolSpec,
 } from "../../pi-extension/subagents/runtime/protocol.ts";
 import { childToolCall } from "../../pi-extension/subagents/runtime/child/extension.ts";
+import { PaneSelector } from "../../pi-extension/subagents/runtime/pane-selector.ts";
+import type { SelectorState } from "../../pi-extension/subagents/runtime/pane-selector.ts";
 
 // Role presets of the original issue-round transport tests, expressed as runtime policies.
 const WORKER_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
@@ -111,6 +113,11 @@ class FakeHerdr {
   /** Herdr `worktree open` outcome for worker launches. */
   worktree: "open" | "already-open" | "refused" | "mismatch" = "open";
   workspace = "workspace-1";
+  paneId = "pane-1";
+  /** Caller tab layout read by "auto"/"visible" placement. */
+  layout: { zoomed?: boolean; panes: { pane_id: string; tab_id: string; workspace_id: string }[] } = {
+    panes: [{ pane_id: "master-pane", tab_id: "tab-1", workspace_id: "workspace-1" }],
+  };
   onCall?: (input: RunInput) => void | RunResult | Promise<void | RunResult>;
   runner: Runner = async (input) => {
     this.calls.push(input);
@@ -152,6 +159,7 @@ class FakeHerdr {
           workspace_id: "workspace-1",
         },
       });
+    if (a[0] === "pane" && a[1] === "layout") return this.result({ layout: this.layout });
     if (a[0] === "pane" && a[1] === "split") {
       this.createCount++;
       return this.result({ pane: this.pane() });
@@ -228,7 +236,7 @@ class FakeHerdr {
     if (a[1] === "process-info")
       return this.result({
         process_info: {
-          pane_id: "pane-1",
+          pane_id: this.paneId,
           shell_pid: 8111,
           ...(this.reportedTty === undefined ? {} : { tty: this.reportedTty }),
           foreground_processes: [
@@ -248,7 +256,7 @@ class FakeHerdr {
   }
   pane() {
     return {
-      pane_id: "pane-1",
+      pane_id: this.paneId,
       tab_id: "tab-1",
       workspace_id: this.workspace,
       terminal_id: this.terminal,
@@ -308,6 +316,7 @@ async function fixture(t: { after(fn: () => unknown): void }) {
     startupTimeoutMs: 200,
     shellReadyTimeoutMs: 1000,
     shutdownTimeoutMs: 500,
+    selector: { owned: new Map() } as SelectorState,
   };
   const transport = new AgentRuntime(config);
   const input: LaunchSpec = {
@@ -1897,7 +1906,7 @@ test("userInput allowed: a user who quits pi ends the child and its pane can be 
   assert.equal(g.fake.closes, 0);
 });
 
-test("move: the observed tab becomes the handle identity; old handles are refused", async (t) => {
+test("move: the observed tab becomes the handle identity; older handles follow recorded moves only", async (t) => {
   const f = await fixture(t);
   const h = await f.transport.launch(f.input);
   let tab = "tab-1";
@@ -1916,7 +1925,15 @@ test("move: the observed tab becomes the handle identity; old handles are refuse
   assert.equal(parked.tabId, "tab-parked");
   assert.equal(parked.placement, undefined);
   assert.equal((await f.transport.observe(parked)).kind, "active");
+  // The owner may keep its older handle (the move came from the pane selector, maybe through another
+  // client's runtime): the recorded move is followed, from this and from a fresh runtime.
+  assert.equal((await f.transport.observe(h)).kind, "active");
+  assert.equal((await new AgentRuntime(f.config).observe(h)).kind, "active");
+  // A tab change nobody recorded is still a change.
+  tab = "tab-user";
   assert.equal((await f.transport.observe(h)).kind, "changed");
+  assert.equal((await f.transport.observe(parked)).kind, "changed");
+  tab = "tab-parked";
   // A lost answer is resolved by observation.
   lose = true;
   const shown = await f.transport.move(parked, { split: { targetPane: "master-pane", ratio: 0.5 } });
@@ -2077,4 +2094,128 @@ test("bash-ask requires the read-only policy and a user-driven child; old boot r
   });
   assert.equal(f.fake.boot!.policy.bashAsk, true);
   assert.deepEqual(f.fake.boot!.policy.bashAllow, ["npm test", "gh issue view"]);
+});
+
+// ── Pane selector shared by every runtime client (subagent tool, Issue Round, ...) ──
+
+/** Two clients (own runtimes and Herdr fakes) of one process-wide selector state. */
+async function twoClients(t: { after(fn: () => unknown): void }) {
+  const selector: SelectorState = { owned: new Map() };
+  const a = await fixture(t);
+  const b = await fixture(t);
+  a.config.selector = b.config.selector = selector;
+  const ra = new AgentRuntime(a.config);
+  const rb = new AgentRuntime(b.config);
+  t.after(() => (ra.dispose(), rb.dispose()));
+  a.fake.paneId = "pane-a";
+  b.fake.paneId = "pane-b";
+  // pane-a's tab follows the moves its own runtime performs.
+  let tabA = "tab-1";
+  const baseA = a.fake.pane.bind(a.fake);
+  a.fake.pane = () => ({ ...baseA(), tab_id: tabA });
+  const movesA: string[][] = [];
+  a.fake.onCall = (call) => {
+    if (call.argv[1] !== "move") return;
+    movesA.push(call.argv);
+    tabA = call.argv.includes("--new-tab") ? "tab-parked" : "tab-1";
+    return a.fake.result({ move_result: { changed: true } });
+  };
+  return { selector, a, b, ra, rb, movesA };
+}
+const SCOUT = {
+  isolation: "profile" as const,
+  tools: undefined,
+  userInput: "allowed" as const,
+  exit: "auto" as const,
+  display: { label: "scout" },
+};
+const BESIDE = { pane_id: "pane-a", tab_id: "tab-1", workspace_id: "workspace-1" };
+
+test("auto placement: the first agent beside the caller, the next ones in tabs; all selectable", async (t) => {
+  const { selector, a, b, ra, rb } = await twoClients(t);
+  const ha = await ra.launch({ ...a.input, ...SCOUT, placement: "auto" });
+  assert.ok(a.fake.calls.some((c) => c.argv[1] === "split"));
+  assert.equal(ha.placement, "split-right");
+  assert.equal(selector.selected, "pane-a");
+  assert.equal(selector.owned.get("pane-a"), "scout");
+  assert.equal(selector.controls?.get("pane-a")?.handle.protocolDir, ha.protocolDir);
+  // pane-a is beside the caller: another client's "auto" agent goes to a tab.
+  b.fake.layout = { panes: [...b.fake.layout.panes, BESIDE] };
+  const hb = await rb.launch({ ...b.input, ...PLANNER, placement: "auto" });
+  assert.ok(b.fake.calls.some((c) => c.argv[0] === "tab" && c.argv[1] === "create"));
+  assert.equal(hb.placement, undefined);
+  assert.equal(selector.selected, "pane-a");
+  assert.deepEqual([...selector.owned.keys()], ["pane-a", "pane-b"]);
+});
+
+test("visible placement parks our agent shown beside the caller through its own runtime", async (t) => {
+  const { selector, a, b, ra, rb, movesA } = await twoClients(t);
+  const ha = await ra.launch({ ...a.input, ...SCOUT, placement: "auto" });
+  b.fake.layout = { panes: [...b.fake.layout.panes, BESIDE] };
+  const hb = await rb.launch({ ...b.input, ...PLANNER, placement: "visible" });
+  assert.equal(movesA.length, 1);
+  assert.ok(movesA[0].includes("--new-tab"));
+  assert.ok(b.fake.calls.some((c) => c.argv[1] === "split"));
+  assert.equal(hb.placement, "split-right");
+  assert.equal(selector.selected, "pane-b");
+  // The selector's control has the parked tab; the owner's older handle still works (recorded move).
+  assert.equal(selector.controls?.get("pane-a")?.handle.tabId, "tab-parked");
+  assert.equal((await ra.observe(ha)).kind, "active");
+});
+
+test("visible placement never splits a tab with another split or a zoomed caller", async (t) => {
+  const master = { pane_id: "master-pane", tab_id: "tab-1", workspace_id: "workspace-1" };
+  for (const layout of [
+    { panes: [master, { ...master, pane_id: "user-pane" }] },
+    { zoomed: true, panes: [master] },
+  ]) {
+    const f = await fixture(t);
+    f.fake.layout = layout;
+    const h = await f.transport.launch({ ...f.input, ...PLANNER, placement: "visible" });
+    assert.equal(h.placement, undefined);
+    assert.ok(!f.fake.calls.some((c) => c.argv[1] === "split"));
+    assert.equal(f.config.selector!.reservedSplit, undefined);
+    assert.equal(f.config.selector!.selected, undefined);
+  }
+});
+
+test("the pane selector shows another client's agent by moving it through that client's runtime", async (t) => {
+  const { selector, a, ra } = await twoClients(t);
+  const ha = await ra.launch({ ...a.input, ...SCOUT, placement: "tab" });
+  assert.equal(selector.selected, undefined);
+  let tabA = "tab-x";
+  a.fake.pane = () => ({ pane_id: "pane-a", tab_id: tabA, workspace_id: "workspace-1", terminal_id: a.fake.terminal });
+  a.fake.onCall = (call) => {
+    if (call.argv[1] !== "move") return;
+    tabA = "tab-1";
+    return a.fake.result({ move_result: { changed: true } });
+  };
+  // The main process' selector reads the layout itself; the move goes through runtime A.
+  const view = new PaneSelector(selector, (args) => {
+    if (args[1] === "get" && args[2] === "master-pane")
+      return { pane: { pane_id: "master-pane", tab_id: "tab-1", workspace_id: "workspace-1" } };
+    if (args[1] === "get") return { pane: { pane_id: args[2], tab_id: tabA, workspace_id: "workspace-1" } };
+    if (args[1] === "layout")
+      return { layout: { panes: [{ pane_id: "master-pane", tab_id: "tab-1", workspace_id: "workspace-1" }] } };
+    throw new Error(`direct Herdr move not expected: ${args.join(" ")}`);
+  }, () => "master-pane");
+  assert.deepEqual(view.selectable(), ["pane-a"]);
+  await view.select("pane-a");
+  assert.equal(selector.selected, "pane-a");
+  assert.equal(selector.controls?.get("pane-a")?.handle.tabId, "tab-1");
+  assert.equal((await ra.observe(ha)).kind, "active");
+});
+
+test("agents are registered again when observed in a new process and forgotten with forget", async (t) => {
+  const f = await fixture(t);
+  const h = await f.transport.launch({ ...f.input, ...SCOUT, placement: "tab" });
+  const fresh: SelectorState = { owned: new Map() };
+  const restarted = new AgentRuntime({ ...f.config, selector: fresh });
+  t.after(() => restarted.dispose());
+  assert.equal((await restarted.observe(h)).kind, "active");
+  assert.equal(fresh.owned.get("pane-1"), "scout");
+  assert.equal(fresh.controls?.get("pane-1")?.handle.taskToken, h.taskToken);
+  restarted.forget(h);
+  assert.equal(fresh.owned.size, 0);
+  assert.equal(f.config.selector!.owned.size, 1);
 });
