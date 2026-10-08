@@ -1,6 +1,6 @@
 {
   "name": "pi-memo-subagents",
-  "version": "0.4.0-beta.2",
+  "version": "0.4.0-beta.3",
   "description": "Interactive pi subagents in Herdr: external agent definitions, pane selector, optional git worktrees",
   "keywords": [
     "pi-package"
@@ -12,12 +12,17 @@
     "url": "https://github.com/federico-alunni/pi-memo-subagents"
   },
   "type": "module",
+  "bin": {
+    "pi-subagent": "./bin/pi-subagent.mjs"
+  },
   "exports": {
     ".": "./pi-extension/subagents/index.ts",
+    "./client": "./pi-extension/subagents/client.ts",
     "./runtime": "./pi-extension/subagents/runtime/index.ts",
     "./package.json": "./package.json"
   },
   "files": [
+    "bin",
     "pi-extension",
     "config.json.example",
     "docs",

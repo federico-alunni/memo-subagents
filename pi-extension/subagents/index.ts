@@ -40,6 +40,8 @@ import { MirrorManager } from "./runtime/mirror-manager.ts";
 import type { MirrorSlot } from "./runtime/mirror-manager.ts";
 import { themePalette, paletteTheme } from "./runtime/mirror-view.ts";
 import { buildSlotPanelData, isPanelData, markSelected, renderPanel } from "./runtime/panel.ts";
+import { startSessionSocket } from "./runtime/session-socket.ts";
+import type { SessionSocketServer } from "./runtime/session-socket.ts";
 import type { PanelData, PanelRow } from "./runtime/panel.ts";
 import type { MirrorStatus } from "./runtime/mirror-view.ts";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -233,6 +235,11 @@ const SubagentParams = Type.Object({
         "Commit-ish the worktree starts from (requires worktree: true). Default: HEAD of the source checkout, resolved to a commit at spawn time.",
     }),
   ),
+  worktreePath: Type.Optional(
+    Type.String({
+      description: "Explicit path for the worktree directory (requires worktree: true).",
+    }),
+  ),
   worktreeSpace: Type.Optional(
     Type.Boolean({
       description:
@@ -287,7 +294,7 @@ interface AgentDefaults {
   disableModelInvocation?: boolean;
 }
 
-type AgentSource = "package" | "global" | "project";
+type AgentSource = "package" | "global" | "project" | "extra";
 
 interface AgentDefinition extends AgentDefaults {
   name: string;
@@ -441,9 +448,15 @@ function parseAgentDefinition(content: string, fallbackName: string): AgentDefin
 
 function discoverAgentDefinitions(): ListedAgentDefinition[] {
   const agents = new Map<string, ListedAgentDefinition>();
+  const extraDirs = (process.env.PI_SUBAGENT_AGENT_DIRS ?? "")
+    .split(":")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
   const dirs: Array<{ path: string; source: AgentSource }> = [
     { path: join(getAgentConfigDir(), "agents"), source: "global" },
     { path: join(process.cwd(), ".pi", "agents"), source: "project" },
+    ...extraDirs.map((dir) => ({ path: dir, source: "extra" as const })),
   ];
 
   for (const { path: dir, source } of dirs) {
@@ -750,6 +763,7 @@ interface SubagentRuntime {
   selectedSlotId?: string;
   /** Panels supplied by other extensions through `PANEL_EVENT`, by source. */
   panels?: Map<string, PanelData>;
+  sessionSocket?: SessionSocketServer;
 }
 
 function createSubagentRuntime(): SubagentRuntime {
@@ -1632,19 +1646,23 @@ function validateWorktreeParams(params: {
   worktree?: boolean;
   worktreeBranch?: string;
   worktreeBase?: string;
+  worktreePath?: string;
   worktreeSpace?: boolean;
   handoff?: string;
   fork?: boolean;
 }): string | undefined {
-  if (params.worktree !== true && (params.worktreeBranch != null || params.worktreeBase != null)) {
-    return "worktreeBranch and worktreeBase require worktree: true.";
+  if (
+    params.worktree !== true &&
+    (params.worktreeBranch != null || params.worktreeBase != null || params.worktreePath != null)
+  ) {
+    return "worktreeBranch, worktreeBase and worktreePath require worktree: true.";
   }
   if (params.worktreeSpace === true && params.worktree !== true) return "worktreeSpace requires worktree: true.";
   if (params.worktreeSpace === true && params.handoff != null)
     return "handoff is only available from a subagent that runs in a worktree space, and it cannot be combined with worktreeSpace (the new agent uses your own worktree space).";
   if (params.worktreeSpace === true && params.fork === true)
     return "worktreeSpace cannot be combined with fork: true (a worktree-space agent starts a fresh session).";
-  if (params.handoff != null && (params.worktree != null || params.worktreeBranch != null || params.worktreeBase != null))
+  if (params.handoff != null && (params.worktree != null || params.worktreeBranch != null || params.worktreeBase != null || params.worktreePath != null))
     return "handoff cannot be combined with worktree options: the new agent uses your own worktree.";
   return undefined;
 }
@@ -2186,6 +2204,8 @@ function subagentEnv(options: {
   return {
     PI_SUBAGENT_NAME: options.name,
     PI_SUBAGENT_ID: options.id,
+    ...(process.env.PI_SUBAGENT_SOCKET ? { PI_SUBAGENT_SOCKET: process.env.PI_SUBAGENT_SOCKET } : {}),
+    ...(process.env.PI_SUBAGENT_SOCKET_TOKEN ? { PI_SUBAGENT_SOCKET_TOKEN: process.env.PI_SUBAGENT_SOCKET_TOKEN } : {}),
     ...(options.worktreeSpace ? { PI_SUBAGENT_WORKTREE_SPACE: "1" } : {}),
     ...(options.spawning ? { PI_SUBAGENT_SPAWNING: "1", PI_SUBAGENT_SPAWNING_DEPTH: String(options.spawning.depth) } : {}),
     ...(options.agent ? { PI_SUBAGENT_AGENT: options.agent } : {}),
@@ -2661,6 +2681,7 @@ async function planSpawnWorktree(
       name: params.name,
       branch: params.worktreeBranch,
       base: params.worktreeBase,
+      path: (params as any).worktreePath,
       config: loadWorktreeConfig(),
     });
   } catch (error) {
@@ -2855,6 +2876,16 @@ function startSupervision(running: RunningSubagent, pi: ExtensionAPI): void {
   const watcherAbort = new AbortController();
   running.abortController = watcherAbort;
 
+  // Lifecycle event: started
+  pi.events?.emit("subagents:started", {
+    id: running.id,
+    name: running.name,
+    agent: running.agent,
+    slot: running.slot ? { id: running.slot.id, name: running.slot.name, chain: [...running.slot.chain] } : undefined,
+    worktree: running.worktree ? { branch: running.worktree.branch, path: running.worktree.path, repo: running.worktree.repo } : undefined,
+    startTime: running.startTime,
+  });
+
   // Start widget refresh and status supervision when the first agent launches
   startWidgetRefresh();
   startStatusRefresh(pi);
@@ -2862,6 +2893,18 @@ function startSupervision(running: RunningSubagent, pi: ExtensionAPI): void {
   // Fire-and-forget: start watching in background
   watchSubagent(running, watcherAbort.signal)
     .then(async (result) => {
+      pi.events?.emit("subagents:ended", {
+        id: running.id,
+        name: running.name,
+        agent: running.agent,
+        slot: running.slot ? { id: running.slot.id, name: running.slot.name, chain: [...running.slot.chain] } : undefined,
+        exitCode: result.exitCode,
+        elapsed: result.elapsed,
+        sessionFile: result.sessionFile,
+        worktree: running.worktree ? { branch: running.worktree.branch, path: running.worktree.path, repo: running.worktree.repo } : undefined,
+        summary: result.summary,
+        errorMessage: result.errorMessage,
+      });
       if (!shouldDeliverSubagentCompletion(running)) {
         running.lifecycle = markDelivery(running.lifecycle, "suppressed");
         runningSubagents.delete(running.id);
@@ -2931,6 +2974,16 @@ function startSupervision(running: RunningSubagent, pi: ExtensionAPI): void {
       );
     })
     .catch((err) => {
+      pi.events?.emit("subagents:ended", {
+        id: running.id,
+        name: running.name,
+        agent: running.agent,
+        slot: running.slot ? { id: running.slot.id, name: running.slot.name, chain: [...running.slot.chain] } : undefined,
+        exitCode: 1,
+        elapsed: Math.floor((Date.now() - running.startTime) / 1000),
+        worktree: running.worktree ? { branch: running.worktree.branch, path: running.worktree.path, repo: running.worktree.repo } : undefined,
+        error: err?.message ?? String(err),
+      });
       if (running.column) setTimeout(() => rebalanceColumn(running.column!.rootId), 300);
       if (!shouldDeliverSubagentCompletion(running)) {
         running.lifecycle = markDelivery(running.lifecycle, "suppressed");
@@ -2961,6 +3014,86 @@ function startSupervision(running: RunningSubagent, pi: ExtensionAPI): void {
 
 export default function subagentsExtension(pi: ExtensionAPI) {
   runtime.pi = pi;
+
+  // Session socket for scripts and CLI
+  if (!runtime.sessionSocket) {
+    void startSessionSocket({
+      async spawn(callerId, params) {
+        if (callerId) {
+          const parent = runningSubagents.get(callerId);
+          if (!parent) throw new Error(`caller subagent "${callerId}" not found`);
+          const mode = (params.handoff as SpawnMode) ?? "delegate";
+          const result = await launchRequested(parent, { mode, spawn: params });
+          if (mode === "replace") {
+            parent.replacedBy = String(params.name ?? "successor");
+          }
+          return result;
+        }
+        let worktreePlan: WorktreePlan | undefined;
+        if (params.worktree === true) {
+          const planned = await planSpawnWorktree(
+            params as any,
+            runtime.latestCtx ?? ({ cwd: process.cwd(), hasUI: false } as any),
+          );
+          if ("error" in planned) throw new Error(planned.error);
+          worktreePlan = planned.plan;
+        }
+        const launchOpts: LaunchOptions = {
+          ...(worktreePlan ? { worktreePlan, ...(params.worktreeSpace === true ? { worktreeSpace: true } : {}) } : {}),
+          ...(params.spawning === true ? { spawning: { depth: (params.spawningDepth as number) ?? DEFAULT_SPAWNING_DEPTH } } : {}),
+        };
+        const running = await launchSubagent(
+          params as any,
+          (runtime.latestCtx ?? { cwd: process.cwd(), hasUI: false }) as any,
+          "low",
+          launchOpts,
+        );
+        startSupervision(running, pi);
+        return {
+          id: running.id,
+          name: running.name,
+          surface: running.surface,
+          worktree: running.worktree,
+          sessionFile: running.sessionFile,
+        };
+      },
+      async list() {
+        return Array.from(runningSubagents.values()).map((a) => ({
+          id: a.id,
+          name: a.name,
+          agent: a.agent,
+          surface: a.surface,
+          slot: a.slot,
+          worktree: a.worktree,
+          sessionFile: a.sessionFile,
+          startTime: a.startTime,
+          lifecycle: a.lifecycle,
+          status: a.lifecycle?.turn?.kind ?? a.statusState?.activityLabel ?? "running",
+        }));
+      },
+      async send(id, prompt, options) {
+        const agent = runningSubagents.get(id) ?? Array.from(runningSubagents.values()).find((a) => a.name === id);
+        if (!agent) throw new Error(`subagent "${id}" not found`);
+        if (!agent.handle) throw new Error(`subagent "${id}" has no active handle`);
+        const taskId = options?.taskId ?? `send-${randomBytes(4).toString("hex")}`;
+        await subagentRuntime().dispatch(agent.handle, { taskId, prompt });
+        return { ok: true, taskId };
+      },
+      async interrupt(target) {
+        const resolved = resolveInterruptTarget(target);
+        if ("error" in resolved) throw new Error(resolved.error);
+        if (resolved.running.handle) {
+          await subagentRuntime().interrupt(resolved.running.handle);
+        }
+        handleSubagentInterrupt(target);
+        return { ok: true, id: resolved.running.id };
+      },
+    }).then((server) => {
+      runtime.sessionSocket = server;
+      process.env.PI_SUBAGENT_SOCKET = server.socketPath;
+      process.env.PI_SUBAGENT_SOCKET_TOKEN = server.token;
+    }).catch(() => {});
+  }
 
   // Panels supplied by other extensions (one subscription across /reload).
   (globalThis as any)[PANEL_EVENT_KEY]?.();
@@ -3011,6 +3144,12 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     (globalThis as any)[PANEL_EVENT_KEY]?.();
     (globalThis as any)[PANEL_EVENT_KEY] = null;
     runtime.panels?.clear();
+    if (runtime.sessionSocket) {
+      void runtime.sessionSocket.close().catch(() => {});
+      delete runtime.sessionSocket;
+      delete process.env.PI_SUBAGENT_SOCKET;
+      delete process.env.PI_SUBAGENT_SOCKET_TOKEN;
+    }
     if (widgetInterval) {
       clearInterval(widgetInterval);
       widgetInterval = null;

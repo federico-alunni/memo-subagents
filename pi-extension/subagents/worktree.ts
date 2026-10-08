@@ -30,6 +30,10 @@ export interface WorktreeConfig {
   root?: string;
   /** Prefix for generated branch names. Default `memo/`. */
   branchPrefix: string;
+  /** Template for generated branch names, e.g. `convoy/{name}`. Overrides branchPrefix. */
+  branchTemplate?: string;
+  /** Template for worktree directory paths, e.g. `{dir}/{repoName}-worktrees/{name}`. Overrides root. */
+  pathTemplate?: string;
 }
 
 export const DEFAULT_BRANCH_PREFIX = "memo/";
@@ -46,7 +50,9 @@ export function parseWorktreeConfig(rawConfig: unknown, source = "config.json"):
   if (value == null) return { branchPrefix: DEFAULT_BRANCH_PREFIX };
   if (typeof value !== "object" || Array.isArray(value)) invalidConfig(source, "worktrees must be an object");
   const section = value as Record<string, unknown>;
-  const unsupported = Object.keys(section).filter((key) => key !== "root" && key !== "branchPrefix");
+  const unsupported = Object.keys(section).filter(
+    (key) => key !== "root" && key !== "branchPrefix" && key !== "branchTemplate" && key !== "pathTemplate",
+  );
   if (unsupported.length > 0) {
     invalidConfig(source, `worktrees has unsupported key(s): ${unsupported.join(", ")}`);
   }
@@ -67,6 +73,12 @@ export function parseWorktreeConfig(rawConfig: unknown, source = "config.json"):
       invalidConfig(source, "worktrees.branchPrefix must be a simple ref prefix such as \"memo/\"");
     }
     config.branchPrefix = section.branchPrefix;
+  }
+  if (section.branchTemplate != null && typeof section.branchTemplate === "string") {
+    config.branchTemplate = section.branchTemplate;
+  }
+  if (section.pathTemplate != null && typeof section.pathTemplate === "string") {
+    config.pathTemplate = section.pathTemplate;
   }
   return config;
 }
@@ -284,6 +296,7 @@ export async function planWorktree(options: {
   name: string;
   branch?: string;
   base?: string;
+  path?: string;
   config?: WorktreeConfig;
 }): Promise<WorktreePlan> {
   const config = options.config ?? { branchPrefix: DEFAULT_BRANCH_PREFIX };
@@ -305,8 +318,32 @@ export async function planWorktree(options: {
   }
 
   const id8 = options.id.slice(0, 8);
-  const slugId = `${slugifyName(options.name)}-${id8}`;
-  const branch = options.branch?.trim() || `${config.branchPrefix}${slugId}`;
+  const slugName = slugifyName(options.name);
+  const slugId = `${slugName}-${id8}`;
+  const vars: Record<string, string> = {
+    name: slugName,
+    rawName: options.name,
+    id: options.id,
+    id8,
+    slugId,
+    repo,
+    repoName: basename(repo),
+    dir: dirname(repo),
+  };
+  const renderTpl = (tpl: string) => tpl.replace(/\{([a-zA-Z0-9_]+)\}/g, (_, k) => vars[k] ?? "");
+
+  let branch: string;
+  if (options.branch?.trim()) {
+    branch = options.branch.trim();
+  } else if (process.env.PI_SUBAGENT_WORKTREE_BRANCH?.trim()) {
+    const envBranch = process.env.PI_SUBAGENT_WORKTREE_BRANCH.trim();
+    branch = envBranch.includes("{") ? renderTpl(envBranch) : `${envBranch}${slugId}`;
+  } else if (config.branchTemplate) {
+    branch = renderTpl(config.branchTemplate);
+  } else {
+    branch = `${config.branchPrefix}${slugId}`;
+  }
+
   if (branch.startsWith("-") || !(await gitOk(repo, ["check-ref-format", `refs/heads/${branch}`]))) {
     throw new Error(`worktree: invalid branch name "${branch}"`);
   }
@@ -330,7 +367,20 @@ export async function planWorktree(options: {
     );
   }
 
-  const path = realish(defaultWorktreePath(repo, slugId, config));
+  let resolvedPath: string;
+  if (options.path?.trim()) {
+    resolvedPath = realish(resolve(options.path.trim()));
+  } else if (process.env.PI_SUBAGENT_WORKTREE_PATH?.trim()) {
+    const envPath = process.env.PI_SUBAGENT_WORKTREE_PATH.trim();
+    resolvedPath = envPath.includes("{")
+      ? realish(resolve(renderTpl(envPath)))
+      : realish(join(resolve(envPath), basename(repo), slugId));
+  } else if (config.pathTemplate) {
+    resolvedPath = realish(resolve(renderTpl(config.pathTemplate)));
+  } else {
+    resolvedPath = realish(defaultWorktreePath(repo, slugId, config));
+  }
+  const path = resolvedPath;
   if (existsSync(path)) throw new Error(`worktree: path already exists: ${path}`);
   const listed = await listWorktrees(repo);
   if (findListed(listed, path)) throw new Error(`worktree: path is already registered with git: ${path}`);

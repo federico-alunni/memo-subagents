@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.4.0-beta.3 — 2026-10-09
+
+### Added
+
+- **Session socket & script access**: private Unix domain socket server (`PI_SUBAGENT_SOCKET`, `PI_SUBAGENT_SOCKET_TOKEN`) enabling scripts, background tools, and CLI commands to interact with the subagent runtime.
+  - Supports `spawn`, `list`, `send`, `interrupt` over line-delimited JSON.
+  - TypeScript client `SubagentClient` in `pi-memo-subagents/client` and executable binary `pi-subagent`.
+  - Child processes inherit socket credentials: a worker tool can initiate a `replace` handoff directly.
+- **Configurable worktree naming**: `branchTemplate` and `pathTemplate` in config, with environment overrides (`PI_SUBAGENT_WORKTREE_BRANCH`, `PI_SUBAGENT_WORKTREE_PATH`), supporting `{name}`, `{repoName}`, `{id8}`, etc., falling back seamlessly to default `memo/<name>-<id8>`.
+- **Explicit worktree path**: optional `worktreePath` parameter to place a worktree at a specific directory.
+- **Extra agent definitions**: `PI_SUBAGENT_AGENT_DIRS` (`:`-separated paths) loads extra agent definitions alongside global and project agents.
+- **Lifecycle events on pi.events**: `subagents:started` and `subagents:ended` allow other extensions to react to subagent lifecycle deterministically.
+
 ## 0.4.0-beta.2 — 2026-10-09
 
 ### Changed

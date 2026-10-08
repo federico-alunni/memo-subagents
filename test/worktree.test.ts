@@ -253,6 +253,57 @@ describe("worktree state and removal", () => {
     writeFileSync(join(gitDir, "MERGE_HEAD"), `${info.base}\n`);
     assert.match((await removeWorktree(info)).messages[0], /merge is in progress/);
   });
+
+  it("supports branch and path templates from config and environment", async () => {
+    const repo = makeRepo();
+    const customDir = join(root, "custom-locations");
+    mkdirSync(customDir, { recursive: true });
+
+    // 1. Config templates
+    const planConfig = await planWorktree({
+      sourceCwd: repo,
+      id: "11223344",
+      name: "task-1",
+      config: {
+        branchPrefix: "memo/",
+        branchTemplate: "feature/{name}-{id8}",
+        pathTemplate: `${customDir}/{repoName}-{name}`,
+      },
+    });
+    assert.equal(planConfig.branch, "feature/task-1-11223344");
+    assert.equal(planConfig.path, join(customDir, `${basename(repo)}-task-1`));
+
+    // 2. Environment variables override config
+    const prevBranch = process.env.PI_SUBAGENT_WORKTREE_BRANCH;
+    const prevPath = process.env.PI_SUBAGENT_WORKTREE_PATH;
+    try {
+      process.env.PI_SUBAGENT_WORKTREE_BRANCH = "convoy/run-42/{name}";
+      process.env.PI_SUBAGENT_WORKTREE_PATH = `${customDir}/direct-{id8}`;
+      const planEnv = await planWorktree({
+        sourceCwd: repo,
+        id: "55667788",
+        name: "builder",
+      });
+      assert.equal(planEnv.branch, "convoy/run-42/builder");
+      assert.equal(planEnv.path, join(customDir, "direct-55667788"));
+
+      // 3. Explicit options.path and options.branch take highest precedence
+      const planExplicit = await planWorktree({
+        sourceCwd: repo,
+        id: "99001122",
+        name: "reviewer",
+        branch: "explicit-branch",
+        path: join(customDir, "explicit-path"),
+      });
+      assert.equal(planExplicit.branch, "explicit-branch");
+      assert.equal(planExplicit.path, join(customDir, "explicit-path"));
+    } finally {
+      if (prevBranch !== undefined) process.env.PI_SUBAGENT_WORKTREE_BRANCH = prevBranch;
+      else delete process.env.PI_SUBAGENT_WORKTREE_BRANCH;
+      if (prevPath !== undefined) process.env.PI_SUBAGENT_WORKTREE_PATH = prevPath;
+      else delete process.env.PI_SUBAGENT_WORKTREE_PATH;
+    }
+  });
 });
 
 describe("worktree registry", () => {
