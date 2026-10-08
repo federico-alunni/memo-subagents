@@ -2194,6 +2194,28 @@ test("auto placement: the first agent beside the caller, the next ones in tabs; 
   assert.deepEqual([...selector.owned.keys()], ["pane-a", "pane-b"]);
 });
 
+test("auto placement takes the free split even with our agents open in background tabs", async (t) => {
+  const { selector, a, b, ra, rb } = await twoClients(t);
+  await ra.launch({ ...a.input, ...SCOUT, placement: "tab" });
+  assert.equal(selector.owned.size, 1);
+  const hb = await rb.launch({ ...b.input, ...PLANNER, placement: "auto" });
+  assert.ok(b.fake.calls.some((c) => c.argv[1] === "split"));
+  assert.equal(hb.placement, "split-right");
+  assert.equal(selector.selected, "pane-b");
+});
+
+test("auto placement on a layout read before the selector moved a pane into the split: a tab", async (t) => {
+  const { selector, b, rb } = await twoClients(t);
+  b.fake.onCall = (call) => {
+    // A promotion takes the split while this launch reads the layout.
+    if (call.argv[1] === "layout") selector.layoutEpoch = (selector.layoutEpoch ?? 0) + 1;
+  };
+  const hb = await rb.launch({ ...b.input, ...PLANNER, placement: "auto" });
+  assert.equal(hb.placement, undefined);
+  assert.ok(!b.fake.calls.some((c) => c.argv[1] === "split"));
+  assert.equal(selector.reservedSplit, undefined);
+});
+
 test("visible placement parks our agent shown beside the caller through its own runtime", async (t) => {
   const { selector, a, b, ra, rb, movesA } = await twoClients(t);
   const ha = await ra.launch({ ...a.input, ...SCOUT, placement: "auto" });

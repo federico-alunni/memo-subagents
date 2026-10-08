@@ -1135,6 +1135,26 @@ function selectorChoices(): SelectorChoice[] {
 }
 
 /**
+ * Menu order of `selectorChoices` without reading Herdr (no workspace filter): this session's subagents,
+ * then the other runtime agents. The selector records it when the visible agent finishes and promotes the
+ * one that followed it (filtered by workspace then).
+ */
+function selectorOrder(): string[] {
+  const own = Array.from(runningSubagents.values()).map((agent) => agent.surface);
+  const others = presence()
+    .list()
+    .map((entry) => entry.paneId)
+    .filter((paneId): paneId is string => !!paneId && !own.includes(paneId));
+  return [...own, ...others];
+}
+
+/** After an automatic promotion: the moved agent's handle and the widget ▶ marker follow it. */
+function onSelectorPromoted(): void {
+  syncSelectorHandles();
+  updateWidget();
+}
+
+/**
  * Pane selector moves go through the runtime that owns each pane (also another client's, e.g. Issue
  * Round): the observed new tab is kept in the selector's control. Take it over here too.
  */
@@ -2055,6 +2075,9 @@ async function watchSubagent(
 
 export default function subagentsExtension(pi: ExtensionAPI) {
   runtime.pi = pi;
+  // Automatic promotion when the visible agent finishes: menu order and refresh of this instance.
+  paneSelector.state.menuOrder = selectorOrder;
+  paneSelector.state.onPromoted = onSelectorPromoted;
 
   // Unified widget: agents launched by any AgentRuntime client in this process (e.g. issue-round)
   // are shown next to the generic subagents. Display only.

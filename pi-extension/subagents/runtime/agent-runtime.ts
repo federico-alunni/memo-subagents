@@ -421,14 +421,16 @@ export class AgentRuntime {
     mode: PlacementMode,
     cwd: string,
   ): Promise<PlacementReservation> {
+    const state = this.selector;
+    // A pane the selector moves into the split while the layout is read makes the layout stale.
+    const epoch = state.layoutEpoch ?? 0;
     let layout: PaneLayout | undefined;
     try {
       layout = (await this.herdr(["pane", "layout", "--pane", parent.pane_id], cwd)).layout;
     } catch {
       layout = undefined;
     }
-    const state = this.selector;
-    const reservation = reservePlacement(state, parent, layout, mode);
+    const reservation = reservePlacement(state, parent, layout, mode, epoch);
     if (!reservation.park) return reservation;
     // "visible": park our agent currently beside the caller, through the runtime that owns it.
     const control = state.controls?.get(reservation.park);
@@ -1481,8 +1483,9 @@ export class AgentRuntime {
   }
   /** Display only: retire the agent row before close. */
   forget(h: AgentHandle): void {
-    presence().remove(h.protocolDir);
+    // Selector first: the menu order it records for a promotion still lists this agent.
     this.forgetPane(h);
+    presence().remove(h.protocolDir);
   }
   private forgetPane(h: AgentHandle): void {
     if (this.selector.controls?.get(h.paneId)?.handle.protocolDir === h.protocolDir)
@@ -1827,8 +1830,8 @@ export class AgentRuntime {
         await this.pane(h);
       } catch (error) {
         if (["pane_not_found", "not_found"].includes((error as any).herdrCode)) {
-          presence().remove(h.protocolDir);
           this.forgetPane(h);
+          presence().remove(h.protocolDir);
           return;
         }
         throw new RuntimeError("cleanup_blocked", String(error));
@@ -1848,8 +1851,8 @@ export class AgentRuntime {
           ["pane_not_found", "not_found"].includes((error as any).herdrCode)
         ) {
           observers.get(h.protocolDir)?.();
-          presence().remove(h.protocolDir);
           this.forgetPane(h);
+          presence().remove(h.protocolDir);
           return;
         }
         throw new RuntimeError("cleanup_uncertain", String(error));

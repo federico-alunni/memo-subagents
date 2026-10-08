@@ -33,13 +33,33 @@ export interface SelectorState {
   /** Runtime agents' panes: moved through their runtime (absent: moved directly with Herdr). */
   controls?: Map<string, PaneControl>;
   selected?: string;
-  /** Token of a launch that reserved the visible split and has not reported its pane yet. */
+  /**
+   * Token of a launch (or promotion) that reserved the visible split and has not finished with it yet.
+   * Launches and promotions take it with the same synchronous check-and-set.
+   */
   reservedSplit?: string;
+  /** Bumped whenever the selector moves a pane into the split: layouts read before it are stale. */
+  layoutEpoch?: number;
+  /** The agent shown in the split was forgotten (finished): promote another one once its pane closed. */
+  vacated?: VacatedSplit;
+  /** Menu order of the selectable panes (Ctrl+Alt+X / `/subagent`), registered by the extension. */
+  menuOrder?: () => string[];
+  /** Called (by `forgetPane`) when the visible agent was forgotten; set by the selector doing promotions. */
+  onVacated?: () => void;
+  /** Called after a promotion moved `paneId` into the split (widget refresh, handle sync). */
+  onPromoted?: (paneId: string) => void;
+}
+
+export interface VacatedSplit {
+  paneId: string;
+  /** Menu order when the agent was forgotten (it included the finished agent, if still listed). */
+  order: string[];
 }
 type Run = (args: string[]) => any;
 
 /**
- * - `auto`: the first agent of a single-pane, unzoomed main tab gets the visible split, every other a tab.
+ * - `auto`: the visible split when the main tab holds only the main pane, is not zoomed and no other
+ *   launch or promotion reserved it (agents open in background tabs do not matter), else a tab.
  * - `visible`: the visible split, parking our agent shown there; a tab when the main tab has other splits,
  *   is zoomed or another launch already reserved the split.
  */
@@ -78,14 +98,17 @@ export function reservePlacement(
   parent: PaneRecord,
   layout: PaneLayout | undefined,
   mode: PlacementMode,
+  /** `layoutEpoch` when `layout` was read (asynchronously): a pane moved into the split since makes it stale. */
+  seenEpoch?: number,
 ): PlacementReservation {
   const token = randomUUID();
   const tab: PlacementReservation = { token, placement: "tab" };
   if (!layout || layout.zoomed || state.reservedSplit) return tab;
+  if (seenEpoch !== undefined && (state.layoutEpoch ?? 0) !== seenEpoch) return tab;
   const siblings = layout.panes.filter((pane) => pane.pane_id !== parent.pane_id);
   let park: string | undefined;
   if (mode === "auto") {
-    if (siblings.length > 0 || ownedIn(state, parent.workspace_id).length > 0) return tab;
+    if (siblings.length > 0) return tab;
   } else if (siblings.length === 1 && state.owned.has(siblings[0].pane_id)) {
     park = siblings[0].pane_id;
   } else if (siblings.length > 0) return tab;
@@ -114,10 +137,37 @@ export function releasePlacement(state: SelectorState, reservation: PlacementRes
   if (reservation && state.reservedSplit === reservation.token) state.reservedSplit = undefined;
 }
 
+/**
+ * The agent finished (or is no longer ours). When it was the one shown in the split, remember its menu
+ * position: the selector promotes the next open agent once the pane has actually closed.
+ */
 export function forgetPane(state: SelectorState, paneId: string): void {
+  const wasSelected = state.selected === paneId;
+  let order: string[] = [];
+  if (wasSelected) {
+    try {
+      order = state.menuOrder?.() ?? [...state.owned.keys()];
+    } catch {
+      order = [...state.owned.keys()];
+    }
+  }
   state.owned.delete(paneId);
   state.controls?.delete(paneId);
-  if (state.selected === paneId) state.selected = undefined;
+  if (!wasSelected) return;
+  state.selected = undefined;
+  state.vacated = { paneId, order };
+  try {
+    state.onVacated?.();
+  } catch { /* Promotion is best effort; forgetting never fails. */ }
+}
+
+/** Candidates after `vacated` in its menu order (wrapping around); the menu order itself when unknown. */
+export function promotionOrder(vacated: VacatedSplit): string[] {
+  const index = vacated.order.indexOf(vacated.paneId);
+  const rotated = index === -1
+    ? vacated.order
+    : [...vacated.order.slice(index + 1), ...vacated.order.slice(0, index)];
+  return rotated.filter((id) => id !== vacated.paneId);
 }
 
 /** Moves a pane through its runtime control (which keeps the observed handle), else with `fallback`. */
@@ -137,16 +187,28 @@ export async function movePane(
  * moved by the agent runtime; this class reads the layout, reserves the visible split and moves owned
  * panes within the caller's workspace (pane IDs stay stable), each through the runtime that owns it.
  */
+export interface PromotionOptions {
+  /** Interval between checks that the finished agent's pane has closed. */
+  pollMs?: number;
+  /** Give up waiting for the pane to close after this long (the split stays as it is). */
+  timeoutMs?: number;
+}
+
 export class PaneSelector {
   readonly state: SelectorState;
   private readonly run: Run;
   private readonly parentId: () => string;
+  private readonly promotionOptions: Required<PromotionOptions>;
+  private promoting?: Promise<void>;
 
-  constructor(state: SelectorState, run: Run, parentId: () => string) {
+  constructor(state: SelectorState, run: Run, parentId: () => string, options: PromotionOptions = {}) {
     this.state = state;
     this.state.controls ??= new Map();
     this.run = run;
     this.parentId = parentId;
+    this.promotionOptions = { pollMs: options.pollMs ?? 250, timeoutMs: options.timeoutMs ?? 120_000 };
+    // The latest selector of the state (e.g. after /reload) promotes when the visible agent finishes.
+    this.state.onVacated = () => { void this.promoteVacated(); };
   }
 
   parent(): PaneRecord {
@@ -201,9 +263,8 @@ export class PaneSelector {
     }
     const previous = siblings[0]?.pane_id;
     if (previous === paneId) { this.state.selected = paneId; return; }
-    const beside: PaneMoveTarget = {
-      split: { targetPane: parent.pane_id, tab: parent.tab_id, direction: "right", ratio: 0.5 },
-    };
+    const beside = besideTarget(parent);
+    this.state.layoutEpoch = (this.state.layoutEpoch ?? 0) + 1;
     let parked = false;
     if (previous) {
       await mover(previous, { newTab: { label: this.state.owned.get(previous)! } });
@@ -244,6 +305,95 @@ export class PaneSelector {
   forget(paneId: string): void {
     forgetPane(this.state, paneId);
   }
+
+  /**
+   * Promotion of the next open agent after the visible one finished (`state.vacated`). Resolves when no
+   * promotion is pending; never rejects (a failed promotion leaves every terminal where it is).
+   */
+  promoteVacated(): Promise<void> {
+    this.promoting ??= this.runPromotions().finally(() => { this.promoting = undefined; });
+    return this.promoting;
+  }
+
+  private async runPromotions(): Promise<void> {
+    // Never inside the caller's forget: it may be about to close the pane.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    while (this.state.vacated) {
+      const vacated = this.state.vacated;
+      const closed = await this.closed(vacated.paneId);
+      if (this.state.vacated !== vacated) continue; // A newer visible agent finished meanwhile.
+      this.state.vacated = undefined;
+      if (!closed) return;
+      try {
+        await this.promote(vacated);
+      } catch { /* Best effort: the selector stays usable. */ }
+    }
+  }
+
+  /** Waits until the pane is gone (bounded); false when it stays open. */
+  private async closed(paneId: string): Promise<boolean> {
+    const deadline = Date.now() + this.promotionOptions.timeoutMs;
+    for (;;) {
+      if (this.state.owned.has(paneId)) return false; // Ours again: not finished.
+      try {
+        this.run(["pane", "get", paneId]);
+      } catch {
+        return true;
+      }
+      if (Date.now() >= deadline) return false;
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, this.promotionOptions.pollMs);
+        (timer as any).unref?.();
+      });
+    }
+  }
+
+  /**
+   * Moves the next open agent in menu order into the free split, with the refusals of `select` and the
+   * launches' split reservation. Returns the promoted pane, if any.
+   */
+  async promote(vacated: VacatedSplit, move?: PaneMover): Promise<string | undefined> {
+    const mover: PaneMover = move ?? ((id, to) => movePane(this.state, id, to, this.herdrMover()));
+    const parent = this.parent();
+    const layout = this.layout(parent);
+    if (layout.zoomed || this.state.reservedSplit) return undefined;
+    if (layout.panes.some((pane: PaneRecord) => pane.pane_id !== parent.pane_id)) return undefined;
+    const candidate = promotionOrder(vacated).find((id) => {
+      if (!this.state.owned.has(id) || !ownedIn(this.state, parent.workspace_id).includes(id)) return false;
+      try {
+        return this.run(["pane", "get", id]).pane.workspace_id === parent.workspace_id;
+      } catch {
+        return false;
+      }
+    });
+    if (!candidate || this.state.reservedSplit) return undefined;
+    // Same synchronous check-and-set as a launch: a launch arriving now falls back to a tab.
+    const token = randomUUID();
+    this.state.reservedSplit = token;
+    this.state.layoutEpoch = (this.state.layoutEpoch ?? 0) + 1;
+    try {
+      try {
+        await mover(candidate, besideTarget(parent));
+      } catch {
+        // Read back: a failed answer does not prove the move failed.
+        const current = this.layout(parent);
+        if (!current.panes.some((pane: PaneRecord) => pane.pane_id === candidate)) return undefined;
+      }
+      if (!this.state.owned.has(candidate)) return candidate; // Finished during the move.
+      this.state.selected = candidate;
+    } finally {
+      if (this.state.reservedSplit === token) this.state.reservedSplit = undefined;
+    }
+    try {
+      this.state.onPromoted?.(candidate);
+    } catch { /* Display only. */ }
+    return candidate;
+  }
+}
+
+/** The split shown beside the main pane (same target for selections and promotions). */
+function besideTarget(parent: PaneRecord): PaneMoveTarget {
+  return { split: { targetPane: parent.pane_id, tab: parent.tab_id, direction: "right", ratio: 0.5 } };
 }
 
 export const paneSelector = new PaneSelector(selectorState(), (args) => {

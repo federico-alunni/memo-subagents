@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+
+- Pane selector: a new `auto` launch takes the visible split whenever it is free (main tab with only the main pane, not zoomed, split not reserved), even with other agents open in background tabs. When the visible agent finishes, the next open agent in menu order (`Ctrl+Alt+X` order, wrapping around) is moved into the split once the finished pane has closed — same pane ID and terminal, through its runtime; the widget `▶` and `/subagent` menu follow it. Promotions share the launches' split reservation and the selector's refusals (unrelated splits, zoom, other workspaces).
+
 ## 0.3.0 — 2026-10-08
 
 ### Changed
