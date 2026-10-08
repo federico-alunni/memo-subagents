@@ -44,6 +44,7 @@ import type {
   DelegatedToolSpec,
 } from "../../pi-extension/subagents/runtime/protocol.ts";
 import { childToolCall } from "../../pi-extension/subagents/runtime/child/extension.ts";
+import { resolveQuestionExtension } from "../../pi-extension/subagents/runtime/question-extension.ts";
 import { PaneSelector } from "../../pi-extension/subagents/runtime/pane-selector.ts";
 import type { SelectorState } from "../../pi-extension/subagents/runtime/pane-selector.ts";
 
@@ -1442,9 +1443,10 @@ test("invalid tool policies are refused before any pane is created", async (t) =
   assert.equal(f.fake.createCount, 0);
 });
 
-const QUESTION_EXTENSION = realpathSync(
-  fileURLToPath(new URL("../../node_modules/pi-memo-question/extensions/question.ts", import.meta.url)),
-);
+// The runtime prefers a pi-installed pi-memo-question over the bundled dependency: expect what it resolves.
+const QUESTION_EXTENSION =
+  resolveQuestionExtension() ??
+  realpathSync(fileURLToPath(new URL("../../node_modules/pi-memo-question/extensions/question.ts", import.meta.url)));
 
 test("question is pi-memo-question's tool: loaded with question: true, observed for any child with a task", async (t) => {
   assert.equal(childToolCall(WORKER_POLICY, "question", {})?.block, true);

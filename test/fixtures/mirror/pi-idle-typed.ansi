@@ -1,0 +1,74 @@
+[0m[38;2;79;79;79mdemo-evidence, design-an-interface, diagnosing-bugs, document-changes, find-docs, goal, graphify, headed-browser, herdr, issue-workflow,      [0m
+[0m[38;2;79;79;79mofficecli, officecli-word, pi-subagents, plan, plannotator, ponytail, prune-branches, research, router-delivery, router-discovery,            [0m
+[0m[38;2;79;79;79mrouter-knowledge, router-orchestration, router-review, session-history, session-reader, simplify, teach, to-questionnaire, visualize,         [0m
+[0m[38;2;79;79;79mvoice-convoy, voice-convoy-setup, wizard, worktree, writing, writing-great-skills[0m                                                             
+
+[0m[38;2;255;255;255m[Prompts][0m                                                                                                                                     
+[0m[38;2;79;79;79m  /council, /gather-context-and-clarify, /parallel-cleanup, /parallel-research, /parallel-review, /review-loop[0m                                
+
+[0m[38;2;255;255;255m[Extensions][0m                                                                                                                                  
+[0m[38;2;79;79;79m  @devkade/pi-plan:src, @juanibiapina/pi-extension-settings:src, @juanibiapina/pi-powerbar:node_modules/@juanibiapina/pi-usage,               [0m
+[0m[38;2;79;79;79m@juanibiapina/pi-powerbar:src/powerbar, @juanibiapina/pi-powerbar:src/powerbar-context, @juanibiapina/pi-powerbar:src/powerbar-git,           [0m
+[0m[38;2;79;79;79m@juanibiapina/pi-powerbar:src/powerbar-model, @juanibiapina/pi-powerbar:src/powerbar-provider, @juanibiapina/pi-powerbar:src/powerbar-sub,    [0m
+[0m[38;2;79;79;79m@juanibiapina/pi-powerbar:src/powerbar-tokens, @juicesharp/rpiv-ask-user-question, @plannotator/pi-extension:, @examplenamexxx/convoy-pi:src, [0m
+[0m[38;2;79;79;79m@tmustier/pi-ralph-wiggum, @tmustier/pi-raw-paste, @tmustier/pi-usage-extension, context-usage-detail.ts,                                     [0m
+[0m[38;2;79;79;79mdavebcn87/pi-autoresearch:pi-autoresearch, federico-alunni/pi-memo-question:question.ts, herdr-agent-state.ts, herdr-ask-user-bridge.ts,      [0m
+[0m[38;2;79;79;79mpi-add-dir:pi-add-dir, pi-antigravity:src, pi-btw:btw.ts, pi-interactive-shell, pi-mcp-adapter, pi-slopchop:src, pi-web-access:dist,          [0m
+[0m[38;2;79;79;79mexamplenamexxx/pi-cpa-proxy-personal:src/entry.ts, subagents, tintinweb/pi-manage-todo-list:src, VandeeFeng/pi-memory-md[0m                      
+
+[0m[38;2;235;203;139m[Extension issues][0m                                                                                                                            
+[0m[38;2;235;203;139m  ~/.pi/agent/git/github.com/VandeeFeng/pi-memory-md/package.json[0m                                                                             
+[0m[38;2;235;203;139m    Host-provided extension packages must be declared in peerDependencies with a "*" range, not dependencies: typebox. Installed copies can   [0m
+[0m[38;2;235;203;139mbypass the extension loader and create duplicate runtime modules.[0m                                                                             
+[0m[38;2;235;203;139m  ~/.pi/agent/npm/node_modules/pi-slopchop/package.json[0m                                                                                       
+[0m[38;2;235;203;139m    Host-provided extension packages must be declared in peerDependencies with a "*" range, not dependencies: @earendil-works/pi-tui.         [0m
+[0m[38;2;235;203;139mInstalled copies can bypass the extension loader and create duplicate runtime modules.[0m                                                        
+
+
+ [0m[38;2;235;203;139mWarning: Extension package "/home/userxxxx/.pi/agent/git/github.com/VandeeFeng/pi-memory-md/package.json": Host-provided extension packages  [0m
+ [0m[38;2;235;203;139mmust be declared in peerDependencies with a "*" range, not dependencies: typebox. Installed copies can bypass the extension loader and       [0m
+ [0m[38;2;235;203;139mcreate duplicate runtime modules.[0m                                                                                                            
+
+ [0m[38;2;235;203;139mWarning: Extension package "/home/userxxxx/.pi/agent/npm/node_modules/pi-slopchop/package.json": Host-provided extension packages must be    [0m
+ [0m[38;2;235;203;139mdeclared in peerDependencies with a "*" range, not dependencies: @earendil-works/pi-tui. Installed copies can bypass the extension loader    [0m
+ [0m[38;2;235;203;139mand create duplicate runtime modules.[0m                                                                                                        
+
+[0m[38;2;235;203;139m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+ [0m[1m[38;2;235;203;139mPackage Updates Available[0m                                                                                                                    
+ [0m[38;2;79;79;79mPackage updates are available. Run [0m[38;2;235;203;139mpi update --extensions[0m                                                                                    
+ [0m[38;2;79;79;79mPackages:[0m                                                                                                                                    
+ - github.com/examplenamexxx/pi-cpa-proxy-personal                                                                                            
+[0m[38;2;235;203;139m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+
+[0m[48;2;24;24;24m                                                                                                                                              [0m
+[0m[48;2;24;24;24m Use the bash tool to run: sleep 6 && echo done. Then reply with the single word ok.                                                          [0m
+[0m[48;2;24;24;24m                                                                                                                                              [0m
+
+[0m[48;2;27;28;28m                                                                                                                                              [0m
+[0m[48;2;27;28;28m [0m[1m[38;2;255;255;255m[48;2;27;28;28m$ sleep 6 && echo done[0m[38;2;79;79;79m[48;2;27;28;28m (timeout 30s)[0m[48;2;27;28;28m                                                                                                         [0m
+[0m[48;2;27;28;28m                                                                                                                                              [0m
+[0m[48;2;27;28;28m [0m[38;2;255;255;255m[48;2;27;28;28mdone[0m[48;2;27;28;28m                                                                                                                                         [0m
+[0m[48;2;27;28;28m                                                                                                                                              [0m
+[0m[48;2;27;28;28m [0m[38;2;79;79;79m[48;2;27;28;28mTook 6.0s[0m[48;2;27;28;28m                                                                                                                                    [0m
+[0m[48;2;27;28;28m                                                                                                                                              [0m
+
+ ok                                                                                                                                           
+
+[0m[48;2;24;24;24m                                                                                                                                              [0m
+[0m[48;2;24;24;24m Call the question tool once: question 'Keep the old format?', options 'Yes (Recommended)' and 'No'. Nothing else.                            [0m
+[0m[48;2;24;24;24m                                                                                                                                              [0m
+
+ [0m[3m[38;2;79;79;79mI should use the end_question tool here, offering "Yes (Recommended)" and "No" as the options for the user to choose from.[0m                   
+
+[0m[48;2;27;28;28m                                                                                                                                              [0m
+[0m[48;2;27;28;28m [0m[1m[38;2;255;255;255m[48;2;27;28;28mquestion [0m[38;2;79;79;79m[48;2;27;28;28mKeep the old format?[0m[48;2;27;28;28m                                                                                                                [0m
+[0m[48;2;27;28;28m [0m[38;2;79;79;79m[48;2;27;28;28m  Options: 1. Yes (Recommended), 2. No, 3. Type something.[0m[48;2;27;28;28m                                                                                   [0m
+[0m[48;2;27;28;28m [0m[38;2;235;203;139m[48;2;27;28;28mCancelled[0m[48;2;27;28;28m                                                                                                                                    [0m
+[0m[48;2;27;28;28m                                                                                                                                              [0m
+
+ The user cancelled the question without choosing an option.                                                                                  
+
+[0m[38;2;185;153;89m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+draft line one, not sent[0m[7m [0m                                                                                                                     
+[0m[38;2;185;153;89m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+[0m[38;2;79;79;79m⎇[0m [0m[38;2;79;79;79mmain │ ↑10 ↓271 R87k W29k CH99.4% $0.01 │ [0m[38;2;79;79;79m[48;2;79;79;79m▂[0m [0m[48;2;79;79;79m [0m [0m[48;2;79;79;79m [0m [0m[48;2;79;79;79m [0m [0m[48;2;79;79;79m [0m [0m[48;2;79;79;79m [0m [0m[48;2;79;79;79m [0m [0m[48;2;79;79;79m [0m [0m[48;2;79;79;79m [0m [0m[48;2;79;79;79m [0m [0m[38;2;79;79;79m3%[0m                                               [0m[38;2;79;79;79mprov-01 │ profile-flash · low[0m
