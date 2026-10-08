@@ -725,6 +725,7 @@ interface SubagentRuntime {
   latestCtx?: ExtensionContext;
   modelCatalog?: string;
   agentCatalog?: string;
+  selectedSlotId?: string;
 }
 
 function createSubagentRuntime(): SubagentRuntime {
@@ -986,6 +987,7 @@ function slotRow(
   slot: AgentSlot,
   members: RunningSubagent[],
   now: number,
+  firstSlotId?: string,
 ): { left: string; right: string; count: RowCount } {
   const sorted = [...members].sort((a, b) => a.startTime - b.startTime);
   const first = sorted[0];
@@ -997,11 +999,15 @@ function slotRow(
   const branch = slot.worktree?.branch ?? first.worktree?.branch;
   const elapsed = formatElapsedMMSS(slot.startTime, activeProjection.runtimeEndedAt ?? now);
   const mirror = slotMirrorPane(slot.id);
-  const selected =
-    paneSelector.state.selected !== undefined &&
-    (paneSelector.state.selected === mirror || sorted.some((member) => member.surface === paneSelector.state.selected))
-      ? "▶"
-      : " ";
+  const selectedPane = paneSelector.state.selected;
+  const isSelected =
+    runtime.selectedSlotId !== undefined
+      ? runtime.selectedSlotId === slot.id
+      : selectedPane !== undefined &&
+        (selectedPane === mirror
+          ? slot.id === firstSlotId
+          : sorted.some((member) => member.surface === selectedPane));
+  const selected = isSelected ? "▶" : " ";
   const left = ` ${selected} ${elapsed}  ⧉ ${prefix}${agentTag}${chain}${branch ? ` ⎇ ${branch}` : ""} `;
   const runtimeTag = active.runtimePlan ? `${active.runtimePlan.modelId}|${active.runtimePlan.thinking} · ` : "";
   // A waiting parent shows who it waits for; a child that waits for the user keeps its own attention label.
@@ -1057,9 +1063,10 @@ function renderSubagentWidgetLines(
       count: lifecycleRowCount(projection),
     });
   }
+  const firstSlotId = slotAt.keys().next().value;
   for (const [slotId, index] of slotAt) {
     const members = slotMembers.get(slotId)!;
-    rows[index] = slotRow(members[0].slot!, members, now);
+    rows[index] = slotRow(members[0].slot!, members, now, firstSlotId);
   }
   const { info, accent } = widgetHeader([...rows.map((row) => row.count), ...runtimeRows.map(presenceRowCount)]);
 
@@ -2347,6 +2354,7 @@ function mirrorSlots(): MirrorSlot[] {
       slotId: agent.slot.id,
       view: {
         version: 1,
+        slotId: agent.slot.id,
         paneId: active.surface,
         name: agent.slot.name,
         ...(active.agent ? { agent: active.agent } : {}),
@@ -2396,7 +2404,7 @@ async function syncMirrors(): Promise<void> {
   if (!manager || syncing) return;
   syncing = true;
   try {
-    await manager.sync(mirrorSlots());
+    await manager.sync(mirrorSlots(), { selectedSlotId: runtime.selectedSlotId });
   } catch {
     // A mirror is a convenience: the agents and their results never depend on it.
   } finally {
@@ -3458,14 +3466,21 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         }
         chosen = matches[0];
       } else if (cycle) {
-        const current = choices.findIndex((choice) => choice.paneId === visible);
+        const current = choices.findIndex((choice) =>
+          choice.slot ? choice.slot.id === runtime.selectedSlotId : choice.paneId === visible
+        );
         if (current !== -1 && choices.length === 1) {
           ctx.ui.notify(`${choices[0].label} is the only open agent`, "info");
           return;
         }
         chosen = choices[(current + 1) % choices.length];
       } else {
-        const labels = choices.map((choice) => `${choice.paneId === visible ? "▶ " : "  "}${choice.label}`);
+        const labels = choices.map((choice) => {
+          const isCurrent = choice.slot
+            ? (runtime.selectedSlotId ? choice.slot.id === runtime.selectedSlotId : choice.paneId === visible)
+            : choice.paneId === visible;
+          return `${isCurrent ? "▶ " : "  "}${choice.label}`;
+        });
         const selected = await ctx.ui.select("Subagents — choose the terminal shown on the right", labels);
         if (!selected) return;
         chosen = choices[labels.indexOf(selected)];
@@ -3479,11 +3494,18 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         ctx.ui.notify("This agent has already finished", "info");
         return;
       }
-      if (chosen.slot && chosen.paneId === visible && !cycle) {
-        // The slot's mirror is already beside the main pane: choosing it again promotes the agent itself.
-        const focused = promoteSlot(slotMembers(chosen.slot.id), chosen.slot.id, (args) => herdrCli(args));
-        ctx.ui.notify(focused ? `Focus moved to ${chosen.slot.chain.at(-1)} (${focused})` : "This agent has already finished", "info");
-        return;
+      if (chosen.slot) {
+        const wasSelectedSlot = runtime.selectedSlotId === chosen.slot.id;
+        runtime.selectedSlotId = chosen.slot.id;
+        void syncMirrors();
+        if (chosen.paneId === visible && wasSelectedSlot && !cycle) {
+          // The slot's mirror is already beside the main pane and selected: choosing it again promotes the agent itself.
+          const focused = promoteSlot(slotMembers(chosen.slot.id), chosen.slot.id, (args) => herdrCli(args));
+          ctx.ui.notify(focused ? `Focus moved to ${chosen.slot.chain.at(-1)} (${focused})` : "This agent has already finished", "info");
+          return;
+        }
+      } else {
+        runtime.selectedSlotId = undefined;
       }
       if (chosen.running) paneSelector.state.owned.set(chosen.paneId, chosen.name);
       await paneSelector.select(chosen.paneId);

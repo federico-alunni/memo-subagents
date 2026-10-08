@@ -234,3 +234,67 @@ test("polling constants: normal rate is 1s, attention rate is 100ms (~10 fps)", 
   assert.equal(MIRROR_POLL_MS, 1000);
   assert.equal(MIRROR_ATTENTION_POLL_MS, 100);
 });
+
+test("renderStackedMirrors: stacks N worker boxes in a single column with balanced heights", async () => {
+  const { renderStackedMirrors } = await import("../pi-extension/subagents/runtime/mirror-view.ts");
+  const s1 = view({ slotId: "s1", name: "worker-1", agent: "builder" });
+  const s2 = view({ slotId: "s2", name: "worker-2", agent: "tester" });
+  const s3 = view({ slotId: "s3", name: "worker-3", agent: "reviewer" });
+  const screens = new Map<string, string[]>();
+  screens.set("w2:p1", ["output 1", "output 2"]);
+
+  // 1 slot: takes all rows
+  const single = renderStackedMirrors([s1], screens, 20, 60, tagTheme, 0);
+  assert.equal(single.length, 20);
+  for (const line of single) assert.equal(visibleWidth(stripTags(line)), 60);
+  assert.match(stripTags(single[0]), /^╭─ ● worker-1/);
+
+  // 2 slots: 12 rows each in 24 rows
+  const two = renderStackedMirrors([s1, s2], screens, 24, 60, tagTheme, 0);
+  assert.equal(two.length, 24);
+  assert.match(stripTags(two[0]), /^╭─ ● worker-1/);
+  assert.match(stripTags(two[12]), /^╭─ ● worker-2/);
+
+  // Uneven rows: 25 rows -> 13 + 12
+  const uneven = renderStackedMirrors([s1, s2], screens, 25, 60, tagTheme, 0);
+  assert.equal(uneven.length, 25);
+  assert.match(stripTags(uneven[0]), /^╭─ ● worker-1/);
+  assert.match(stripTags(uneven[13]), /^╭─ ● worker-2/);
+
+  // 3 slots: 8 rows each in 24 rows
+  const three = renderStackedMirrors([s1, s2, s3], screens, 24, 60, tagTheme, 0);
+  assert.equal(three.length, 24);
+  assert.match(stripTags(three[0]), /^╭─ ● worker-1/);
+  assert.match(stripTags(three[8]), /^╭─ ● worker-2/);
+  assert.match(stripTags(three[16]), /^╭─ ● worker-3/);
+
+  // Minimum height constraint (6 rows per box) and overflow indication
+  // With 15 rows and 4 slots, only 2 boxes can fit (min 6 rows). 15 rows -> 8 + 7
+  const s4 = view({ slotId: "s4", name: "worker-4" });
+  const overflow = renderStackedMirrors([s1, s2, s3, s4], screens, 15, 60, tagTheme, 0);
+  assert.equal(overflow.length, 15);
+  assert.match(stripTags(overflow[0]), /^╭─ ● worker-1/);
+  assert.match(stripTags(overflow[8]), /^╭─ ● worker-2/);
+  // Last row indicates overflow (+2 more in background)
+  assert.match(stripTags(overflow[14]), /\(\+2 more in background\)/);
+
+  // Empty slots: blank bordered frame of requested size
+  const empty = renderStackedMirrors([], screens, 10, 40, tagTheme, 0);
+  assert.equal(empty.length, 10);
+});
+
+test("multi-pane viewer: normalizes single or multi slot views and produces stacked frames", async () => {
+  const { readMultiView, nextMultiFrame } = await import("../pi-extension/subagents/runtime/mirror-viewer.ts");
+  const s1 = view({ slotId: "s1", name: "w1", paneId: "p1" });
+  const s2 = view({ slotId: "s2", name: "w2", paneId: "p2" });
+  const multi = { version: 1 as const, slots: [s1, s2], selectedSlotId: "s1" };
+  const screens = new Map<string, string>([["p1", "out 1"], ["p2", "out 2"]]);
+
+  const frame = nextMultiFrame(undefined, multi, screens, 24, 60, 5_000);
+  assert.ok(frame);
+  assert.ok(frame.includes("w1"));
+  assert.ok(frame.includes("w2"));
+
+  // No change -> undefined
+  assert.equal(nextMultiFrame(frame, multi, screens, 24, 60, 5_000), undefined);
+});

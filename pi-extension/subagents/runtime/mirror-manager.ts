@@ -1,15 +1,14 @@
-// Main-side owner of the mirror viewers: one read-only viewer pane per slot (a worktree-space agent and
-// its handoff chain), launched through the agent runtime so its identity and shutdown follow the same
-// proof as any child. Ownership is persisted (`<stateDir>/mirrors/<slot>.json`) because the process that
-// created a mirror may not be the one that finds it later: a record whose owner is gone is closed by
-// whoever sees it, a live owner's record is never touched, and no pane that is not ours is ever closed.
+// Main-side owner of the mirror viewer: a single read-only viewer pane for the right column,
+// displaying all active worktree-space slots stacked vertically. Managed through the agent runtime
+// so its identity and shutdown follow the same proof as any child. Ownership is persisted
+// (`<stateDir>/mirrors/column.json`) so crashed sessions' mirror panes are safely cleaned up.
 import { randomUUID } from "node:crypto";
 import { mkdir, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { json, publish } from "./protocol.ts";
 import type { AgentHandle } from "./protocol.ts";
 import type { LaunchSpec } from "./agent-runtime.ts";
-import type { MirrorView } from "./mirror-view.ts";
+import type { MirrorView, MultiMirrorView } from "./mirror-view.ts";
 
 export interface MirrorSlot {
   slotId: string;
@@ -17,9 +16,12 @@ export interface MirrorSlot {
   view: Omit<MirrorView, "owner">;
 }
 
+export interface SyncOptions {
+  selectedSlotId?: string;
+}
+
 interface MirrorRecord {
   version: 1;
-  slotId: string;
   handle: AgentHandle;
   owner: { pid: number; identity: string };
   viewFile: string;
@@ -49,11 +51,10 @@ interface Open {
   written: string;
 }
 
-const safe = (slotId: string) => slotId.replace(/[^A-Za-z0-9_.-]/g, "_");
-
 export class MirrorManager {
   private readonly options: MirrorManagerOptions;
-  private readonly open = new Map<string, Open>();
+  private active?: Open;
+  private currentSlotIds = new Set<string>();
   private chain: Promise<unknown> = Promise.resolve();
 
   constructor(options: MirrorManagerOptions) {
@@ -64,53 +65,61 @@ export class MirrorManager {
     return join(this.options.stateDir, "mirrors");
   }
 
-  /** Pane of the slot's mirror viewer (for the selector), while it is ours and open. */
-  paneFor(slotId: string): string | undefined {
-    return this.open.get(slotId)?.handle.paneId;
+  /** The shared pane of the mirror column (for the selector), while it is ours and open. */
+  get paneId(): string | undefined {
+    return this.active?.handle.paneId;
   }
 
-  /** Serialised: concurrent syncs never launch two viewers for one slot. */
-  sync(slots: MirrorSlot[]): Promise<void> {
-    const run = this.chain.then(() => this.syncOnce(slots));
+  /** Pane of the slot's mirror viewer (shared by all active slots in the column). */
+  paneFor(slotId: string): string | undefined {
+    return this.active && this.currentSlotIds.has(slotId) ? this.active.handle.paneId : undefined;
+  }
+
+  /** Serialised: concurrent syncs never launch multiple column viewers. */
+  sync(slots: MirrorSlot[], options?: SyncOptions): Promise<void> {
+    const run = this.chain.then(() => this.syncOnce(slots, options));
     this.chain = run.catch(() => {});
     return run;
   }
 
-  private async syncOnce(slots: MirrorSlot[]): Promise<void> {
+  private async syncOnce(slots: MirrorSlot[], options?: SyncOptions): Promise<void> {
     await mkdir(this.dir, { recursive: true, mode: 0o700 });
-    const wanted = new Set(slots.map((slot) => slot.slotId));
-    for (const slot of slots) {
-      const current = this.open.get(slot.slotId);
-      if (current) await this.writeView(current, slot);
-      else await this.start(slot);
+
+    if (slots.length === 0) {
+      if (this.active) await this.end(this.active);
+      this.currentSlotIds.clear();
+      return;
     }
-    for (const [slotId, open] of [...this.open])
-      if (!wanted.has(slotId)) await this.end(slotId, open);
-  }
 
-  private viewJson(slot: MirrorSlot): string {
-    return JSON.stringify({ ...slot.view, version: 1, owner: this.options.owner });
-  }
+    this.currentSlotIds = new Set(slots.map((s) => s.slotId));
+    const multiView: MultiMirrorView = {
+      version: 1,
+      slots: slots.map((s) => ({ ...s.view, slotId: s.slotId })),
+      selectedSlotId: options?.selectedSlotId,
+      palette: slots[0]?.view.palette,
+      owner: this.options.owner,
+    };
+    const text = JSON.stringify(multiView);
 
-  private async writeView(open: Open, slot: MirrorSlot): Promise<void> {
-    const text = this.viewJson(slot);
-    if (text === open.written) return;
-    await publish(open.viewFile, JSON.parse(text), false);
-    open.written = text;
-  }
+    if (this.active) {
+      if (text !== this.active.written) {
+        await publish(this.active.viewFile, multiView, false);
+        this.active.written = text;
+      }
+      return;
+    }
 
-  private async start(slot: MirrorSlot): Promise<void> {
-    const file = safe(slot.slotId);
-    const viewFile = join(this.dir, `${file}.view.json`);
-    const recordFile = join(this.dir, `${file}.json`);
-    const text = this.viewJson(slot);
-    // The viewer reads its view as soon as it starts: write it first.
-    await publish(viewFile, JSON.parse(text), false);
+    // Launch single shared column viewer
+    const viewFile = join(this.dir, "column.view.json");
+    const recordFile = join(this.dir, "column.json");
+    await publish(viewFile, multiView, false);
+
+    const label = `⧉ ${slots.map((s) => s.view.name).join(" │ ")}`;
     let handle: AgentHandle;
     try {
       handle = await this.options.runtime.launch({
         scope: "mirror",
-        agentId: `mirror-${file}-${randomUUID().slice(0, 8)}`,
+        agentId: `mirror-col-${randomUUID().slice(0, 8)}`,
         attempt: 1,
         taskId: "task-1",
         prompt: "",
@@ -121,41 +130,37 @@ export class MirrorManager {
         userInput: "takeover",
         placement: "auto",
         viewer: { script: this.options.viewerScript, env: { PI_MEMO_MIRROR_VIEW_FILE: viewFile } },
-        display: { label: `⧉ ${slot.view.name}` },
+        display: { label },
       });
     } catch {
-      // Nothing is adopted; the next sync tries again with a new attempt identity.
       await rm(viewFile, { force: true });
       return;
     }
-    const record: MirrorRecord = { version: 1, slotId: slot.slotId, handle, owner: this.options.owner, viewFile };
+
+    const record: MirrorRecord = { version: 1, handle, owner: this.options.owner, viewFile };
     await publish(recordFile, record, false);
-    this.open.set(slot.slotId, { handle, viewFile, recordFile, written: text });
+    this.active = { handle, viewFile, recordFile, written: text };
   }
 
-  /** Stop and close through the runtime's proof; on failure the viewer stays ours and is retried. */
-  private async end(slotId: string, open: Open): Promise<void> {
+  private async end(open: Open): Promise<void> {
     try {
       await this.options.runtime.stop(open.handle);
       await this.options.runtime.close(open.handle);
     } catch {
-      // Not proven yet (e.g. the exiting viewer is still a zombie for a few ms): still ours, retried by the next sync.
+      // Retried on the next sync if unproven
       return;
     }
-    this.open.delete(slotId);
+    this.active = undefined;
     await rm(open.recordFile, { force: true });
     await rm(open.viewFile, { force: true });
   }
 
-  /** Session quit: close every viewer this process owns. */
+  /** Session quit: close the column viewer this process owns. */
   async closeAll(): Promise<void> {
     await this.sync([]);
   }
 
-  /**
-   * Close the viewers of owners that no longer exist (crash, killed session). A record of a live
-   * owner, and our own, are left alone.
-   */
+  /** Reconcile orphaned mirror panes from dead sessions. */
   async reconcile(): Promise<void> {
     await mkdir(this.dir, { recursive: true, mode: 0o700 });
     const run = this.chain.then(async () => {
@@ -163,14 +168,14 @@ export class MirrorManager {
         if (!name.endsWith(".json") || name.endsWith(".view.json")) continue;
         const record = await json<MirrorRecord>(join(this.dir, name)).catch(() => undefined);
         if (!record || record.version !== 1 || !record.handle || !record.owner) continue;
-        if (this.open.has(record.slotId)) continue;
+        if (this.active?.recordFile === join(this.dir, name)) continue;
         if (record.owner.identity === this.options.owner.identity && record.owner.pid === this.options.owner.pid) continue;
         if (await this.options.ownerAlive(record.owner)) continue;
         try {
           await this.options.runtime.stop(record.handle);
           await this.options.runtime.close(record.handle);
         } catch {
-          continue; // not proven: leave the record (and the pane) for a later look
+          continue;
         }
         await rm(join(this.dir, name), { force: true });
         await rm(record.viewFile, { force: true });

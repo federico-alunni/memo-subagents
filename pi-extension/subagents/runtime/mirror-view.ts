@@ -16,8 +16,11 @@ export interface MirrorTheme {
 export type MirrorStatus = "starting" | "active" | "waiting" | "question" | "stalled" | "done" | "error";
 
 /** Written by the mirror's owner (atomic replace), read by the mirror process about once a second. */
+export const MIN_MIRROR_BOX_ROWS = 6;
+
 export interface MirrorView {
   version: 1;
+  slotId?: string;
   /** Pane of the agent currently shown (the slot's active agent); absent while none is known. */
   paneId?: string;
   /** Slot name (the first agent's name). */
@@ -35,6 +38,16 @@ export interface MirrorView {
   /** SGR foreground prefixes resolved from the owner's pi theme. */
   palette?: Partial<Record<MirrorColor, string>>;
   /** Owner process: the mirror ends itself when it is gone. */
+  owner?: { pid: number; identity: string };
+}
+
+/** Multi-pane view: a collection of active slots displayed in a single stacked column. */
+export interface MultiMirrorView {
+  version: 1;
+  slots: MirrorView[];
+  /** Currently selected slot (e.g. via /subagent or Ctrl+Alt+X) */
+  selectedSlotId?: string;
+  palette?: Partial<Record<MirrorColor, string>>;
   owner?: { pid: number; identity: string };
 }
 
@@ -198,6 +211,58 @@ export function renderMirrorLines(
   }
   while (out.length < rows) out.push(`${side}${" ".repeat(inner)}${side}`);
   return out;
+}
+
+/**
+ * Render N worker mirrors stacked vertically in a single terminal column of `rows` x `columns`.
+ * Available rows are distributed evenly. If there are more slots than can fit (minimum 6 rows per box),
+ * only the top slots are shown and an overflow notice is placed in the bottom box.
+ */
+export function renderStackedMirrors(
+  slots: MirrorView[],
+  screens: Map<string, string[]>,
+  rows: number,
+  columns: number,
+  theme: MirrorTheme,
+  now = Date.now(),
+): string[] {
+  if (rows <= 0 || columns <= 0) return [];
+  const inner = Math.max(0, columns - 2);
+  const side = theme.fg("accent", "│");
+  if (slots.length === 0) {
+    return Array.from({ length: rows }, () => `${side}${" ".repeat(inner)}${side}`);
+  }
+  if (slots.length === 1) {
+    const screen = screens.get(slots[0].paneId ?? "") ?? [];
+    return renderMirrorLines(slots[0], screen, rows, columns, theme, now);
+  }
+
+  const maxFit = Math.max(1, Math.floor(rows / MIN_MIRROR_BOX_ROWS));
+  const visibleCount = Math.min(slots.length, maxFit);
+  const overflow = slots.length - visibleCount;
+
+  const base = Math.floor(rows / visibleCount);
+  const rem = rows % visibleCount;
+
+  const out: string[] = [];
+  for (let i = 0; i < visibleCount; i++) {
+    const boxHeight = base + (i < rem ? 1 : 0);
+    const slot = slots[i];
+    const screen = screens.get(slot.paneId ?? "") ?? [];
+    const box = renderMirrorLines(slot, screen, boxHeight, columns, theme, now);
+
+    // If there is overflow, replace the last row of the last visible box with an overflow notice
+    if (i === visibleCount - 1 && overflow > 0 && box.length > 1) {
+      const notice = ` ${theme.fg("muted", `… (+${overflow} more in background)`)} `;
+      const fill = Math.max(0, inner - visibleWidth(notice));
+      box[box.length - 1] = `${side}${notice}${" ".repeat(fill)}${side}`;
+    }
+    out.push(...box);
+  }
+
+  // Ensure exact row count
+  while (out.length < rows) out.push(`${side}${" ".repeat(inner)}${side}`);
+  return out.slice(0, rows);
 }
 
 /**

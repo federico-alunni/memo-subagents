@@ -13,7 +13,8 @@ import { ChildRuntime } from "./child/runtime.ts";
 import { CHILD_ENV } from "./child/env.ts";
 import { json, privateDirectory } from "./protocol.ts";
 import type { Boot } from "./protocol.ts";
-import { decodeInputKey, paletteTheme, renderMirrorFrame, renderMirrorLines, splitScreen } from "./mirror-view.ts";
+import { decodeInputKey, paletteTheme, renderMirrorFrame, renderMirrorLines, renderStackedMirrors, splitScreen } from "./mirror-view.ts";
+import type { MultiMirrorView } from "./mirror-view.ts";
 import type { MirrorView } from "./mirror-view.ts";
 import { realpathSync, watch } from "node:fs";
 
@@ -27,27 +28,58 @@ type ReadPane = (paneId: string) => Promise<string | undefined>;
 /** Whether the owner process of a view is still the same process (pid and start/command identity). */
 export type OwnerAlive = (owner: NonNullable<MirrorView["owner"]>) => Promise<boolean>;
 
-export async function readView(path: string): Promise<MirrorView | undefined> {
+export function normalizeMultiView(raw: any): MultiMirrorView | undefined {
+  if (!raw || raw.version !== 1) return undefined;
+  if (Array.isArray(raw.slots)) {
+    return {
+      version: 1,
+      slots: raw.slots.filter((s: any) => s && typeof s.name === "string"),
+      selectedSlotId: typeof raw.selectedSlotId === "string" ? raw.selectedSlotId : undefined,
+      palette: raw.palette ?? {},
+      owner: raw.owner,
+    };
+  }
+  if (typeof raw.name === "string") {
+    return {
+      version: 1,
+      slots: [raw],
+      selectedSlotId: raw.slotId,
+      palette: raw.palette ?? {},
+      owner: raw.owner,
+    };
+  }
+  return undefined;
+}
+
+export async function readMultiView(path: string): Promise<MultiMirrorView | undefined> {
   try {
-    const view = JSON.parse(await readFile(path, "utf8")) as MirrorView;
-    return view?.version === 1 && typeof view.name === "string" ? view : undefined;
+    const raw = JSON.parse(await readFile(path, "utf8"));
+    return normalizeMultiView(raw);
   } catch {
     return undefined;
   }
 }
 
-/** One repaint decision: the frame to write, or undefined when nothing changed. */
-export function nextFrame(
+export async function readView(path: string): Promise<MirrorView | undefined> {
+  const multi = await readMultiView(path);
+  return multi?.slots[0];
+}
+
+/** One repaint decision for multiple stacked slots: the frame to write, or undefined when unchanged. */
+export function nextMultiFrame(
   previous: string | undefined,
-  view: MirrorView | undefined,
-  screen: string | undefined,
+  multiView: MultiMirrorView | undefined,
+  screens: Map<string, string>,
   rows: number,
   columns: number,
   now: number,
 ): string | undefined {
-  const theme = paletteTheme(view?.palette ?? {});
-  const lines = view
-    ? renderMirrorLines(view, screen ? splitScreen(screen) : [], rows, columns, theme, now)
+  const theme = paletteTheme(multiView?.palette ?? {});
+  const splitMap = new Map<string, string[]>();
+  for (const [k, v] of screens) splitMap.set(k, splitScreen(v));
+  const slots = multiView?.slots ?? [];
+  const lines = slots.length > 0
+    ? renderStackedMirrors(slots, splitMap, rows, columns, theme, now)
     : renderMirrorLines(
         { version: 1, name: "mirror", startedAt: now, status: "starting" },
         [],
@@ -58,6 +90,21 @@ export function nextFrame(
       );
   const frame = renderMirrorFrame(lines, columns);
   return frame === previous ? undefined : frame;
+}
+
+/** One repaint decision: the frame to write, or undefined when nothing changed (backwards compatible). */
+export function nextFrame(
+  previous: string | undefined,
+  view: MirrorView | undefined,
+  screen: string | undefined,
+  rows: number,
+  columns: number,
+  now: number,
+): string | undefined {
+  const multi: MultiMirrorView | undefined = view ? { version: 1, slots: [view], palette: view.palette, owner: view.owner } : undefined;
+  const screens = new Map<string, string>();
+  if (view?.paneId && screen) screens.set(view.paneId, screen);
+  return nextMultiFrame(previous, multi, screens, rows, columns, now);
 }
 
 function herdrReadPane(env: NodeJS.ProcessEnv = process.env): ReadPane {
@@ -131,17 +178,28 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   // Alternate screen, no cursor, autowrap off; input is read raw and dropped.
   out.write("\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[2J");
   const sendInput = herdrSendInput(env);
+  let lastMultiView: MultiMirrorView | undefined;
+
   if (stdin.isTTY) {
     stdin.setRawMode(true);
     stdin.resume();
     stdin.on("data", async (chunk: Buffer) => {
       if (stopped) return;
-      // Re-read view immediately to have the latest attention state without waiting for the poll timer
-      const current = (await readView(viewFile)) ?? lastView;
-      if (!current?.attention || !current?.paneId) return; // Drop all input outside dialogs
+      const current = (await readMultiView(viewFile)) ?? lastMultiView;
+      if (!current) return;
+      // Find all slots with active dialog attention
+      const attentionSlots = current.slots.filter((s) => s.attention && s.paneId);
+      if (attentionSlots.length === 0) return; // Drop input outside dialogs
+
+      // Route to selected slot if it has attention, otherwise to the first slot with attention
+      const targetSlot =
+        (current.selectedSlotId && attentionSlots.find((s) => s.slotId === current.selectedSlotId)) ||
+        attentionSlots[0];
+
+      if (!targetSlot?.paneId) return;
       const decoded = decodeInputKey(chunk);
       if (!decoded) return;
-      await sendInput(current.paneId, decoded);
+      await sendInput(targetSlot.paneId, decoded);
       // Fast-forward immediate repaints for snappy typing/navigation feedback
       setTimeout(() => void tick(), 30);
       setTimeout(() => void tick(), 100);
@@ -154,21 +212,31 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   const read = herdrReadPane(env);
   const alive = ownerAlive();
   let previous: string | undefined;
-  let lastView: MirrorView | undefined;
   let deadChecks = 0;
+
   const tick = async () => {
     if (stopped) return;
-    const view = (await readView(viewFile)) ?? lastView;
-    lastView = view;
-    if (view?.owner && !(await alive(view.owner))) {
+    const multi = (await readMultiView(viewFile)) ?? lastMultiView;
+    lastMultiView = multi;
+    if (multi?.owner && !(await alive(multi.owner))) {
       // The session that owns this mirror is gone: end through the orderly path, never touch other panes.
       if (++deadChecks >= 3) {
         await child.exitWith("done").catch(() => stop());
         return;
       }
     } else deadChecks = 0;
-    const screen = view?.paneId && !view.ended ? await read(view.paneId) : undefined;
-    const frame = nextFrame(previous, view, screen, out.rows || 24, out.columns || 80, Date.now());
+
+    // Read screens for all active, un-ended slots
+    const screens = new Map<string, string>();
+    const activePanes = (multi?.slots ?? []).map((s) => (!s.ended ? s.paneId : undefined)).filter((id): id is string => !!id);
+    await Promise.all(
+      activePanes.map(async (paneId) => {
+        const ansi = await read(paneId);
+        if (ansi !== undefined) screens.set(paneId, ansi);
+      }),
+    );
+
+    const frame = nextMultiFrame(previous, multi, screens, out.rows || 24, out.columns || 80, Date.now());
     if (frame !== undefined) {
       out.write(frame);
       previous = frame;
@@ -182,7 +250,8 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
   const scheduleNext = () => {
     if (stopped) return;
     if (pollTimer) clearTimeout(pollTimer);
-    const interval = lastView?.attention ? MIRROR_ATTENTION_POLL_MS : MIRROR_POLL_MS;
+    const hasAttention = (lastMultiView?.slots ?? []).some((s) => s.attention);
+    const interval = hasAttention ? MIRROR_ATTENTION_POLL_MS : MIRROR_POLL_MS;
     pollTimer = setTimeout(async () => {
       await tick().catch(() => {});
       scheduleNext();

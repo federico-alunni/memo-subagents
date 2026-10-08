@@ -45,11 +45,16 @@ try {
   owned.push(main.workspace.workspace_id);
   const worker = herdr(['workspace', 'create', '--label', 'mirror-live-worker-owned', '--cwd', dir, '--no-focus']);
   owned.push(worker.workspace.workspace_id);
+  const worker2 = herdr(['workspace', 'create', '--label', 'mirror-live-worker2-owned', '--cwd', dir, '--no-focus']);
+  owned.push(worker2.workspace.workspace_id);
   const mainPane = main.root_pane.pane_id;
   const workerPane = worker.root_pane.pane_id;
+  const workerPane2 = worker2.root_pane.pane_id;
   await sleep(1500);
   execFileSync('herdr', ['pane', 'run', workerPane, fakePi], { stdio: 'ignore' });
+  execFileSync('herdr', ['pane', 'run', workerPane2, fakePi], { stdio: 'ignore' });
   await until('worker screen', () => text(workerPane).includes('work line'));
+  await until('worker2 screen', () => text(workerPane2).includes('work line'));
 
   // The runtime asks Herdr for "the current pane": make that the main workspace's pane.
   process.env.HERDR_PANE_ID = mainPane;
@@ -92,6 +97,25 @@ try {
   // 3. the view follows the slot (handoff: another agent, same pane here)
   await manager.sync([slot({ agent: 'reviewer' })]);
   await until('header follows the active agent', () => /\│ reviewer/.test(text(mirror)));
+
+  // 3b. multi-pane stacked column: adding a second worker divides the column into balanced stacked boxes
+  const slot2 = (patch = {}) => ({
+    slotId: 'live-slot-2',
+    view: { version: 1, paneId: workerPane2, name: 'feat-api', agent: 'tester', branch: 'memo/live-2', startedAt: Date.now(), status: 'active', ...patch },
+  });
+  await manager.sync([slot({ agent: 'reviewer' }), slot2()]);
+  assert.equal(manager.paneFor('live-slot'), mirror);
+  assert.equal(manager.paneFor('live-slot-2'), mirror);
+  await until('both workers visible in stacked column', () => {
+    const t = text(mirror);
+    return t.includes('fix-lock') && t.includes('feat-api') ? t : undefined;
+  });
+  // Drop slot2: column returns to single box taking full height
+  await manager.sync([slot()]);
+  await until('column returns to single worker', () => {
+    const t = text(mirror);
+    return t.includes('fix-lock') && !t.includes('feat-api') ? t : undefined;
+  });
 
   // 4. resize: Herdr adjusts the split layout and the mirror stays valid
   const rectWidth = () => herdr(['pane', 'layout', '--pane', mainPane]).layout.panes.find((p) => p.pane_id === mirror)?.rect?.width;
