@@ -101,6 +101,8 @@ interface LaunchSpec {
   appendSystemPrompt?: string[]; // absolute, readable files passed with --append-system-prompt
   systemPrompt?: string;      // absolute, readable file passed with --system-prompt (replaces pi's prompt)
   placement?: "split-right" | "split-down" | "tab" | "worktree" | "auto" | "visible"; // default "tab"; see "Pane selector"
+  spaceRoot?: string;         // "worktree" placement only: root directory to open when cwd is a subdirectory
+  viewer?: { script: string; args?: string[]; env?: Record<string, string> }; // read-only viewer program (no model/presence)
   display: {
     label: string;            // widget row / tab label
     group?: string;           // widget group title (default group = generic subagents)

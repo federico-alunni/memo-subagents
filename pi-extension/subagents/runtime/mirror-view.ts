@@ -156,7 +156,8 @@ function statusSymbol(status: MirrorStatus, theme: MirrorTheme): string {
  */
 export function mirrorHeader(view: MirrorView, width: number, theme: MirrorTheme, now = Date.now()): string {
   const right = ` ${theme.fg("muted", formatDuration(now - view.startedAt))} ${theme.fg("accent", "─╮")}`;
-  const name = theme.bold(theme.fg("text", view.name));
+  const hint = view.attention ? ` ${theme.bold(theme.fg("warning", "[rispondi qui]"))}` : "";
+  const name = `${theme.bold(theme.fg("text", view.name))}${hint}`;
   const sep = ` ${theme.fg("muted", "│")} `;
   const variants = [
     [name, ...(view.agent ? [theme.italic(view.agent)] : []), ...(view.branch ? [`${theme.fg("accent", "⎇")} ${view.branch}`] : [])],
@@ -234,4 +235,39 @@ export function paletteTheme(palette: Partial<Record<MirrorColor, string>>): Mir
     bold: (text) => `\x1b[1m${text}\x1b[22m`,
     italic: (text) => `\x1b[3m${text}\x1b[23m`,
   };
+}
+
+export type DecodedInput =
+  | { kind: "key"; name: "up" | "down" | "left" | "right" | "enter" | "esc" | "tab" | "backspace" }
+  | { kind: "text"; text: string };
+
+/**
+ * Decodes raw terminal input bytes during an active dialog (question, approval) into a key or text
+ * for `herdr pane send-keys` / `send-text`. Anything outside the dialog grammar (e.g. Ctrl+C) is dropped.
+ */
+export function decodeInputKey(chunk: Buffer): DecodedInput | undefined {
+  if (chunk.length === 0) return undefined;
+  // Arrow keys (standard VT100/ANSI CSI sequence)
+  if (chunk.length === 3 && chunk[0] === 0x1b && chunk[1] === 0x5b) {
+    if (chunk[2] === 0x41) return { kind: "key", name: "up" };
+    if (chunk[2] === 0x42) return { kind: "key", name: "down" };
+    if (chunk[2] === 0x43) return { kind: "key", name: "right" };
+    if (chunk[2] === 0x44) return { kind: "key", name: "left" };
+  }
+  // Single-byte control keys
+  if (chunk.length === 1) {
+    const b = chunk[0];
+    if (b === 0x0d || b === 0x0a) return { kind: "key", name: "enter" };
+    if (b === 0x1b) return { kind: "key", name: "esc" };
+    if (b === 0x09) return { kind: "key", name: "tab" };
+    if (b === 0x7f || b === 0x08) return { kind: "key", name: "backspace" };
+    // Printable ASCII
+    if (b >= 0x20 && b <= 0x7e) return { kind: "text", text: String.fromCharCode(b) };
+    return undefined;
+  }
+  // Multibyte printable text (e.g. UTF-8 pasting or fast typing)
+  const str = chunk.toString("utf8");
+  // If it contains control chars (other than regular text), drop it
+  if (/[ -]/.test(str)) return undefined;
+  return { kind: "text", text: str };
 }

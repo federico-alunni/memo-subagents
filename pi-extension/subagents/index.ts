@@ -2204,10 +2204,12 @@ function observeSubagentObservation(running: RunningSubagent, o: Observation, ob
         if (inspection.kind !== "present") return;
         running.lifecycle = observePaneInspection(running.lifecycle, inspection, Date.now());
         updateWidget();
+        void syncMirrors();
       })
       .catch(() => {});
   }
   updateWidget();
+  void syncMirrors();
 }
 
 /** Completion record for the lifecycle from the supervised end of a runtime child. */

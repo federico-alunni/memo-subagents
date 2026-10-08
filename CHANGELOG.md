@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Added
+
+- **Worktree-space mirror & delegated handoff**: `subagent({ ..., worktree: true, worktreeSpace: true })` opens the child in its own Herdr workspace and shows a read-only mirror pane beside the main pane.
+  - The mirror renders the child's live terminal with the issue #86 style header (`╭─ <status> <name> │ <agent> │ ⎇ <branch> ─── <duration> ─╮`), accent-colored side borders, and auto-cropped chat input (the input row and lower border are removed; status bar and footer remain).
+  - When the child enters a dialog (`question` or `bashAsk` approval), the mirror displays the full uncropped screen, appends `[rispondi qui]` to the header, and forwards dialog keys (arrows, Enter, Esc, Tab, Backspace, printable text) directly to the child's pane. Outside dialogs, typed input is safely dropped.
+  - Worktree-space subagents can start successor agents in their workspace using `subagent({ handoff: "wait" | "replace", ... })`. With `wait`, the parent pauses its turn while the child runs, and receives the result as its next task. With `replace`, the parent completes silently and the successor takes over the slot; the main session receives the final result with the full agent chain in details.
+  - Selecting an open mirror in `/subagent` or via `Ctrl+Alt+X` promotes the active agent by moving focus to its workspace (`herdr agent focus`, with fallback to workspace + tab navigation).
+  - The widget groups worktree-space handoff chains into a single slot row (`⧉ root (agent) › successor ...`) with the slot's cumulative elapsed time and current status.
+  - `MirrorManager` supervises viewer processes via `AgentRuntime`, writes persistent ownership records (`<stateDir>/mirrors/<slot>.json`), updates active views atomically on handoffs, cleanly closes viewers on shutdown, and reconciles orphaned viewer panes from dead processes.
+- `LaunchSpec.viewer`: AgentRuntime launch capability for launching read-only terminal programs with child identity and shutdown guarantees, omitting pi CLI checks and presence rows.
+- `LaunchSpec.spaceRoot`: Allows launching worktree-space children from sub-directories within the worktree checkout.
+- `DelegatedToolSpec.internal`: Policy flag for internal delegated transports (e.g. `subagent_handoff`), accessible to child extensions without being exposed as visible model tools.
+- Pure mirror rendering module (`runtime/mirror-view.ts`) and standalone viewer process (`runtime/mirror-viewer.ts`).
+
 ## 0.3.0 — 2026-10-08
 
 ### Changed

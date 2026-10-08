@@ -13,7 +13,7 @@ import { ChildRuntime } from "./child/runtime.ts";
 import { CHILD_ENV } from "./child/env.ts";
 import { json, privateDirectory } from "./protocol.ts";
 import type { Boot } from "./protocol.ts";
-import { paletteTheme, renderMirrorFrame, renderMirrorLines, splitScreen } from "./mirror-view.ts";
+import { decodeInputKey, paletteTheme, renderMirrorFrame, renderMirrorLines, splitScreen } from "./mirror-view.ts";
 import type { MirrorView } from "./mirror-view.ts";
 import { realpathSync } from "node:fs";
 
@@ -71,6 +71,19 @@ function herdrReadPane(env: NodeJS.ProcessEnv = process.env): ReadPane {
     });
 }
 
+
+function herdrSendInput(env: NodeJS.ProcessEnv = process.env): (paneId: string, input: ReturnType<typeof decodeInputKey>) => Promise<void> {
+  const bin = env.HERDR_BIN_PATH || "herdr";
+  return (paneId, input) =>
+    new Promise((resolve) => {
+      if (!input) return resolve();
+      const args = input.kind === "key"
+        ? ["pane", "send-keys", paneId, input.name]
+        : ["pane", "send-text", paneId, input.text];
+      execFile(bin, args, { encoding: "utf8", timeout: 4000 }, () => resolve());
+    });
+}
+
 function ownerAlive(): OwnerAlive {
   return (owner) =>
     new Promise((resolve) => {
@@ -115,10 +128,21 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
 
   // Alternate screen, no cursor, autowrap off; input is read raw and dropped.
   out.write("\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[2J");
+  const sendInput = herdrSendInput(env);
   if (stdin.isTTY) {
     stdin.setRawMode(true);
     stdin.resume();
-    stdin.on("data", () => {});
+    stdin.on("data", async (chunk: Buffer) => {
+      if (stopped) return;
+      // Re-read view immediately to have the latest attention state without waiting for the poll timer
+      const current = (await readView(viewFile)) ?? lastView;
+      if (!current?.attention || !current?.paneId) return; // Drop all input outside dialogs
+      const decoded = decodeInputKey(chunk);
+      if (!decoded) return;
+      await sendInput(current.paneId, decoded);
+      // Fast-forward next repaint after user input
+      setTimeout(() => void tick(), 100);
+    });
   }
   process.on("SIGINT", () => {});
   process.on("SIGTERM", stop);

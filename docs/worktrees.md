@@ -11,6 +11,8 @@ Without `worktree: true` nothing changes: launched commands are byte-identical t
 | `worktree: true` | Enable isolation for this spawn. |
 | `worktreeBranch` | Name of the **new** branch. Must be a valid ref name and must not exist (existing branches are never adopted). Default `<branchPrefix><slug(name)>-<id8>`, i.e. `memo/<slug>-<id8>`. |
 | `worktreeBase` | Commit-ish to start from. Default `HEAD` of the source checkout. Resolved to a commit SHA at spawn time. |
+| `worktreeSpace: true` | Open the worktree as its own Herdr workspace (`herdr worktree open`) and show a read-only mirror pane beside the main pane. |
+| `handoff: "wait" \| "replace"` | (Worktree-space subagents only) Spawn an agent in a new tab of this worktree space on the same branch. |
 
 `worktreeBranch` / `worktreeBase` without `worktree: true` is a validation error. The worktree path is not a model parameter; it comes from configuration. Agent frontmatter cannot enable worktrees in this version.
 

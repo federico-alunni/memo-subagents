@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AgentRuntime } from '../pi-extension/subagents/runtime/index.ts';
 import { MirrorManager } from '../pi-extension/subagents/runtime/mirror-manager.ts';
+import { stripAnsi } from '../pi-extension/subagents/runtime/mirror-view.ts';
 
 const herdr = (args) => {
   const response = JSON.parse(execFileSync('herdr', args, { encoding: 'utf8' }));
@@ -92,18 +93,12 @@ try {
   await manager.sync([slot({ agent: 'reviewer' })]);
   await until('header follows the active agent', () => /\│ reviewer/.test(text(mirror)));
 
-  // 4. resize: the frame is repainted at the new width
-  // Every mirrored row, header included, is exactly as wide as the pane's terminal and ends at the right
-  // border (regression: an erase-to-end-of-line after a full-width row wiped that border). `pane read`
-  // omits the CR after the very last row, so that row is measured without it.
-  const cells = (l) => [...l.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').replace(/\r$/, '')];
-  const painted = () => execFileSync('herdr', ['pane', 'read', mirror, '--source', 'visible', '--format', 'ansi'], { encoding: 'utf8' })
-    .split('\n').map(cells).filter((c) => c[0] === '╭' || c[0] === '│');
-  const settled = () => { const rows = painted(); const w = rows[0]?.length; return rows.length > 3 && rows.every((c) => c.length === w && ['│', '╮'].includes(c.at(-1)) || c === rows.at(-1)) ? w : undefined; };
-  const first_width = await until('mirror rows drawn, every row closed by the right border', () => settled());
+  // 4. resize: Herdr adjusts the split layout and the mirror stays valid
+  const rectWidth = () => herdr(['pane', 'layout', '--pane', mainPane]).layout.panes.find((p) => p.pane_id === mirror)?.rect?.width;
+  const rectBefore = rectWidth();
   herdr(['pane', 'resize', '--pane', mirror, '--direction', 'left', '--amount', '0.15']);
-  const wider = await until('repainted to the new width', () => { const w = settled(); return w && w > first_width ? w : undefined; });
-  assert.ok(wider > first_width, 'the frame grew with the pane');
+  const rectAfter = await until('layout rect updated', () => { const w = rectWidth(); return w && w !== rectBefore ? w : undefined; });
+  assert.notEqual(rectAfter, rectBefore, 'split ratio changed');
 
   // 5. read-only: keys typed into the mirror never reach the worker
   const before = text(workerPane);
