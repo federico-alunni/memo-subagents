@@ -1970,6 +1970,38 @@ test("activity snapshots written by the child are readable through the handle", 
   if (read.ok) assert.equal(read.activity.phase, "active");
 });
 
+test("presence attention: activity.json first, a pending question.json as fallback; never active", async (t) => {
+  const { createSubagentActivityRecorder } = await import("../../pi-extension/subagents/activity.ts");
+  const { presenceActive } = await import("../../pi-extension/subagents/runtime/presence.ts");
+  const f = await fixture(t);
+  const h = await f.transport.launch({ ...f.input, display: { label: "planner", group: "Issue Round" } });
+  const row = () => presence().list().find((r) => r.key === h.protocolDir)!;
+  await f.transport.observe(h);
+  assert.equal(row().attention, undefined);
+  f.transport.annotate(h, { active: true });
+  // Fallback: a pending question record without activity attention.
+  await f.fake.runtime!.question("q1", "Push o solo merge?");
+  await f.transport.observe(h);
+  assert.equal(row().attention?.kind, "question");
+  assert.equal(row().attention?.label, "Push o solo merge?");
+  const since = row().attention!.since;
+  assert.equal(presenceActive(row()), false);
+  await f.transport.observe(h);
+  assert.equal(row().attention?.since, since);
+  // The child's activity attention wins (e.g. a bash approval).
+  const recorder = createSubagentActivityRecorder({ runningChildId: h.nonce, activityFile: join(h.protocolDir, "activity.json") });
+  recorder.agentStart();
+  recorder.attention({ kind: "approval", label: "npm run build", since: 42 });
+  await f.transport.observe(h);
+  assert.deepEqual(row().attention, { kind: "approval", label: "npm run build", since: 42 });
+  recorder.attention(null);
+  await f.fake.runtime!.question("q1", "Push o solo merge?", "Solo merge");
+  await f.transport.observe(h);
+  assert.equal(row().attention, undefined);
+  assert.equal(presenceActive(row()), true);
+  f.transport.forget(h);
+});
+
 test("boot records of 0.2.0 (without the new policy fields) keep their meaning", async () => {
   const { normalizePolicy, validPolicy } = await import("../../pi-extension/subagents/runtime/protocol.ts");
   const old = normalizePolicy({ tools: ["read"], bash: "readonly", question: true, delegatedTools: [] });

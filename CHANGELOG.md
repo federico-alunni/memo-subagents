@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Fixed
+
+- A child waiting for the user (question or bash approval) is no longer shown or counted as active: the widget row reads `❓ question <duration>` / `❓ approval <duration>` (`blocked <duration>` when only Herdr says so), box headers count `N active · N question · N open` and use an attention color, also for Issue Round rows annotated active. The Herdr tab is `blocked`: the bash approval emits `herdr:blocked` like the `question` tool, and isolated children (no Herdr integration under `-ne`) report working/idle/blocked to Herdr themselves (`--source memo-subagents`). No steer is sent to the parent when a child waits (nor stalled while it waits).
+
+### Added
+
+- `activity.json` field `attention` (`{kind: question | approval | blocked, label?, since}`), written at once while a child waits for the user; `PresenceEntry.attention`. Older files stay valid. Contract in `docs/runtime.md`.
+
 ### Removed
 
 - The runtime's own `question` tool and `runtime/child/question-dialog.ts`: the `question` tool now comes from the **pi-memo-question** package (see Changed).

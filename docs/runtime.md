@@ -190,6 +190,27 @@ While its dialog is open the tool emits `memo-question` on `pi.events`; the chil
 `observe` reports `question` for every child, and the tool also emits `herdr:blocked`. The answer itself stays in
 the child session.
 
+### Waiting for the user (`herdr:blocked`, attention)
+
+`herdr:blocked` on `pi.events` is the one signal of a child that waits for the user:
+`{ active: true, label?: string, kind?: string }` when a dialog opens, `{ active: false }` when it closes (always,
+also on cancel, error or abort). The `question` tool emits it without `kind` (= `"question"`); the bash approval of
+`bashAsk` emits `kind: "approval"` with the command as `label`; any other `kind` is shown as `blocked`.
+
+- The child extension counts open waits (they may overlap) and writes `attention` into `activity.json` at once
+  (no throttle): `{ kind: "question" | "approval" | "blocked", label?, since }` while at least one is open (latest
+  kind/label, `since` of the first), removed when none is. `phase` is unchanged.
+- **Profile** children load Herdr's own pi integration with their profile; it listens to the same event and marks
+  the pane `blocked`.
+- **Isolated** children (`-ne`) do not load it. Inside Herdr (`HERDR_ENV=1`, `HERDR_PANE_ID`) the child extension
+  reports the pane state itself: `"$HERDR_BIN_PATH"` (or `herdr`) `pane report-agent <pane> --source memo-subagents
+  --agent pi --state working|idle|blocked [--message=<label>] --seq <n>` on `agent_start`, idle `agent_settled` and
+  attention changes, and `pane release-agent` on quit. Only the latest state is sent, `seq` grows from a timestamp,
+  errors are ignored. Never in profile children.
+- The parent reads attention from `activity.json` (a pending `question.json` as fallback): the widget row shows
+  `❓ question <duration>` / `❓ approval <duration>` (Herdr `blocked` alone: `blocked <duration>`), the row is not
+  counted as active even when annotated `active: true`, and the parent agent is never notified.
+
 ### Sessions
 
 `session: { kind: "file", path }` opens an existing session (resume) or one seeded by the caller (lineage/fork) with
@@ -274,7 +295,8 @@ The child extension: verifies boot identity, model, thinking, session and cwd; p
 exactly once; publishes `settled` only on `agent_settled` (provider errors and aborts stay distinct; no assistant
 outcome is an error); handles interrupt/shutdown requests; records takeover; enforces the tool allowlist and the
 read-only bash guard (with `bashAllow`, and the user question for `bashAsk`); registers the declared delegated tools and the exit tools; records `question` dialogs (pi-memo-question) in `question.json`; writes
-display-only activity snapshots (0600). User-driven children (`userInput: "allowed"`) also get an identity widget
+display-only activity snapshots (0600) with `attention` while it waits for the user; in isolated children inside
+Herdr, reports the pane's agent state (see [Waiting for the user](#waiting-for-the-user-herdrblocked-attention)). User-driven children (`userInput: "allowed"`) also get an identity widget
 (label, tools, denied tools; Ctrl+J toggles the list); workflow children keep pi's own Ctrl+J.
 
 For user-driven children the pane's **tab** is not identity: the user may move the pane (pane, terminal, workspace,
@@ -296,6 +318,10 @@ Every agent launched by any `AgentRuntime` in the process appears in the pi-memo
 (`Symbol.for("pi-memo-subagents/runtime-presence")`) is display-only and shared even if the module is loaded twice.
 The runtime updates rows itself (launch, observe/watch, dispatch, stop, close); clients add workflow state with
 `annotate` (e.g. `{ status: "in verifica", active: false }`) and can retire a row early with `forget`.
+A row with `attention` (the agent waits for the user, see [above](#waiting-for-the-user-herdrblocked-attention))
+shows it instead of the status and is never active (`presenceActive` is false). Box headers read
+`N active · N question · N open` (question = rows waiting for the user, approvals included); the border uses the
+attention color when a row waits, else blue when one is active, else amber.
 After a cold restart, observing a persisted handle of a live agent rebuilds its row from `boot.json`; a superseded
 handle (before `dispatch`) never repaints the row, and a closed agent is not resurrected.
 Rows are grouped by `display.group`; the agent shown beside the caller is marked `▶`.
@@ -329,6 +355,7 @@ interface PresenceEntry {
   key: string; group?: string; label: string; model: string; thinking: string;
   paneId?: string; startedAt: number; state: Observation["kind"] | "launching" | "launch-uncertain";
   status?: string; active?: boolean; questionPending?: boolean; updatedAt: number;
+  attention?: { kind: "question" | "approval" | "blocked"; label?: string; since: number };
 }
 function presence(): { list(): PresenceEntry[]; get(key: string): PresenceEntry | undefined; subscribe(listener: () => void): () => void /* + runtime internals */ };
 ```

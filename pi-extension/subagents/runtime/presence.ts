@@ -28,8 +28,17 @@ export interface PresenceEntry {
   status?: string;
   /** Client override of the active/waiting accent; default derived from `state`. */
   active?: boolean;
+  /** Kept for compatibility: a pending `question.json`. `attention` is the display source. */
   questionPending?: boolean;
+  /** The agent waits for the user (question or bash approval): never counted as active. */
+  attention?: PresenceAttention;
   updatedAt: number;
+}
+
+export interface PresenceAttention {
+  kind: "question" | "approval" | "blocked";
+  label?: string;
+  since: number;
 }
 
 export interface PresenceRegistry {
@@ -89,6 +98,7 @@ export function presence(): PresenceRegistry {
 
 /** Whether a row should use the "active" accent. */
 export function presenceActive(entry: PresenceEntry): boolean {
+  if (entry.attention) return false; // Waiting for the user outranks a client's `annotate({active: true})`.
   if (entry.active !== undefined) return entry.active;
   return entry.state === "launching" || entry.state === "starting" || entry.state === "active";
 }

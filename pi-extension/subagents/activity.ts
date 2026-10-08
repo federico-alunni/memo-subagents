@@ -24,6 +24,15 @@ export type SubagentActivityEvent =
   | "subagent_done"
   | "session_shutdown";
 
+export type SubagentAttentionKind = "question" | "approval" | "blocked";
+
+/** The child waits for the user (question dialog, bash approval, other `herdr:blocked` sources). */
+export interface SubagentAttention {
+  kind: SubagentAttentionKind;
+  label?: string;
+  since: number;
+}
+
 export interface SubagentActivityState {
   version: 1;
   runningChildId: string;
@@ -45,6 +54,8 @@ export interface SubagentActivityState {
   toolName?: string;
   toolStartedAt?: number;
   toolEndedAt?: number;
+  /** Present while the child waits for the user; independent of `phase`. */
+  attention?: SubagentAttention;
 }
 
 export type ActivityReadResult =
@@ -73,6 +84,8 @@ export interface SubagentActivityRecorder {
   callerPing(): void;
   subagentDone(): void;
   sessionShutdown(reason: SubagentShutdownReason): void;
+  /** Set (or clear with null) the attention field; written immediately. */
+  attention(attention: SubagentAttention | null): void;
 }
 
 const ACTIVITY_UPDATE_THROTTLE_MS = 500;
@@ -100,6 +113,22 @@ const KNOWN_EVENTS = new Set<SubagentActivityEvent>([
   "session_shutdown",
 ]);
 const MAX_ACTIVITY_STRING_LENGTH = 200;
+const KNOWN_ATTENTION = new Set<SubagentAttentionKind>(["question", "approval", "blocked"]);
+
+function validateOptionalAttention(object: Record<string, unknown>): string | null {
+  if (object.attention == null) return null;
+  const attention = requireObject(object.attention);
+  if (!attention) return "attention must be an object when present";
+  if (typeof attention.kind !== "string" || !KNOWN_ATTENTION.has(attention.kind as SubagentAttentionKind))
+    return "unknown attention kind";
+  return validateFiniteNumber(attention, "since") ?? validateOptionalActivityString(attention, "label");
+}
+
+/** One-line, bounded label (activity strings must not contain newlines). */
+function attentionLabel(label: string | undefined): string | undefined {
+  const line = label?.replace(/\s+/g, " ").trim();
+  return line ? line.slice(0, MAX_ACTIVITY_STRING_LENGTH) : undefined;
+}
 
 export function getSubagentActivityFile(artifactDir: string, runningChildId: string): string {
   return join(artifactDir, "subagent-activity", `${runningChildId}.json`);
@@ -179,6 +208,7 @@ function validateActivity(value: unknown, expectedRunningChildId: string): Activ
     validateOptionalActivityString(object, "messageEventType"),
     validateOptionalActivityString(object, "toolCallId"),
     validateOptionalActivityString(object, "toolName"),
+    validateOptionalAttention(object),
   ].find((error) => error != null);
   if (validationError) return invalidActivity(validationError);
 
@@ -242,6 +272,7 @@ function createNoopRecorder(): SubagentActivityRecorder {
     callerPing() {},
     subagentDone() {},
     sessionShutdown() {},
+    attention() {},
   };
 }
 
@@ -383,6 +414,7 @@ export function createSubagentActivityRecorder(params: {
       current.phase = "done";
       clearActiveState(current);
       delete current.waitingSince;
+      delete current.attention;
     }, "immediate");
     disable();
   }
@@ -393,6 +425,7 @@ export function createSubagentActivityRecorder(params: {
         current.phase = "starting";
         clearActiveState(current);
         delete current.waitingSince;
+        delete current.attention;
       }, "immediate");
     },
     input() {
@@ -507,6 +540,17 @@ export function createSubagentActivityRecorder(params: {
     sessionShutdown(reason) {
       if (reason === "quit") markDone("session_shutdown");
       else disable();
+    },
+    attention(attention) {
+      // Not an event of its own: latestEvent is kept so older readers still validate the file.
+      record(activity.latestEvent, (current) => {
+        if (!attention) {
+          delete current.attention;
+          return;
+        }
+        const label = attentionLabel(attention.label);
+        current.attention = { kind: attention.kind, ...(label ? { label } : {}), since: attention.since };
+      }, "immediate");
     },
   };
 }

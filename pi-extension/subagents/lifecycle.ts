@@ -1,4 +1,4 @@
-import type { ActivityReadResult, SubagentActivityScope } from "./activity.ts";
+import type { ActivityReadResult, SubagentActivityScope, SubagentAttention } from "./activity.ts";
 import type { CompletionResult } from "./completion.ts";
 
 export type HerdrAgentStatus =
@@ -33,9 +33,12 @@ export type TurnState =
   | { kind: "unknown" }
   | { kind: "starting"; observedAt: number }
   | { kind: "active"; startedAt: number; source: "activity" | "herdr" | "fallback"; activity?: ActivityDetail }
-  | { kind: "blocked"; startedAt: number }
+  | { kind: "blocked"; startedAt: number; reason: BlockedReason; label?: string }
   | { kind: "waiting"; startedAt: number }
   | { kind: "interrupted"; requestedAt: number; previousActivitySequence: number | null };
+
+/** Why a turn is blocked: the child's own attention (question/approval), or Herdr's status alone. */
+export type BlockedReason = "question" | "approval" | "herdr";
 
 export type ActivityHealth =
   | { kind: "unseen" }
@@ -56,6 +59,8 @@ export interface SubagentLifecycle {
   activityHealth: ActivityHealth;
   /** Latest optional Pi detail, independent of Herdr coarse turn state. */
   activityDetail: ActivityDetail | null;
+  /** Latest attention reported by the child's activity (it waits for the user). */
+  attention?: SubagentAttention | null;
   pane: PaneObservation;
   /** Durable across unavailable/missing observations. */
   hasWorked: boolean;
@@ -66,6 +71,8 @@ export interface SubagentLifecycle {
 export interface LifecycleProjection {
   kind: "starting" | "running" | "active" | "blocked" | "waiting" | "interrupted" | "stalled" | "finalizing" | "completed" | "failed";
   label?: string;
+  /** Only for `blocked`. */
+  reason?: BlockedReason;
   runtimeEndedAt?: number;
   stateDurationSince?: number;
 }
@@ -76,6 +83,7 @@ export function createLifecycle(startedAt: number): SubagentLifecycle {
     turn: { kind: "unknown" },
     activityHealth: { kind: "unseen" },
     activityDetail: null,
+    attention: null,
     pane: { kind: "unknown" },
     hasWorked: false,
     lastActivitySequence: null,
@@ -89,6 +97,88 @@ function isTerminal(process: ProcessState): boolean {
 
 function startedAt(process: ProcessState): number {
   return process.startedAt;
+}
+
+function attentionReason(attention: SubagentAttention): BlockedReason {
+  return attention.kind === "approval" ? "approval" : attention.kind === "question" ? "question" : "herdr";
+}
+
+/** Attention counts only for a live child whose pane is still there. */
+function liveAttention(lifecycle: SubagentLifecycle): SubagentAttention | null {
+  if (lifecycle.process.kind === "finalizing" || isTerminal(lifecycle.process)) return null;
+  if (lifecycle.pane.kind === "missing") return null;
+  return lifecycle.attention ?? null;
+}
+
+/** The turn Herdr's coarse status implies (blocked without attention = reason "herdr"). */
+function herdrTurn(
+  lifecycle: SubagentLifecycle,
+  agentStatus: HerdrAgentStatus,
+  hasWorked: boolean,
+  observedAt: number,
+): TurnState {
+  const current = lifecycle.turn;
+  if (agentStatus === "blocked") {
+    return hasWorked
+      ? {
+          kind: "blocked",
+          startedAt: current.kind === "blocked" && current.reason === "herdr" ? current.startedAt : observedAt,
+          reason: "herdr",
+        }
+      : { kind: "starting", observedAt: current.kind === "starting" ? current.observedAt : observedAt };
+  }
+  if (agentStatus === "working") {
+    return {
+      kind: "active",
+      startedAt: current.kind === "active" ? current.startedAt : observedAt,
+      source: "herdr",
+      ...(lifecycle.activityDetail ? { activity: lifecycle.activityDetail } : {}),
+    };
+  }
+  if (agentStatus === "done" || agentStatus === "idle") {
+    return hasWorked
+      ? { kind: "waiting", startedAt: current.kind === "waiting" ? current.startedAt : observedAt }
+      : { kind: "starting", observedAt: current.kind === "starting" ? current.observedAt : observedAt };
+  }
+  return current;
+}
+
+/**
+ * Precedence: interrupted > attention > Herdr status. While the child reports attention the turn is
+ * blocked with its reason; once it clears, an attention-blocked turn falls back on Pi detail or Herdr.
+ */
+function applyAttention(lifecycle: SubagentLifecycle, observedAt: number): SubagentLifecycle {
+  const turn = lifecycle.turn;
+  if (turn.kind === "interrupted") return lifecycle;
+  const attention = liveAttention(lifecycle);
+  if (attention) {
+    const reason = attentionReason(attention);
+    return {
+      ...lifecycle,
+      hasWorked: true,
+      turn: {
+        kind: "blocked",
+        startedAt: turn.kind === "blocked" && turn.reason === reason ? turn.startedAt : attention.since,
+        reason,
+        ...(attention.label ? { label: attention.label } : {}),
+      },
+    };
+  }
+  if (turn.kind !== "blocked" || turn.reason === "herdr") return lifecycle;
+  const detail = lifecycle.activityDetail;
+  if (detail?.kind === "scope")
+    return {
+      ...lifecycle,
+      turn: {
+        kind: "active",
+        startedAt: detail.since,
+        source: lifecycle.pane.kind === "present" ? "activity" : "fallback",
+        activity: detail,
+      },
+    };
+  if (lifecycle.pane.kind === "present" && lifecycle.pane.agentStatus !== "unknown")
+    return { ...lifecycle, turn: herdrTurn(lifecycle, lifecycle.pane.agentStatus, lifecycle.hasWorked, observedAt) };
+  return { ...lifecycle, turn: { kind: "waiting", startedAt: observedAt } };
 }
 
 export function observePaneInspection(
@@ -114,10 +204,11 @@ export function observePaneInspection(
   }
 
   if (inspection.kind === "missing") {
-    return {
+    // A child whose pane is gone no longer waits for anyone.
+    return applyAttention({
       ...lifecycle,
       pane: { kind: "missing", detectedAt: observedAt, ...(inspection.error ? { error: inspection.error } : {}) },
-    };
+    }, observedAt);
   }
 
   const agentStatus = inspection.agentStatus;
@@ -143,35 +234,12 @@ export function observePaneInspection(
     return { ...lifecycle, process, pane, hasWorked };
   }
 
-  let turn: TurnState = lifecycle.turn;
-  if (agentStatus === "blocked") {
-    turn = hasWorked
-      ? {
-          kind: "blocked",
-          startedAt: lifecycle.turn.kind === "blocked" ? lifecycle.turn.startedAt : observedAt,
-        }
-      : {
-          kind: "starting",
-          observedAt: lifecycle.turn.kind === "starting" ? lifecycle.turn.observedAt : observedAt,
-        };
-  } else if (agentStatus === "working") {
-    turn = {
-      kind: "active",
-      startedAt: lifecycle.turn.kind === "active" ? lifecycle.turn.startedAt : observedAt,
-      source: "herdr",
-      ...(lifecycle.activityDetail ? { activity: lifecycle.activityDetail } : {}),
-    };
-  } else if (agentStatus === "done" || agentStatus === "idle") {
-    turn = hasWorked
-      ? {
-          kind: "waiting",
-          startedAt: lifecycle.turn.kind === "waiting" ? lifecycle.turn.startedAt : observedAt,
-        }
-      : {
-          kind: "starting",
-          observedAt: lifecycle.turn.kind === "starting" ? lifecycle.turn.observedAt : observedAt,
-        };
-  } else if (agentStatus === "unknown") {
+  // The child's own attention outranks Herdr's coarse status (which may lag or read the screen).
+  if (liveAttention(lifecycle)) {
+    return applyAttention({ ...lifecycle, process, pane, hasWorked }, observedAt);
+  }
+
+  if (agentStatus === "unknown") {
     // Keep existing process/turn; only record observation.
     return { ...lifecycle, process, pane };
   }
@@ -179,7 +247,7 @@ export function observePaneInspection(
   return {
     ...lifecycle,
     process,
-    turn,
+    turn: herdrTurn(lifecycle, agentStatus, hasWorked, observedAt),
     pane,
     hasWorked,
   };
@@ -231,14 +299,19 @@ export function observeActivity(
     };
   }
 
+  // A stale snapshot never changes the attention already seen.
+  const stale = lifecycle.lastActivitySequence != null && read.activity.sequence < lifecycle.lastActivitySequence;
+  const attention = stale ? lifecycle.attention ?? null : read.activity.attention ?? null;
+
   if (!detail) {
     // Reading succeeded but no enrichable detail; clear any stale label.
-    return {
+    return applyAttention({
       ...lifecycle,
       activityDetail: null,
+      attention,
       activityHealth: { kind: "healthy", observedAt },
       lastActivitySequence: Math.max(lifecycle.lastActivitySequence ?? -1, read.activity.sequence),
-    };
+    }, observedAt);
   }
 
   let resumesInterruptedTurn = false;
@@ -290,14 +363,15 @@ export function observeActivity(
     }
   }
 
-  return {
+  return applyAttention({
     ...lifecycle,
     process,
     turn,
     activityDetail: detail,
+    attention,
     activityHealth: { kind: "healthy", observedAt },
     lastActivitySequence: detail.sequence,
-  };
+  }, observedAt);
 }
 
 export function markProcessRunning(
@@ -394,8 +468,11 @@ export function projectLifecycle(lifecycle: SubagentLifecycle, now: number): Lif
   if (process.kind === "failed") return { kind: "failed", label: process.error, runtimeEndedAt: process.completedAt };
 
   // Pi activity is optional enrichment. Only authoritative Herdr inspection
-  // unavailability may produce a stalled projection.
+  // unavailability may produce a stalled projection, never while the child
+  // itself reports that it waits for the user.
+  const childWaits = lifecycle.turn.kind === "blocked" && lifecycle.turn.reason !== "herdr";
   if (
+    !childWaits &&
     lifecycle.pane.kind === "read-error" &&
     now - lifecycle.pane.firstFailedAt >= 60_000
   ) {
@@ -414,7 +491,12 @@ export function projectLifecycle(lifecycle: SubagentLifecycle, now: number): Lif
       return { kind: "active", label: turn.source === "herdr" ? "agent working" : "agent active", stateDurationSince: turn.startedAt };
     }
     case "blocked":
-      return { kind: "blocked", stateDurationSince: turn.startedAt };
+      return {
+        kind: "blocked",
+        reason: turn.reason,
+        ...(turn.label ? { label: turn.label } : {}),
+        stateDurationSince: turn.startedAt,
+      };
     case "waiting":
       return { kind: "waiting", stateDurationSince: turn.startedAt };
     case "starting":
@@ -426,15 +508,19 @@ export function projectLifecycle(lifecycle: SubagentLifecycle, now: number): Lif
 
 export type LifecycleTransition = "stalled" | "recovered" | null;
 
+/**
+ * Steer-worthy transitions. `blocked` never produces one (the parent is not told that a child waits
+ * for the user): callers keep the previous kind while blocked, see `transitionBaseline`.
+ */
 export function lifecycleTransition(
   previous: LifecycleProjection["kind"] | undefined,
   next: LifecycleProjection["kind"],
 ): LifecycleTransition {
+  if (next === "blocked") return null;
   if (previous !== "stalled" && next === "stalled") return "stalled";
   if (
     previous === "stalled" &&
     (next === "active" ||
-      next === "blocked" ||
       next === "waiting" ||
       next === "interrupted" ||
       next === "running" ||
@@ -443,6 +529,14 @@ export function lifecycleTransition(
     return "recovered";
   }
   return null;
+}
+
+/** Kind to compare the next projection with: `blocked` keeps the kind seen before it. */
+export function transitionBaseline(
+  previous: LifecycleProjection["kind"] | undefined,
+  next: LifecycleProjection["kind"],
+): LifecycleProjection["kind"] | undefined {
+  return next === "blocked" ? previous : next;
 }
 
 export function formatLifecycleTransitionLine(

@@ -15,15 +15,51 @@ import type { Boot, ChildPolicy } from "../protocol.ts";
 import { ChildRuntime } from "./runtime.ts";
 import type { QuestionEvent } from "pi-memo-question/events";
 import { bashDecision, createBashApprovals, readonlyBlockReason } from "./bash-policy.ts";
-import type { BashAskContext } from "./bash-policy.ts";
+import type { BashAskContext, HerdrBlockedEvent } from "./bash-policy.ts";
 import { CHILD_ENV } from "./env.ts";
 import { createSubagentActivityRecorder } from "../../activity.ts";
+import type { SubagentAttention, SubagentAttentionKind } from "../../activity.ts";
+import { createHerdrReporter } from "./herdr-reporter.ts";
 import { installIdentityWidget } from "./identity-widget.ts";
 
 export { CHILD_ENV };
 
 /** pi-memo-question's event (pi-memo-question/events QUESTION_EVENT). */
 export const QUESTION_EVENT = "memo-question";
+
+/** The one "waiting for the user" signal of a child: `{active, label?, kind?}` (see docs/runtime.md). */
+export const HERDR_BLOCKED_EVENT = "herdr:blocked";
+
+/**
+ * Counts open `herdr:blocked` waits (they may overlap) and reports the current attention: the latest
+ * kind/label while at least one wait is open, since the first one opened; null once all are closed.
+ */
+export function createAttentionTracker(
+  onChange: (attention: SubagentAttention | null) => void,
+  now: () => number = Date.now,
+) {
+  let open = 0;
+  let current: SubagentAttention | null = null;
+  return (event: unknown): void => {
+    const e = event as { active?: unknown; label?: unknown; kind?: unknown } | undefined;
+    if (e?.active) {
+      open += 1;
+      const kind: SubagentAttentionKind =
+        e.kind === undefined ? "question" : e.kind === "question" || e.kind === "approval" ? e.kind : "blocked";
+      current = {
+        kind,
+        ...(typeof e.label === "string" && e.label ? { label: e.label } : {}),
+        since: current?.since ?? now(),
+      };
+    } else {
+      if (open === 0) return;
+      open -= 1;
+      if (open > 0) return;
+      current = null;
+    }
+    onChange(current);
+  };
+}
 
 /**
  * Turns `question` tool events into `question.json` records, in order, so the parent sees the pending
@@ -69,8 +105,8 @@ export function childToolCall(
  * The child's `tool_call` guard: `childToolCall`, plus the bash question for policies with `bashAsk`
  * (user-driven read-only children). "Always" answers are remembered by this guard, i.e. per child process.
  */
-export function createChildToolGuard() {
-  const approvals = createBashApprovals();
+export function createChildToolGuard(emitBlocked?: (event: HerdrBlockedEvent) => void) {
+  const approvals = createBashApprovals(emitBlocked);
   return async (
     policy: ChildPolicy | undefined,
     toolName: string,
@@ -123,12 +159,20 @@ function realCwd(cwd: string): string {
   }
 }
 
-/** Boot policy read synchronously at load time: delegated tools must be registered before session_start. */
-function bootPolicy(): ChildPolicy | undefined {
+/** boot.json read synchronously at load time: delegated tools must be registered before session_start. */
+function bootRecord(): Boot | undefined {
   const dir = process.env[CHILD_ENV.protocolDir];
   if (!dir) return undefined;
   try {
-    const boot = JSON.parse(readFileSync(join(dir, "boot.json"), "utf8")) as Boot;
+    return JSON.parse(readFileSync(join(dir, "boot.json"), "utf8")) as Boot;
+  } catch {
+    return undefined;
+  }
+}
+
+function bootPolicy(boot: Boot | undefined): ChildPolicy | undefined {
+  if (!boot) return undefined;
+  try {
     const policy = normalizePolicy(boot.policy);
     return validPolicy(policy) ? policy : undefined;
   } catch {
@@ -139,7 +183,8 @@ function bootPolicy(): ChildPolicy | undefined {
 export default function childExtension(pi: ExtensionAPI): void {
   let runtime: ChildRuntime | undefined;
   let boot: Boot | undefined;
-  const declared = bootPolicy();
+  const declaredBoot = bootRecord();
+  const declared = bootPolicy(declaredBoot);
   const protocolDir = process.env[CHILD_ENV.protocolDir];
   // Display-only activity snapshots for the parent's widget/stall detection.
   const recorder = createSubagentActivityRecorder({
@@ -147,7 +192,16 @@ export default function childExtension(pi: ExtensionAPI): void {
     activityFile: protocolDir ? join(protocolDir, "activity.json") : undefined,
   });
   const delivery = createTaskDelivery((text, options) => pi.sendUserMessage(text, options));
-  const toolGuard = createChildToolGuard();
+  const toolGuard = createChildToolGuard((event) => pi.events.emit(HERDR_BLOCKED_EVENT, event));
+  // Isolated children (-ne) lack Herdr's pi integration: report the pane's agent state directly.
+  const herdr = declared ? createHerdrReporter({ isolation: declaredBoot?.isolation }) : undefined;
+  pi.events.on(
+    HERDR_BLOCKED_EVENT,
+    createAttentionTracker((attention) => {
+      recorder.attention(attention);
+      herdr?.attention(attention ?? undefined);
+    }),
+  );
   // Identity widget (and its Ctrl+J) only for user-driven children: workflow children keep pi's keys.
   const widget = declared?.userInput === "allowed"
     ? installIdentityWidget(pi, () =>
@@ -256,6 +310,7 @@ export default function childExtension(pi: ExtensionAPI): void {
         pi.getActiveTools().filter((tool) => !boot!.policy.denyTools.includes(tool)),
     );
     await runtime.start();
+    herdr?.agentActive(!ctx.isIdle());
     widget?.show(ctx);
   });
   pi.on("tool_call", (event, ctx) => {
@@ -284,6 +339,7 @@ export default function childExtension(pi: ExtensionAPI): void {
   pi.on("before_agent_start", () => recorder.beforeAgentStart());
   pi.on("agent_start", () => {
     recorder.agentStart();
+    herdr?.agentActive(true);
     delivery.agentStarted();
   });
   pi.on("turn_start", (event) => recorder.turnStart((event as any).turnIndex));
@@ -307,12 +363,16 @@ export default function childExtension(pi: ExtensionAPI): void {
     recorder.agentEndWaiting();
     runtime?.agentEnd(event.messages);
   });
-  pi.on("agent_settled", async () => {
+  pi.on("agent_settled", async (_event, ctx) => {
+    if (ctx.isIdle()) herdr?.agentActive(false);
     await runtime?.agentSettled();
   });
-  pi.on("session_shutdown", (event) => {
+  pi.on("session_shutdown", async (event) => {
     recorder.sessionShutdown((event as any).reason);
     runtime?.dispose();
     runtime = undefined;
+    // Bounded: the release is best effort and must not hold the child's exit.
+    if ((event as any).reason === "quit" && herdr)
+      await Promise.race([herdr.release(), new Promise((resolve) => setTimeout(resolve, 1500).unref?.())]);
   });
 }

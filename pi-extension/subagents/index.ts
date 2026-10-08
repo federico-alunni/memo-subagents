@@ -75,6 +75,7 @@ import {
   createLifecycle,
   formatLifecycleTransitionLine,
   lifecycleTransition,
+  transitionBaseline,
   markCompleted,
   markCompletionDetected,
   markDelivery,
@@ -736,6 +737,8 @@ function formatElapsedMMSS(startTime: number, endTime = Date.now()): string {
 
 const ACTIVE_ACCENT = "\x1b[38;2;77;163;255m";
 const OPEN_ACCENT = "\x1b[38;2;214;158;46m";
+/** A box with at least one agent waiting for the user (question, bash approval, Herdr blocked). */
+const ATTENTION_ACCENT = "\x1b[38;2;214;92;214m";
 const RST = "\x1b[0m";
 
 /**
@@ -805,7 +808,8 @@ function formatLifecycleWidgetLabel(
   if (projection.kind === "active") return projection.label
     ? ` active · ${projection.label}${duration} `
     : ` active${duration} `;
-  if (projection.kind === "blocked") return ` blocked${duration} `;
+  if (projection.kind === "blocked")
+    return ` ${formatWaitStatus(projection.reason ?? "herdr", projection.stateDurationSince, now)} `;
   if (projection.kind === "running") return " running… ";
   if (projection.kind === "waiting") return ` waiting${duration} `;
   if (projection.kind === "interrupted") return ` interrupted${duration} `;
@@ -836,16 +840,59 @@ const PRESENCE_STATE_LABEL: Record<PresenceEntry["state"], string> = {
   stopped: "stopped",
 };
 
-/** One runtime agent row: elapsed, label, model|thinking · status (client annotation first). */
+/**
+ * The one wording of "waiting for the user", for both row types (subagent-tool lifecycle rows and
+ * runtime presence rows): `❓ question 12s`, `❓ approval 3s`, `blocked 1m` (Herdr only).
+ */
+function formatWaitStatus(
+  kind: "question" | "approval" | "herdr" | "blocked",
+  since: number | undefined,
+  now: number,
+): string {
+  const duration = since == null ? "" : ` ${formatElapsedDuration(now - since)}`;
+  if (kind === "question" || kind === "approval") return `❓ ${kind}${duration}`;
+  return `blocked${duration}`;
+}
+
+/** Status text of a runtime row: waiting for the user, else the client annotation, else the state. */
+function presenceStatus(entry: PresenceEntry, now: number): string {
+  if (entry.attention) return formatWaitStatus(entry.attention.kind, entry.attention.since, now);
+  if (entry.questionPending) return "❓ question";
+  return entry.status ?? PRESENCE_STATE_LABEL[entry.state] ?? entry.state;
+}
+
+type RowCount = "active" | "question" | "open";
+
+function presenceRowCount(entry: PresenceEntry): RowCount {
+  if (entry.attention || entry.questionPending) return "question";
+  return presenceActive(entry) ? "active" : "open";
+}
+
+function lifecycleRowCount(projection: LifecycleProjection): RowCount {
+  if (projection.kind === "blocked") return "question";
+  return projection.kind === "active" || projection.kind === "starting" || projection.kind === "running"
+    ? "active"
+    : "open";
+}
+
+/** Box header `N active · N question · N open` (zero parts omitted); accent: attention > active > open. */
+function widgetHeader(counts: RowCount[]): { info: string; accent: string } {
+  const n = (kind: RowCount) => counts.filter((count) => count === kind).length;
+  const [active, question, open] = [n("active"), n("question"), n("open")];
+  const info = [active && `${active} active`, question && `${question} question`, open && `${open} open`]
+    .filter(Boolean)
+    .join(" · ") || "0 open";
+  const accent = question > 0 ? ATTENTION_ACCENT : active > 0 ? ACTIVE_ACCENT : OPEN_ACCENT;
+  return { info, accent };
+}
+
+/** One runtime agent row: elapsed, label, model|thinking · status. */
 function presenceRowLine(entry: PresenceEntry, width: number, accent: string, now: number): string {
   const elapsed = formatElapsedMMSS(entry.startedAt, now);
   const selected = entry.paneId && paneSelector.state.selected === entry.paneId ? "▶" : " ";
   const left = ` ${selected} ${elapsed}  ${entry.label} `;
   const modelId = entry.model.includes("/") ? entry.model.slice(entry.model.indexOf("/") + 1) : entry.model;
-  const status = entry.questionPending
-    ? `❓ ${entry.status ?? "question"}`
-    : entry.status ?? PRESENCE_STATE_LABEL[entry.state] ?? entry.state;
-  return borderLine(left, ` ${modelId}|${entry.thinking} · ${status} `, width, accent);
+  return borderLine(left, ` ${modelId}|${entry.thinking} · ${presenceStatus(entry, now)} `, width, accent);
 }
 
 const SELECTOR_HINT = " /subagent · Ctrl+Alt+X: select visible agent ";
@@ -859,10 +906,7 @@ function renderPresenceGroupLines(entries: PresenceEntry[], width: number, hint 
   }
   const lines: string[] = [];
   for (const [group, rows] of groups) {
-    const active = rows.filter(presenceActive).length;
-    const open = rows.length - active;
-    const info = [active && `${active} active`, open && `${open} open`].filter(Boolean).join(" · ");
-    const accent = active > 0 ? ACTIVE_ACCENT : OPEN_ACCENT;
+    const { info, accent } = widgetHeader(rows.map(presenceRowCount));
     lines.push(borderTop(group, info, width, accent));
     for (const row of rows) lines.push(presenceRowLine(row, width, accent, now));
     if (hint && group === [...groups.keys()].at(-1)) lines.push(borderLine(SELECTOR_HINT, "", width, accent));
@@ -896,19 +940,10 @@ function renderSubagentWidgetLines(
 ): string[] {
   const now = Date.now();
   const rendered = agents.map((agent) => ({ agent, projection: projectLifecycle(ensureLifecycle(agent), now) }));
-  const legacyActiveCount = rendered.filter(({ projection }) =>
-    projection.kind === "active" ||
-    projection.kind === "starting" ||
-    projection.kind === "running" ||
-    projection.kind === "blocked"
-  ).length;
-  const runtimeActive = runtimeRows.filter(presenceActive).length;
-  const activeCount = legacyActiveCount + runtimeActive;
-  const openCount = agents.length + runtimeRows.length - activeCount;
-  const info = activeCount > 0
-    ? openCount > 0 ? `${activeCount} active · ${openCount} open` : `${activeCount} active`
-    : `${openCount} open`;
-  const accent = activeCount > 0 ? ACTIVE_ACCENT : OPEN_ACCENT;
+  const { info, accent } = widgetHeader([
+    ...rendered.map(({ projection }) => lifecycleRowCount(projection)),
+    ...runtimeRows.map(presenceRowCount),
+  ]);
 
   const lines: string[] = [borderTop("Subagents", info, width, accent)];
 
@@ -1089,7 +1124,7 @@ function selectorChoices(): SelectorChoice[] {
   for (const entry of presence().list()) {
     if (!entry.paneId || !selectable.has(entry.paneId) || own.some((agent) => agent.surface === entry.paneId))
       continue;
-    const status = entry.questionPending ? "❓ question" : entry.status ?? PRESENCE_STATE_LABEL[entry.state] ?? entry.state;
+    const status = presenceStatus(entry, Date.now());
     choices.push({
       paneId: entry.paneId,
       name: entry.label,
@@ -1201,7 +1236,9 @@ function startStatusRefresh(pi: ExtensionAPI) {
       if (running.lastProjectedKind !== projection.kind) {
         shouldRefreshWidget = true;
       }
-      running.lastProjectedKind = projection.kind;
+      // Blocked never steers and keeps the kind seen before it (a stalled child that asks the user
+      // is reported recovered only when it moves on).
+      running.lastProjectedKind = transitionBaseline(running.lastProjectedKind, projection.kind);
 
       // Interactive subagents (long-running, user-driven) intentionally don't
       // wake the parent session on stalled/recovered transitions — the user is

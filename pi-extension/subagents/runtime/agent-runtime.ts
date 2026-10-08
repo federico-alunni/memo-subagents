@@ -51,7 +51,7 @@ import type { Runner, RunResult } from "./runner.ts";
 import { presence } from "./presence.ts";
 import { readSubagentActivityFile } from "../activity.ts";
 import type { ActivityReadResult } from "../activity.ts";
-import type { PresenceState } from "./presence.ts";
+import type { PresenceAttention, PresenceState } from "./presence.ts";
 import { CHILD_ENV } from "./child/env.ts";
 import { resolveQuestionExtension } from "./question-extension.ts";
 import {
@@ -1296,7 +1296,7 @@ export class AgentRuntime {
       } catch (e) {
         throw new RuntimeError("dispatch_uncertain", String(e), next);
       }
-      presence().update(h.protocolDir, { state: "starting", questionPending: false });
+      presence().update(h.protocolDir, { state: "starting", questionPending: false, attention: undefined });
       this.refreshControl(next);
       return next; // Persist this handle before observing. No replay on timeout.
     });
@@ -1521,7 +1521,28 @@ export class AgentRuntime {
     registry.update(h.protocolDir, {
       state: o.kind as PresenceState,
       questionPending: o.question?.pending === true,
+      attention: this.attention(h, o, registry.get(h.protocolDir)?.attention),
     });
+  }
+  /**
+   * Display only: the child waits for the user. `activity.json` attention first (questions and bash
+   * approvals), a pending `question.json` as fallback; none once the child is no longer live.
+   */
+  private attention(
+    h: AgentHandle,
+    o: Observation,
+    previous: PresenceAttention | undefined,
+  ): PresenceAttention | undefined {
+    if (o.kind !== "starting" && o.kind !== "active" && o.kind !== "settled") return undefined;
+    const read = this.activity(h);
+    if (read.ok && read.activity.attention) return { ...read.activity.attention };
+    if (o.question?.pending !== true) return undefined;
+    const text = o.question.text.replace(/\s+/g, " ").trim().slice(0, 200);
+    return {
+      kind: "question",
+      ...(text ? { label: text } : {}),
+      since: previous?.kind === "question" ? previous.since : Date.now(),
+    };
   }
   private async observeOnce(h: AgentHandle): Promise<Observation> {
     this.checkHandle(h);

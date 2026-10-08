@@ -183,3 +183,50 @@ test("child tool guard: asks only with bashAsk; workflow (takeover) policies nev
   // No policy at all: blocked.
   assert.equal((await guard(undefined, "bash", { command: "ls" }, never.ctx))?.block, true);
 });
+
+test("approvals: every open bash question is bracketed by herdr:blocked, released on answer, error and abort", async () => {
+  const events: unknown[] = [];
+  const approvals = createBashApprovals((event) => events.push(event));
+  const answered = fakeUi([BASH_ASK_OPTIONS.once]);
+  assert.equal(await approvals.check(ASK, "npm run build", answered.ctx), undefined);
+  assert.deepEqual(events, [{ active: true, label: "npm run build", kind: "approval" }, { active: false }]);
+  // The dialog throws: still released, and the call is blocked.
+  events.length = 0;
+  const throwing = { hasUI: true, ui: { select: async () => { throw new Error("tui gone"); } } };
+  assert.equal((await approvals.check(ASK, "npm run lint", throwing))?.block, true);
+  assert.deepEqual(events, [{ active: true, label: "npm run lint", kind: "approval" }, { active: false }]);
+  // Aborted while the dialog is open: released once the dialog returns.
+  events.length = 0;
+  const controller = new AbortController();
+  const aborting = {
+    hasUI: true,
+    signal: controller.signal,
+    ui: {
+      select: async () => {
+        assert.deepEqual(events, [{ active: true, label: "npm run dev", kind: "approval" }]);
+        controller.abort();
+        return BASH_ASK_OPTIONS.once;
+      },
+    },
+  };
+  assert.equal((await approvals.check(ASK, "npm run dev", aborting))?.block, true);
+  assert.deepEqual(events.at(-1), { active: false });
+  assert.equal(events.length, 2);
+  // Nothing asked, nothing emitted; a throwing listener never decides the call.
+  events.length = 0;
+  assert.equal((await approvals.check(ASK, "cat README.md", answered.ctx)), undefined);
+  assert.equal((await approvals.check(ASK, "npm run x | tee y", answered.ctx))?.block, true);
+  assert.deepEqual(events, []);
+  const noisy = createBashApprovals(() => {
+    throw new Error("listener");
+  });
+  assert.equal(await noisy.check(ASK, "npm run build", fakeUi([BASH_ASK_OPTIONS.once]).ctx), undefined);
+});
+
+test("child tool guard passes the emit function to the bash question", async () => {
+  const events: unknown[] = [];
+  const guard = createChildToolGuard((event) => events.push(event));
+  const policy = { tools: ["bash"], denyTools: [], bash: "readonly", bashAllow: [], bashAsk: true, question: false, delegatedTools: [], userInput: "allowed", exit: "parent" } as unknown as ChildPolicy;
+  assert.equal(await guard(policy, "bash", { command: "npm run build" }, fakeUi([BASH_ASK_OPTIONS.once]).ctx), undefined);
+  assert.equal(events.length, 2);
+});

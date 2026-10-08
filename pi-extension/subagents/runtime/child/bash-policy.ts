@@ -61,11 +61,17 @@ export interface BashAskContext {
   signal?: AbortSignal;
 }
 
+/** `herdr:blocked` payload: the child waits for the user while `active` (see docs/runtime.md). */
+export type HerdrBlockedEvent =
+  | { active: true; label?: string; kind?: string }
+  | { active: false };
+
 /**
  * Per-process bash approvals: "always" prefixes and the question flow. Questions are asked one at a
  * time, and a waiting call is decided again after the previous answer (an "always" may cover it).
+ * `emitBlocked` (the extension's `pi.events.emit("herdr:blocked", …)`) brackets every open dialog.
  */
-export function createBashApprovals() {
+export function createBashApprovals(emitBlocked: (event: HerdrBlockedEvent) => void = () => {}) {
   const prefixes: string[] = [];
   let queue: Promise<unknown> = Promise.resolve();
 
@@ -77,6 +83,14 @@ export function createBashApprovals() {
     if (!ctx.hasUI || ctx.signal?.aborted)
       return { block: true, reason: readonlyBlockReason(policy, prefixes) };
     let choice: string | undefined;
+    const emit = (event: HerdrBlockedEvent) => {
+      try {
+        emitBlocked(event);
+      } catch {
+        // Display only: a listener failure never decides the bash call.
+      }
+    };
+    emit({ active: true, label: command, kind: "approval" });
     try {
       choice = await ctx.ui.select(
         bashAskTitle(command, prefix),
@@ -85,6 +99,8 @@ export function createBashApprovals() {
       );
     } catch {
       choice = undefined;
+    } finally {
+      emit({ active: false });
     }
     if (ctx.signal?.aborted) choice = undefined;
     if (choice === BASH_ASK_OPTIONS.once) return undefined;

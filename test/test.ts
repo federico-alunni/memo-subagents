@@ -51,6 +51,7 @@ import {
 import {
   createLifecycle,
   lifecycleTransition,
+  transitionBaseline,
   markCompleted,
   markCompletionDetected,
   markFailed,
@@ -1420,6 +1421,56 @@ describe("lifecycle.ts", () => {
     ...overrides,
   });
 
+  it("attention blocks the turn: interrupted > attention > Herdr status", () => {
+    const question = { kind: "question" as const, label: "Push?", since: 2_500 };
+    let lifecycle = observePaneInspection(createLifecycle(1_000), { kind: "present", observedAt: 2_000, agentStatus: "working" }, 2_000);
+    lifecycle = observeLifecycleActivity(lifecycle, { ok: true, activity: activity({ sequence: 2, updatedAt: 2_500, activeScope: "tool", toolActive: true, toolName: "question", attention: question }) }, 2_600);
+    assert.deepEqual(projectLifecycle(lifecycle, 4_000), { kind: "blocked", reason: "question", label: "Push?", stateDurationSince: 2_500 });
+    // Herdr still says working (screen detection, lag): the child's attention wins.
+    lifecycle = observePaneInspection(lifecycle, { kind: "present", observedAt: 3_000, agentStatus: "working" }, 3_000);
+    assert.equal(projectLifecycle(lifecycle, 4_000).reason, "question");
+    // A stale snapshot does not clear it.
+    lifecycle = observeLifecycleActivity(lifecycle, { ok: true, activity: activity({ sequence: 1 }) }, 3_100);
+    assert.equal(projectLifecycle(lifecycle, 4_000).kind, "blocked");
+    // Approval: another reason.
+    lifecycle = observeLifecycleActivity(lifecycle, { ok: true, activity: activity({ sequence: 3, updatedAt: 3_200, activeScope: "tool", toolActive: true, toolName: "bash", attention: { kind: "approval", label: "npm run build", since: 3_200 } }) }, 3_200);
+    assert.deepEqual(projectLifecycle(lifecycle, 4_000), { kind: "blocked", reason: "approval", label: "npm run build", stateDurationSince: 3_200 });
+    // Answered: back to the Pi detail.
+    lifecycle = observeLifecycleActivity(lifecycle, { ok: true, activity: activity({ sequence: 4, updatedAt: 3_300, activeScope: "tool", toolActive: true, toolName: "bash", toolStartedAt: 3_300 }) }, 3_300);
+    assert.equal(projectLifecycle(lifecycle, 4_000).kind, "active");
+    // Interrupt outranks attention until newer activity arrives.
+    lifecycle = markInterruptRequested(lifecycle, 3_400);
+    lifecycle = observeLifecycleActivity(lifecycle, { ok: true, activity: activity({ sequence: 4, updatedAt: 3_300, attention: question }) }, 3_450);
+    assert.equal(projectLifecycle(lifecycle, 4_000).kind, "interrupted");
+    lifecycle = observeLifecycleActivity(lifecycle, { ok: true, activity: activity({ sequence: 5, updatedAt: 3_500, activeScope: "tool", toolActive: true, toolName: "question", attention: { ...question, since: 3_500 } }) }, 3_500);
+    assert.equal(projectLifecycle(lifecycle, 4_000).reason, "question");
+  });
+
+  it("Herdr blocked without attention stays blocked (reason herdr); attention cleared falls back on Herdr", () => {
+    let lifecycle = observePaneInspection(createLifecycle(1_000), { kind: "present", observedAt: 2_000, agentStatus: "working" }, 2_000);
+    lifecycle = observePaneInspection(lifecycle, { kind: "present", observedAt: 3_000, agentStatus: "blocked" }, 3_000);
+    assert.deepEqual(projectLifecycle(lifecycle, 4_000), { kind: "blocked", reason: "herdr", stateDurationSince: 3_000 });
+    // Attention while Herdr is idle; once cleared without Pi detail, Herdr's idle means waiting.
+    lifecycle = observePaneInspection(lifecycle, { kind: "present", observedAt: 3_100, agentStatus: "idle" }, 3_100);
+    lifecycle = observeLifecycleActivity(lifecycle, { ok: true, activity: activity({ sequence: 2, phase: "waiting", activeScope: undefined, attention: { kind: "question", since: 3_200 } }) }, 3_200);
+    assert.equal(projectLifecycle(lifecycle, 4_000).reason, "question");
+    lifecycle = observeLifecycleActivity(lifecycle, { ok: true, activity: activity({ sequence: 3, phase: "waiting", activeScope: undefined }) }, 3_300);
+    assert.equal(projectLifecycle(lifecycle, 4_000).kind, "waiting");
+  });
+
+  it("attention is ignored once the pane is gone or the child finished, and never becomes stalled", () => {
+    const attention = { kind: "question" as const, since: 2_000 };
+    let lifecycle = observeLifecycleActivity(createLifecycle(1_000), { ok: true, activity: activity({ attention }) }, 2_000);
+    assert.equal(projectLifecycle(lifecycle, 3_000).kind, "blocked");
+    // Herdr unreadable for minutes: still waiting for the user, not stalled.
+    lifecycle = observePaneInspection(lifecycle, { kind: "unavailable", error: "socket" }, 3_000);
+    assert.equal(projectLifecycle(lifecycle, 3_000 + 120_000).kind, "blocked");
+    const missing = observePaneInspection(lifecycle, { kind: "missing" }, 4_000);
+    assert.notEqual(projectLifecycle(missing, 5_000).kind, "blocked");
+    const done = markCompletionDetected(lifecycle, { reason: "done", exitCode: 0 } as any, 4_000);
+    assert.equal(projectLifecycle(observeLifecycleActivity(done, { ok: true, activity: activity({ sequence: 9, attention }) }, 4_100), 5_000).kind, "finalizing");
+  });
+
   it("interrupts only the turn and keeps process runtime open", () => {
     const running = observeLifecycleActivity(createLifecycle(1_000), { ok: true, activity: activity() }, 2_000);
     const interrupted = markInterruptRequested(running, 3_000);
@@ -1467,7 +1518,13 @@ describe("lifecycle.ts", () => {
     assert.equal(lifecycleTransition("active", "stalled"), "stalled");
     assert.equal(lifecycleTransition("stalled", "waiting"), "recovered");
     assert.equal(lifecycleTransition("stalled", "active"), "recovered");
-    assert.equal(lifecycleTransition("stalled", "blocked"), "recovered");
+    // Waiting for the user never steers the parent.
+    assert.equal(lifecycleTransition("stalled", "blocked"), null);
+    assert.equal(lifecycleTransition("active", "blocked"), null);
+    // While blocked the previous kind is kept: stalled -> blocked -> active reports recovered once.
+    assert.equal(transitionBaseline("stalled", "blocked"), "stalled");
+    assert.equal(lifecycleTransition(transitionBaseline("stalled", "blocked"), "active"), "recovered");
+    assert.equal(transitionBaseline("active", "waiting"), "waiting");
     assert.equal(lifecycleTransition("stalled", "interrupted"), "recovered");
     assert.equal(lifecycleTransition("waiting", "active"), null);
   });
@@ -2363,6 +2420,44 @@ describe("subagent status renderer", () => {
 });
 
 describe("subagents widget rendering", () => {
+  it("waiting rows: one wording for both row types, counted as question, attention accent", () => {
+    const testApi = (subagentsModule as any).__test__;
+    const originalNow = Date.now;
+    Date.now = () => 65_000;
+    try {
+      const running = { kind: "running" as const, startedAt: 5_000, confirmedAt: 5_000 };
+      const agent = (id: string, turn: any) => ({
+        id, name: id, task: "", surface: `s-${id}`, startTime: 5_000, sessionFile: id, interactive: false,
+        lifecycle: { ...createLifecycle(5_000), process: running, hasWorked: true, turn },
+      });
+      const lines = testApi.renderSubagentWidgetLines([
+        agent("asker", { kind: "blocked", startedAt: 53_000, reason: "question" }),
+        agent("builder", { kind: "blocked", startedAt: 62_000, reason: "approval", label: "npm run build" }),
+        agent("screen", { kind: "blocked", startedAt: 5_000, reason: "herdr" }),
+        agent("worker", { kind: "active", startedAt: 60_000, source: "herdr" }),
+      ], 90, [
+        { key: "r", group: undefined, label: "planner", model: "p/m", thinking: "low", startedAt: 5_000, state: "active", active: true, attention: { kind: "approval", since: 64_000 }, updatedAt: 0 },
+        { key: "o", label: "idle", model: "p/m", thinking: "low", startedAt: 5_000, state: "settled", updatedAt: 0 },
+      ]);
+      assert.match(lines[0], /1 active · 4 question · 1 open/);
+      assert.ok(lines[0].includes("\x1b[38;2;214;92;214m"));
+      assert.match(lines[1], /❓ question 12s/);
+      assert.match(lines[2], /❓ approval 3s/);
+      assert.match(lines[3], /blocked 1m/);
+      assert.ok(!lines[3].includes("❓"));
+      assert.match(lines[5], /m\|low · ❓ approval 1s/);
+      // Without waiting rows the accent is active, then open.
+      const active = testApi.renderSubagentWidgetLines([agent("worker", { kind: "active", startedAt: 60_000, source: "herdr" })], 90);
+      assert.match(active[0], /1 active/);
+      assert.ok(active[0].includes("\x1b[38;2;77;163;255m"));
+      const open = testApi.renderSubagentWidgetLines([agent("w", { kind: "waiting", startedAt: 60_000 })], 90);
+      assert.match(open[0], /1 open/);
+      assert.ok(open[0].includes("\x1b[38;2;214;158;46m"));
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
   it("renders runtime agents of other clients in their own group box, with client status", () => {
     const testApi = (subagentsModule as any).__test__;
     const originalNow = Date.now;
@@ -2375,12 +2470,12 @@ describe("subagents widget rendering", () => {
       ];
       const lines = testApi.renderWidgetLines([], entries, 90);
       assert.match(lines[0], /Issue Round/);
-      assert.match(lines[0], /2 active · 1 open/);
-      assert.ok(lines[0].includes("\x1b[38;2;77;163;255m"));
+      assert.match(lines[0], /1 active · 1 question · 1 open/);
+      assert.ok(lines[0].includes("\x1b[38;2;214;92;214m"));
       assert.match(lines[1], /01:00  #12 worker/);
       assert.match(lines[1], /gpt-x\|high · al lavoro/);
       assert.match(lines[2], /gpt-y\|low · waiting/);
-      assert.match(lines[3], /❓ domanda per te/);
+      assert.match(lines[3], /gpt-z\|high · ❓ question /);
       // Issue Round agents are selectable too: the selector hint is in their box when it is the only one.
       assert.match(lines[4], /\/subagent · Ctrl\+Alt\+X/);
       assert.match(lines[5], /╰/);
