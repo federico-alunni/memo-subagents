@@ -37,6 +37,9 @@
     "@earendil-works/pi-tui": "*",
     "@sinclair/typebox": "*"
   },
+  "dependencies": {
+    "pi-memo-question": "file:../pi-memo-question"
+  },
   "pi": {
     "extensions": [
       "./pi-extension/subagents/index.ts"

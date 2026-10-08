@@ -4,7 +4,6 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
 import {
   json,
   activeTools,
@@ -14,8 +13,7 @@ import {
 } from "../protocol.ts";
 import type { Boot, ChildPolicy } from "../protocol.ts";
 import { ChildRuntime } from "./runtime.ts";
-import { answerText, questionComponent } from "./question-dialog.ts";
-import type { QuestionAnswer } from "./question-dialog.ts";
+import type { QuestionEvent } from "pi-memo-question/events";
 import { bashDecision, createBashApprovals, readonlyBlockReason } from "./bash-policy.ts";
 import type { BashAskContext } from "./bash-policy.ts";
 import { CHILD_ENV } from "./env.ts";
@@ -23,6 +21,26 @@ import { createSubagentActivityRecorder } from "../../activity.ts";
 import { installIdentityWidget } from "./identity-widget.ts";
 
 export { CHILD_ENV };
+
+/** pi-memo-question's event (pi-memo-question/events QUESTION_EVENT). */
+export const QUESTION_EVENT = "memo-question";
+
+/**
+ * Turns `question` tool events into `question.json` records, in order, so the parent sees the pending
+ * question (and moves focus). The tool itself is pi-memo-question's; it never depends on this succeeding.
+ */
+export function createQuestionReporter(
+  report: (id: string, question: string, answer?: string) => Promise<void> | undefined,
+) {
+  let chain: Promise<unknown> = Promise.resolve();
+  return (event: unknown): Promise<unknown> => {
+    const e = event as Partial<QuestionEvent> | undefined;
+    if (!e || typeof e.id !== "string" || typeof e.question !== "string") return chain;
+    const { id, question } = e;
+    const answer = e.pending ? undefined : (e.answer ?? "");
+    return (chain = chain.then(() => report(id, question, answer)).catch(() => {}));
+  };
+}
 
 /**
  * Allowlist + read-only bash guard. Anything not activated by the policy is blocked. Synchronous: a bash
@@ -192,67 +210,11 @@ export default function childExtension(pi: ExtensionAPI): void {
       },
     });
   }
-  if (declared?.question)
-    pi.registerTool({
-      name: "question",
-      label: "Domanda all'utente",
-      description:
-        "Ask the human ONE essential decision in this pane (focus moves here automatically). Put the recommended option first with '(Recommended)' in its label; add a short description per option. The human may also type a free answer or attach a note to an option. Use only for decisions you cannot ground in code/issues; never for approval of execution.",
-      parameters: Type.Object({
-        question: Type.String(),
-        options: Type.Array(
-          Type.Object({
-            label: Type.String(),
-            description: Type.Optional(Type.String()),
-          }),
-          { minItems: 1 },
-        ),
-      }),
-      async execute(_id, params, signal, _update, ctx) {
-        if (!runtime) throw new Error("Not an owned runtime child");
-        if (!ctx.hasUI) throw new Error("No interactive UI in this child pane");
-        const questionId = randomUUID();
-        await runtime.question(questionId, params.question);
-        let result: QuestionAnswer | null = null;
-        try {
-          if (!signal?.aborted)
-            result = await ctx.ui.custom<QuestionAnswer | null>(
-              (tui, theme, _kb, done) => {
-                let settled = false;
-                const finish = (r: QuestionAnswer | null) => {
-                  if (!settled) ((settled = true), done(r));
-                };
-                // The dialog has no abort option: an aborted turn closes it as cancelled.
-                signal?.addEventListener("abort", () => finish(null), {
-                  once: true,
-                });
-                return questionComponent(
-                  tui,
-                  theme,
-                  params.question,
-                  params.options,
-                  finish,
-                );
-              },
-            );
-        } finally {
-          // Always release the pending state, so focus returns to the parent.
-          await runtime
-            .question(questionId, params.question, result?.answer ?? "")
-            .catch(() => {});
-        }
-        return {
-          content: [{ type: "text", text: answerText(result) }],
-          details: {
-            question: params.question,
-            answer: result?.answer ?? null,
-            ...(result && !result.custom && result.note
-              ? { note: result.note }
-              : {}),
-          },
-        };
-      },
-    });
+  // The `question` tool is pi-memo-question's (loaded with -e by the runtime): report its dialogs.
+  pi.events.on(
+    QUESTION_EVENT,
+    createQuestionReporter((id, question, answer) => runtime?.question(id, question, answer)),
+  );
   pi.on("session_start", async (_event, ctx) => {
     const dir = process.env[CHILD_ENV.protocolDir];
     if (!dir || !process.env[CHILD_ENV.nonce])

@@ -5,17 +5,23 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import childExtension, {
   CHILD_ENV,
+  QUESTION_EVENT,
+  createQuestionReporter,
 } from "../../pi-extension/subagents/runtime/child/extension.ts";
+import { QUESTION_EVENT as TOOL_QUESTION_EVENT } from "pi-memo-question/events";
 
 function fakePi() {
   const tools: { name: string; parameters: any }[] = [];
   const events: string[] = [];
   const handlers = new Map<string, (...args: any[]) => any>();
+  const busHandlers = new Map<string, (data: unknown) => void>();
   return {
     tools,
     events,
     handlers,
+    busHandlers,
     api: {
+      events: { on: (event: string, handler: (data: unknown) => void) => busHandlers.set(event, handler) },
       registerShortcut: () => {},
       registerTool: (tool: any) => tools.push(tool),
       on: (event: string, handler: (...args: any[]) => any) => {
@@ -26,7 +32,7 @@ function fakePi() {
   };
 }
 
-test("child extension registers declared delegated tools and question from boot, nothing without identity", async (t) => {
+test("child extension registers declared delegated tools from boot (question is pi-memo-question's), nothing without identity", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "memo-runtime-child-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const previous = process.env[CHILD_ENV.protocolDir];
@@ -55,7 +61,8 @@ test("child extension registers declared delegated tools and question from boot,
   process.env[CHILD_ENV.protocolDir] = dir;
   const declared = fakePi();
   childExtension(declared.api);
-  assert.deepEqual(declared.tools.map((tool) => tool.name), ["ir_integrate", "question"]);
+  assert.deepEqual(declared.tools.map((tool) => tool.name), ["ir_integrate"]);
+  assert.ok(declared.busHandlers.has(QUESTION_EVENT));
   assert.deepEqual(declared.tools[0].parameters.properties, { taskId: { type: "string" } });
   for (const event of ["session_start", "tool_call", "input", "user_bash", "agent_settled"])
     assert.ok(declared.events.includes(event), event);
@@ -63,6 +70,31 @@ test("child extension registers declared delegated tools and question from boot,
   const bare = fakePi();
   childExtension(bare.api);
   assert.deepEqual(bare.tools, []);
+});
+
+test("question events become question.json records, in order, failures ignored", async () => {
+  assert.equal(QUESTION_EVENT, TOOL_QUESTION_EVENT);
+  const calls: unknown[][] = [];
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const report = createQuestionReporter(async (...args) => {
+    calls.push(args);
+    if (calls.length === 1) await gate;
+    if (calls.length === 3) throw new Error("no active task");
+  });
+  report({ id: "q1", question: "Push?", pending: true });
+  report({ id: "q1", question: "Push?", pending: false, answer: "Merge only" });
+  report({ id: "q2", question: "Again?", pending: false, answer: null });
+  report({ question: "no id" });
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(calls, [["q1", "Push?", undefined]]); // the answer waits for the pending record
+  release();
+  await report(undefined);
+  assert.deepEqual(calls, [
+    ["q1", "Push?", undefined],
+    ["q1", "Push?", "Merge only"],
+    ["q2", "Again?", ""],
+  ]);
 });
 
 test("child refuses to start when its private identity or policy does not match boot.json", async (t) => {

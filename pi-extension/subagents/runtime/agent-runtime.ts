@@ -53,6 +53,7 @@ import { readSubagentActivityFile } from "../activity.ts";
 import type { ActivityReadResult } from "../activity.ts";
 import type { PresenceState } from "./presence.ts";
 import { CHILD_ENV } from "./child/env.ts";
+import { resolveQuestionExtension } from "./question-extension.ts";
 
 export interface RuntimeConfig {
   /** Private (0700) state root, outside every child cwd. Attempts live in <stateDir>/runtime/<sha256>. */
@@ -67,6 +68,8 @@ export interface RuntimeConfig {
   herdrExecutable?: string;
   /** Test override of the runtime child extension path. */
   childExtension?: string;
+  /** Override of pi-memo-question's extension path (null: not installed). Default: resolved dependency. */
+  questionExtension?: string | null;
   runner?: Runner;
   startupTimeoutMs?: number;
   shellReadyTimeoutMs?: number;
@@ -587,7 +590,23 @@ export class AgentRuntime {
           `System prompt file unavailable: ${file}`,
         );
       });
-    const extraExtensions = this.config.hostExtensions ?? [];
+    // The one `question` tool (pi-memo-question): isolated children load it only with `question: true`;
+    // profile children always, so a profile without the package (e.g. pi-ir's) still has it.
+    const questionExtension =
+      this.config.questionExtension === undefined
+        ? resolveQuestionExtension()
+        : (this.config.questionExtension ?? undefined);
+    if (policy.question && !questionExtension)
+      throw new RuntimeError(
+        "unsupported",
+        "question: true requires the pi-memo-question package",
+      );
+    const extraExtensions = [
+      ...(questionExtension && (policy.question || isolation === "profile")
+        ? [questionExtension]
+        : []),
+      ...(this.config.hostExtensions ?? []),
+    ];
     for (const extra of extraExtensions) {
       if (typeof extra !== "string" || !extra.startsWith("/"))
         throw new RuntimeError(

@@ -365,16 +365,16 @@ export class ChildRuntime {
       this.pendingRequest = undefined;
     }
   }
-  /** Record that the active task awaits a human answer (pending) or received it.
-   * The parent observes this to move focus; the answer itself stays in the child session. */
+  /** Record that the active task awaits a human answer (pending) or received it (any child: the
+   * `question` tool is pi-memo-question's). The parent observes this to move focus; the answer itself
+   * stays in the child session. */
   async question(
     questionId: string,
     question: string,
     answer?: string,
   ): Promise<void> {
     const task = this.active;
-    if (!this.boot.policy.question || !task)
-      throw new Error("question is not enabled for this child/task");
+    if (!task) throw new Error("No active task for this question");
     await publish(
       join(this.boot.protocolDir, questionFile),
       record(task, answer === undefined ? "question" : "answer", {

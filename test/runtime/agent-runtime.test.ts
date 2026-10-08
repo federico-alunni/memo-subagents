@@ -10,8 +10,10 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   AgentRuntime,
   RuntimeError,
@@ -1431,13 +1433,18 @@ test("invalid tool policies are refused before any pane is created", async (t) =
   assert.equal(f.fake.createCount, 0);
 });
 
-test("question is a policy flag: observed for enabled children, refused otherwise", async (t) => {
+const QUESTION_EXTENSION = realpathSync(
+  fileURLToPath(new URL("../../node_modules/pi-memo-question/extensions/question.ts", import.meta.url)),
+);
+
+test("question is pi-memo-question's tool: loaded with question: true, observed for any child with a task", async (t) => {
   assert.equal(childToolCall(WORKER_POLICY, "question", {})?.block, true);
   assert.equal(childToolCall(TRIAGE_POLICY, "question", {}), undefined);
   const f = await fixture(t);
   const h = await f.transport.launch({ ...f.input, ...PLANNER });
   const run = f.fake.calls.find((c) => c.argv[1] === "run")!;
   assert.match(run.argv[3], /'--tools' 'read,bash,grep,find,ls,question'/);
+  assert.ok(run.argv[3].includes(`/runtime/child/extension.ts' '-e' '${QUESTION_EXTENSION}'`));
   assert.equal((await f.transport.observe(h)).question, undefined);
   await f.fake.runtime!.question("q1", "Push o solo merge?");
   assert.deepEqual((await f.transport.observe(h)).question, {
@@ -1447,9 +1454,19 @@ test("question is a policy flag: observed for enabled children, refused otherwis
   });
   await f.fake.runtime!.question("q1", "Push o solo merge?", "Solo merge");
   assert.equal((await f.transport.observe(h)).question?.pending, false);
+  // Isolated children without the flag do not load it; a record is still observed if one is written.
   const w = await fixture(t);
-  await w.transport.launch(w.input);
-  await assert.rejects(w.fake.runtime!.question("q", "?"), /not enabled/);
+  const wh = await w.transport.launch(w.input);
+  assert.ok(!w.fake.calls.find((c) => c.argv[1] === "run")!.argv[3].includes("pi-memo-question"));
+  await w.fake.runtime!.question("q", "?");
+  assert.equal((await w.transport.observe(wh)).question?.pending, true);
+  // question: true without the package is refused before any pane.
+  const n = await fixture(t);
+  await assert.rejects(
+    new AgentRuntime({ ...n.config, questionExtension: null }).launch({ ...n.input, ...PLANNER }),
+    errorCode("unsupported"),
+  );
+  assert.equal(n.fake.createCount, 0);
 });
 
 test("focus moves between master and split child only through the exact neighbor; tabs never move", async (t) => {
@@ -1710,6 +1727,8 @@ test("profile children load their normal profile: no isolation flags, no allowli
   for (const flag of ["'-ne'", "'-ns'", "'-np'", "'--no-approve'", "'--no-themes'", "'--tools'"])
     assert.ok(!run.includes(flag), flag);
   assert.ok(run.includes("/runtime/child/extension.ts"));
+  // The question tool even if the profile lacks pi-memo-question (pi de-duplicates it otherwise).
+  assert.ok(run.includes(`'-e' '${QUESTION_EXTENSION}'`));
   assert.ok(run.includes(`PI_CODING_AGENT_DIR='${agentDir}'`));
   assert.ok(run.includes("PI_SUBAGENT_AGENT='scout'"));
   assert.equal(f.fake.boot!.isolation, "profile");
@@ -1743,7 +1762,7 @@ test("tool policy without allowlist: profile tools allowed, deny and runtime-onl
   assert.equal(childToolCall(policy, "some_extension_tool", {}), undefined);
   assert.equal(childToolCall(policy, "bash", { command: "npm test" }), undefined);
   assert.equal(childToolCall(policy, "write", {})?.block, true);
-  // The profile's own question tool is not the runtime's.
+  // No allowlist: question (pi-memo-question, loaded by the runtime) is allowed.
   assert.equal(childToolCall(policy, "question", {}), undefined);
   assert.equal(childToolCall(policy, "subagent_done", {}), undefined);
   assert.equal(childToolCall({ ...policy, exit: "parent" as const }, "caller_ping", {})?.block, true);

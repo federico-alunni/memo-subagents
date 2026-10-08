@@ -96,7 +96,7 @@ interface LaunchSpec {
   bash?: "unrestricted" | "readonly"; // readonly: one plain argv from an explicit read-only allowlist
   bashAllow?: string[];       // readonly only: extra exact word prefixes, e.g. ["npm test", "gh issue view"]
   bashAsk?: boolean;          // readonly + userInput "allowed" only: ask the user instead of blocking (see "Bash policy")
-  question?: boolean;         // enables the `question` tool (asks the human in the child's pane)
+  question?: boolean;         // isolated children: loads and allows the `question` tool (pi-memo-question)
   delegatedTools?: DelegatedToolSpec[];
   appendSystemPrompt?: string[]; // absolute, readable files passed with --append-system-prompt
   systemPrompt?: string;      // absolute, readable file passed with --system-prompt (replaces pi's prompt)
@@ -172,8 +172,23 @@ interface DelegatedToolSpec {
 - `userInput: "allowed"` (user-driven subagents): typing, user bash and model/thinking changes in the child pane do
   not block control, and a child that ended because the user quit pi (no acknowledgement) can still be closed.
 - `subagent_done` and `caller_ping` exist only through the exit policy; they cannot be listed in `tools` or
-  declared as delegated tools. The runtime's `question` exists only through `question: true`; without the flag a
-  `question` entry in `tools` (or no allowlist) refers to a profile's own question tool.
+  declared as delegated tools.
+
+### Question
+
+There is one `question` tool, from the **pi-memo-question** package (a dependency of memo-subagents, also installed
+for the main agent). The runtime adds its extension with `-e` (real path, so pi loads it once even if the profile
+installs the package too):
+
+- isolated children: only with `question: true` (which also adds `question` to the allowlist); `question: true`
+  without the package is `unsupported`;
+- profile children: always, so a profile without the package (e.g. pi-ir's) still has it; it is usable when there is
+  no allowlist or the allowlist lists `question`.
+
+While its dialog is open the tool emits `memo-question` on `pi.events`; the child extension turns it into the
+`question.json` record of the active task (pending, then answered with the chosen label or `""` when cancelled), so
+`observe` reports `question` for every child, and the tool also emits `herdr:blocked`. The answer itself stays in
+the child session.
 
 ### Sessions
 
@@ -258,7 +273,7 @@ per-launch environment and `MEMO_RUNTIME_PROTOCOL_DIR / _NONCE / _SCOPE / _AGENT
 The child extension: verifies boot identity, model, thinking, session and cwd; publishes `ready`; accepts each task
 exactly once; publishes `settled` only on `agent_settled` (provider errors and aborts stay distinct; no assistant
 outcome is an error); handles interrupt/shutdown requests; records takeover; enforces the tool allowlist and the
-read-only bash guard (with `bashAllow`, and the user question for `bashAsk`); registers the declared delegated tools and, if enabled, `question` and the exit tools; writes
+read-only bash guard (with `bashAllow`, and the user question for `bashAsk`); registers the declared delegated tools and the exit tools; records `question` dialogs (pi-memo-question) in `question.json`; writes
 display-only activity snapshots (0600). User-driven children (`userInput: "allowed"`) also get an identity widget
 (label, tools, denied tools; Ctrl+J toggles the list); workflow children keep pi's own Ctrl+J.
 
