@@ -10,7 +10,7 @@
   },
   "importedFrom": {
     "commit": "17fdebb",
-    "source": "pi-issue-round vendored copy (src/pi-memo-subagents), itself the local package ~/.pi/agent/local-packages/pi-herdr-subagents (0.2.0 + local selector) plus the IR_CHILD_* driver patch"
+    "source": "pi-issue-round vendored copy (src/pi-memo-subagents), itself a local package derived from pi-herdr-subagents (0.2.0 + local selector) plus the IR_CHILD_* driver patch"
   },
   "chain": [
     "pi-herdr-subagents v0.2.0 (upstream tag 7180d98)",

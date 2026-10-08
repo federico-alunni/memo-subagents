@@ -1,7 +1,7 @@
 // Runtime child extension: lifecycle and policy only. Workflow permissions belong to the parent.
 // Ported from pi-issue-round's child extension (same author, MIT) and made role-agnostic.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import { readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import {

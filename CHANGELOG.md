@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Changed
+
+- Distribution: `pi-memo-question` is now a git dependency (`github:federico-alunni/pi-memo-question#semver:^0.1.0`) instead of `file:../pi-memo-question`, so the package installs from git on any machine. CI (`.github/workflows/ci.yml`) runs the tests on `main`/PRs; pushing a `vX.Y.Z` tag runs `release.yml` and creates the GitHub Release. Install and release steps in the README.
+- User config moved out of the package: `~/.pi/agent/pi-memo-subagents.json` (`$PI_CODING_AGENT_DIR`, or `PI_MEMO_SUBAGENTS_CONFIG`), with the package-root `config.json` as fallback. pi runs `git clean -fdx` on git updates, which deleted `config.json` at every `pi update --extensions`.
+- The `question` extension is resolved from the pi-installed `pi-memo-question` first (one load per process), then from the bundled dependency. Dependency URL is `git+https://` (no SSH key needed).
+- `peerDependencies` lists `typebox` (was `@sinclair/typebox`; sources import `typebox`), `engines.node >= 22.15`; `test/host-aliases.mjs` fails with a hint instead of assuming a Homebrew path.
+- Tests: `test/host-aliases.mjs` also works in CI (host packages from npm, `@sinclair/typebox` → `typebox`, `.ts` of the `pi-memo-question` dependency loaded under `node_modules`); the `/subagent <profile>` test no longer depends on `~/.pi/agent/agents`.
+
 ### Fixed
 
 - A child waiting for the user (question or bash approval) is no longer shown or counted as active: the widget row reads `❓ question <duration>` / `❓ approval <duration>` (`blocked <duration>` when only Herdr says so), box headers count `N active · N question · N open` and use an attention color, also for Issue Round rows annotated active. The Herdr tab is `blocked`: the bash approval emits `herdr:blocked` like the `question` tool, and isolated children (no Herdr integration under `-ne`) report working/idle/blocked to Herdr themselves (`--source memo-subagents`). No steer is sent to the parent when a child waits (nor stalled while it waits).

@@ -17,7 +17,7 @@ Without `worktree: true` nothing changes: launched commands are byte-identical t
 ## Source, location and child cwd
 
 - **Source directory**: the directory the child would otherwise run in — `cwd` parameter, else the agent's frontmatter `cwd`, else the session cwd. It must be inside a git work tree.
-- **Location** (default): next to the repository, `<dirname(toplevel)>/<basename(toplevel)>-memo-worktrees/<slug>-<id8>`. With `config.json` → `"worktrees": { "root": "/abs/dir" }` it becomes `<root>/<repoName>/<slug>-<id8>`. A root inside the source checkout is refused.
+- **Location** (default): next to the repository, `<dirname(toplevel)>/<basename(toplevel)>-memo-worktrees/<slug>-<id8>`. With `pi-memo-subagents.json` (in `~/.pi/agent`, see the README) → `"worktrees": { "root": "/abs/dir" }` it becomes `<root>/<repoName>/<slug>-<id8>`. A root inside the source checkout is refused.
 - **Child cwd**: the same sub-path inside the worktree. Spawning with `cwd: "repo/packages/api"` starts the child in `<worktree>/packages/api` (or the worktree root if that directory does not exist at the base commit — reported as a warning).
 - The child's pi session directory, the seeded session header (`lineage-only` / `fork`), `.pi/agent` lookup and the Herdr pane cwd all follow the worktree cwd. Runtime evidence stays in the private runtime state directory (outside the worktree).
 - The task gets a short note: work in `<cwd>` on branch `<branch>` (base `<sha7>`), commit there, do not modify the original checkout, nothing is merged automatically.

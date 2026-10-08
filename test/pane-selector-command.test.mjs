@@ -3,6 +3,15 @@ import assert from 'node:assert/strict';
 import extension, { __test__ } from '../pi-extension/subagents/index.ts';
 import { paneSelector } from '../pi-extension/subagents/pane-selector.ts';
 import { createLifecycle } from '../pi-extension/subagents/lifecycle.ts';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+// Hermetic agent definitions: do not depend on the developer's ~/.pi/agent/agents.
+const agentDir = mkdtempSync(join(tmpdir(), 'memo-subagents-agents-'));
+mkdirSync(join(agentDir, 'agents'));
+writeFileSync(join(agentDir, 'agents', 'worker.md'), '---\nname: worker\ndescription: Test worker\n---\nYou are a test worker.\n');
+process.env.PI_CODING_AGENT_DIR = agentDir;
 
 function fixture() {
   const commands = new Map();

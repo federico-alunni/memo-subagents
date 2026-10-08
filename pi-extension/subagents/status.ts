@@ -1,14 +1,12 @@
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { PACKAGE_ROOT, resolveConfigPath } from "./config-path.ts";
 
 export const SNAPSHOT_STALLED_AFTER_MS = 60_000;
 export const DEFAULT_STATUS_LINE_LIMIT = 4;
 export const MAX_STATUS_NAME_LENGTH = 72;
 export const MAX_STATUS_LINE_LENGTH = 120;
 
-const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..");
-const DEFAULT_STATUS_CONFIG_PATH = join(PACKAGE_ROOT, "config.json");
 const STATUS_CONFIG_EXAMPLE_PATH = join(PACKAGE_ROOT, "config.json.example");
 
 export type SubagentStatusKind = "starting" | "active" | "waiting" | "stalled" | "running";
@@ -172,7 +170,7 @@ function readStatusConfigFile(configPath: string, examplePath: string): { source
 }
 
 export function loadStatusConfig(
-  configPath = DEFAULT_STATUS_CONFIG_PATH,
+  configPath = resolveConfigPath(),
   examplePath = STATUS_CONFIG_EXAMPLE_PATH,
 ): StatusConfig {
   const { sourcePath, rawConfig } = readStatusConfigFile(configPath, examplePath);

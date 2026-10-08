@@ -25,8 +25,19 @@ Requires pi and Herdr (start `herdr`, then run `pi` inside it).
 ```bash
 pi install /path/to/pi-memo-subagents
 # or
-pi install git:github.com/federico-alunni/pi-memo-subagents
+pi install git:github.com/federico-alunni/pi-memo-subagents   # latest main (collaborators)
+pi update --extensions                                       # pull new versions
 ```
+
+Without a `@ref` pi follows `main`, so `pi update --extensions` picks up every new release. Pinning a release
+(`…pi-memo-subagents@v0.2.0`) freezes that tag: `pi update` will not move it, re-run `pi install` with the new tag.
+The `pi-memo-question` dependency is fetched from GitHub automatically when pi installs the package.
+
+The `question` tool comes from [pi-memo-question](https://github.com/federico-alunni/pi-memo-question). For the main agent install it too (`pi install git:github.com/federico-alunni/pi-memo-question`); children use that installed copy when it exists (so the tool is loaded once) and fall back to the dependency bundled with this package otherwise.
+
+> **Warning — load it from one source only.** If you already load this package from a local path
+> (`settings.json` → `"packages": ["/path/to/pi-memo-subagents"]` or `-e <path>`), do **not** also install the git
+> source: pi identifies packages by repo URL or absolute path, so the extension would be loaded twice.
 
 For a profile launched with `pi -ne` (packages disabled), load it explicitly with `pi -ne -e /path/to/pi-memo-subagents …`; see [docs/child-host.md](docs/child-host.md) for host extensions/variables that children need.
 
@@ -96,7 +107,7 @@ the same widget, grouped by client. The `subagent` tool is a client of the same 
 
 ## Configuration
 
-`config.json` at the package root (gitignored; falls back to `config.json.example` for `status`):
+Optional. Put it in **`~/.pi/agent/pi-memo-subagents.json`** (`$PI_CODING_AGENT_DIR/pi-memo-subagents.json`), or point `PI_MEMO_SUBAGENTS_CONFIG` to any file. It must live outside the package: pi updates git packages with `git reset --hard` + `git clean -fdx`, which would delete a `config.json` inside the checkout at every `pi update --extensions`. Children launched with another profile read the one in `~/.pi/agent` too. A `config.json` at the package root is still read as a fallback (local checkouts); without any file, `config.json.example` supplies the `status` defaults and the rest is empty.
 
 ```json
 {
@@ -114,12 +125,19 @@ Environment: `PI_SUBAGENT_SURFACE` (`selector` | `split` | `tab`) and the host c
 
 ## Development
 
-Tests use pi's own host dependencies (no `npm install`; paths in `test/host-aliases.mjs` assume a Homebrew install of `@earendil-works/pi-coding-agent`).
+Tests need the pi host packages (`@earendil-works/pi-coding-agent`, `-pi-ai`, `-pi-tui`, `typebox`) and `npm install` for the `pi-memo-question` dependency.
+`test/host-aliases.mjs` finds the host via `PI_HOST_DIR=<path of pi-coding-agent>`, then packages installed in `node_modules` (what CI does), then the Homebrew global install (macOS). Node >= 22.15 is required (`engines`).
 
 ```bash
 npm test                  # unit, fake runtime/Herdr and real-git tests, offline, no model calls
 npm run test:live         # pane selector against a real Herdr server (own workspace only)
 ```
+
+## Releasing (maintainers)
+
+1. Move the `## Unreleased` notes of `CHANGELOG.md` under the new version, bump `version` in `package.json`, commit, push to `main` (CI runs `npm test`).
+2. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+3. `.github/workflows/release.yml` checks that the tag is on `main` and equals the `package.json` version, runs the tests and creates the GitHub Release. Nothing is built or published elsewhere: pi reads the source from git, so installs that follow `main` get the update with `pi update --extensions`.
 
 ## License
 

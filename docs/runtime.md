@@ -17,13 +17,13 @@ scheduling and its own durable state; runtime records are **evidence**, not anot
 ## Consuming it from another package
 
 ```json
-"dependencies": { "pi-memo-subagents": "file:../pi-memo-subagents" }
+"dependencies": { "pi-memo-subagents": "git+https://github.com/federico-alunni/pi-memo-subagents.git#semver:^0.2.0" }
 ```
 
 Import only `pi-memo-subagents/runtime` (never the extension entry). Under pi, extensions are loaded with jiti and
 TypeScript works from anywhere. Node's own type stripping (e.g. `node --experimental-strip-types --test`) refuses
-`.ts` files **inside `node_modules`**: a `file:` dependency is a symlink whose real path is outside `node_modules`,
-so tests keep working; a copied install (git/npm tarball) needs a TypeScript loader in the test runner.
+`.ts` files **inside `node_modules`**: a git/npm install, or a `file:` link whose real path is inside `node_modules`,
+needs a TypeScript loader in the test runner (see `test/host-aliases.mjs` for a `registerHooks` + `stripTypeScriptTypes` one).
 
 ## Guarantees
 

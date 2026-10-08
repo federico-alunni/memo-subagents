@@ -19,10 +19,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
+import { resolveConfigPath } from "./config-path.ts";
 
-const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..");
-const DEFAULT_CONFIG_PATH = join(PACKAGE_ROOT, "config.json");
 const GIT_TIMEOUT_MS = 120_000;
 
 // ── config ──
@@ -73,8 +71,8 @@ export function parseWorktreeConfig(rawConfig: unknown, source = "config.json"):
   return config;
 }
 
-/** Reads `config.json` at the package root; missing file means defaults. */
-export function loadWorktreeConfig(configPath = DEFAULT_CONFIG_PATH): WorktreeConfig {
+/** Reads the user config (see config-path.ts); missing file means defaults. */
+export function loadWorktreeConfig(configPath = resolveConfigPath()): WorktreeConfig {
   let raw: string;
   try {
     raw = readFileSync(configPath, "utf8");

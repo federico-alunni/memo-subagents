@@ -35,14 +35,17 @@
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*",
-    "@sinclair/typebox": "*"
+    "typebox": "*"
   },
   "dependencies": {
-    "pi-memo-question": "file:../pi-memo-question"
+    "pi-memo-question": "git+https://github.com/federico-alunni/pi-memo-question.git#semver:^0.1.0"
   },
   "pi": {
     "extensions": [
       "./pi-extension/subagents/index.ts"
     ]
+  },
+  "engines": {
+    "node": ">=22.15"
   }
 }

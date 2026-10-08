@@ -29,7 +29,7 @@ Without the variables, children get no extra extension or variable.
   exec pi -ne -e /abs/path/host-extension -e /abs/path/pi-memo-subagents "$@"
   ```
 
-Do not put these in `config.json`: the package root (and therefore `config.json`) is shared by every profile that loads the package, and adding a provider that is already a package of the global profile would load it twice in global children.
+Do not put these in `pi-memo-subagents.json`: the config is shared by every profile that loads the package, and adding a provider that is already a package of the global profile would load it twice in global children.
 
 ## Reserved variables
 

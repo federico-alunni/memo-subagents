@@ -1,9 +1,5 @@
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-
-const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..");
-const DEFAULT_MODEL_CONFIG_PATH = join(PACKAGE_ROOT, "config.json");
+import { resolveConfigPath } from "./config-path.ts";
 
 export interface ModelConfig {
   default?: string;
@@ -74,7 +70,7 @@ export function resolveModelDefault(
   return config.default;
 }
 
-export function loadModelConfig(configPath = DEFAULT_MODEL_CONFIG_PATH): ModelConfig {
+export function loadModelConfig(configPath = resolveConfigPath()): ModelConfig {
   let raw: string;
   try {
     raw = readFileSync(configPath, "utf8");
