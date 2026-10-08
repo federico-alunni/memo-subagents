@@ -44,6 +44,9 @@ export interface DelegatedToolSpec {
   once?: "per-task";
   /** Child-side wait for the parent response (default 300000 ms); afterwards the outcome is uncertain. */
   timeoutMs?: number;
+  /** Internal transport (e.g. the handoff of a worktree-space subagent): never registered as a
+   * model tool; reached only through the child's delegate hook. */
+  internal?: boolean;
 }
 
 export interface Identity {
@@ -145,6 +148,8 @@ export interface Boot extends Identity {
   /** Display only (widget rows rebuilt after a cold restart of the parent). */
   display?: DisplaySpec;
   launchedAt?: number;
+  /** This child is a read-only viewer program, not a pi agent: no presence row, no model work. */
+  viewer?: boolean;
 }
 export interface TaskCommand extends TaskIdentity {
   kind: "task";
@@ -381,15 +386,16 @@ export function validPolicy(policy: ChildPolicy | undefined): policy is ChildPol
         typeof d.parameters === "object" &&
         !Array.isArray(d.parameters) &&
         (d.once === undefined || d.once === "per-task") &&
+        (d.internal === undefined || typeof d.internal === "boolean") &&
         (d.timeoutMs === undefined ||
           (Number.isSafeInteger(d.timeoutMs) && d.timeoutMs > 0)),
     )
   );
 }
-/** Tools the runtime itself adds: declared delegated tools, `question`, exit tools. */
+/** Tools the runtime itself adds: declared delegated tools, `question`, exit tools (internal ones excluded). */
 export function policyTools(policy: ChildPolicy): string[] {
   return [
-    ...policy.delegatedTools.map((d) => d.name),
+    ...policy.delegatedTools.filter((d) => !d.internal).map((d) => d.name),
     ...(policy.question ? ["question"] : []),
     ...(policy.exit === "parent" ? [] : EXIT_TOOLS),
   ];

@@ -4,6 +4,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import {
   json,
   activeTools,
@@ -180,6 +181,41 @@ function bootPolicy(boot: Boot | undefined): ChildPolicy | undefined {
   }
 }
 
+/**
+ * Internal delegated transport (e.g. `subagent_handoff` of a worktree-space subagent): a model tool
+ * would be redundant, but the subagent tool running in this child process needs the same
+ * request/response protocol. Shared through globalThis so the extension and the subagent tool's own
+ * copy of the module interoperate.
+ */
+export interface ChildDelegateHook {
+  request(tool: string, params: unknown, signal?: AbortSignal): Promise<unknown>;
+  holdAutoExit(): void;
+  end(kind: "replace", extra?: { summary?: string }): Promise<void>;
+}
+
+const DELEGATE_HOOK_KEY = Symbol.for("pi-memo-subagents/child-delegate-hook");
+
+function installDelegateHook(child: ChildRuntime, internalTools: ReadonlySet<string>): void {
+  (globalThis as Record<symbol, unknown>)[DELEGATE_HOOK_KEY] = {
+    async request(tool: string, params: unknown, signal?: AbortSignal) {
+      if (!internalTools.has(tool))
+        throw new Error(`${tool} is not an internal delegated tool of this child`);
+      return child.delegate(tool, params, randomUUID(), signal);
+    },
+    holdAutoExit: () => child.holdAutoExit(),
+    async end(kind: "replace", extra?: { summary?: string }) {
+      if (kind !== "replace") throw new Error("Only a replace handoff ends the child");
+      await child.exitWith("done", extra?.summary ? { summary: extra.summary } : {});
+    },
+  } satisfies ChildDelegateHook;
+}
+
+/** The delegate hook of this child process (`child` installs it: the runtime child session start). */
+export function childDelegateHook(child?: ChildRuntime, internalTools?: ReadonlySet<string>): ChildDelegateHook | undefined {
+  if (child && internalTools) installDelegateHook(child, internalTools);
+  return (globalThis as Record<symbol, ChildDelegateHook | undefined>)[DELEGATE_HOOK_KEY];
+}
+
 export default function childExtension(pi: ExtensionAPI): void {
   let runtime: ChildRuntime | undefined;
   let boot: Boot | undefined;
@@ -249,6 +285,7 @@ export default function childExtension(pi: ExtensionAPI): void {
     });
   }
   for (const spec of declared?.delegatedTools ?? []) {
+    if (spec.internal) continue; // internal transport (handoff): reached through the delegate hook
     pi.registerTool({
       name: spec.name,
       label: spec.label ?? spec.name,
@@ -304,6 +341,8 @@ export default function childExtension(pi: ExtensionAPI): void {
       abort: () => ctx.abort(),
       shutdown: () => ctx.shutdown(),
     });
+    const internalTools = new Set((boot.policy.delegatedTools ?? []).filter((d) => d.internal).map((d) => d.name));
+    if (internalTools.size > 0) installDelegateHook(runtime, internalTools);
     const allowlist = activeTools(boot.policy);
     pi.setActiveTools(
       allowlist ??

@@ -85,6 +85,7 @@ export class ChildRuntime {
   private latest?: readonly unknown[];
   private timer?: ReturnType<typeof setInterval>;
   private pendingRequest?: string;
+  private holds = 0;
   constructor(boot: Boot, host: ChildHost) {
     this.boot = boot;
     this.host = host;
@@ -253,6 +254,11 @@ export class ChildRuntime {
   agentEnd(messages: readonly unknown[]): void {
     this.latest = messages;
   }
+  /** Postpone the auto exit once: the next settled run (e.g. the result of a handed-off agent,
+   * delivered by the parent as a new task) ends the child as usual. */
+  holdAutoExit(): void {
+    this.holds += 1;
+  }
   async agentSettled(): Promise<void> {
     if (this.closed) return;
     if (this.active) {
@@ -270,6 +276,10 @@ export class ChildRuntime {
     }
     // Auto exit after any normal run (task or user turn); an aborted run stays open for the user.
     if (this.boot.policy.exit === "auto") {
+      if (this.holds > 0) {
+        this.holds -= 1;
+        return;
+      }
       const outcome = settledResult(this.latest);
       if (outcome.status !== "interrupted")
         await this.exitWith(outcome.status === "error" ? "error" : "done", {

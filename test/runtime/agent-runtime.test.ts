@@ -2253,3 +2253,77 @@ test("agents are registered again when observed in a new process and forgotten w
   assert.equal(fresh.owned.size, 0);
   assert.equal(f.config.selector!.owned.size, 1);
 });
+
+// ── Mirror viewers: a read-only terminal program launched with pi's exact identity/shutdown contract.
+
+test("viewer: runs a node program under the child contract, no pi checks, no presence row, selector-owned", async (t) => {
+  const f = await fixture(t);
+  const script = join(f.root, "mirror-viewer.ts");
+  await writeFile(script, "void 0;\n");
+  const h = await f.transport.launch({
+    ...f.input,
+    viewer: { script, args: ["--slot", "slot-1"] },
+    placement: "auto",
+    prompt: "",
+  });
+  assert.equal(h.pid, f.fake.pid);
+  assert.equal(f.config.selector!.owned.get("pane-1"), "worker"); // display label
+  assert.equal(f.config.selector!.selected, "pane-1"); // the split was reserved by this launch
+  assert.equal(f.config.selector!.controls?.get("pane-1")?.handle.paneId, "pane-1");
+  // The viewer program is executed with node, not pi: no help check, no isolation flags.
+  const run = f.fake.calls.find((c) => c.argv[1] === "run");
+  assert.ok(run);
+  assert.ok(run.argv[3].includes("'node' '--experimental-strip-types'"));
+  assert.ok(run.argv[3].includes(`'${script}' '--slot' 'slot-1'`));
+  assert.ok(run.argv[3].includes("PI_MEMO_MIRROR_VIEW=1 'node'"));
+  assert.ok(!run.argv[3].includes("'-ne'"));
+  assert.ok(!f.fake.calls.some((c) => c.executable === "fake-pi"));
+  // The empty task is accepted and settled at once; the boot is a viewer boot.
+  assert.ok(f.fake.boot?.viewer);
+  assert.equal(f.fake.boot!.prompt, undefined);
+  const observation = await f.transport.observe(h);
+  assert.equal(observation.kind, "settled");
+  // No presence row: a mirror is a pane, not an agent.
+  assert.equal(presence().get(h.protocolDir), undefined);
+  // Stop and close follow the same proof as any child.
+  await f.transport.stop(h);
+  await f.transport.close(h);
+  assert.equal(f.fake.closes, 1);
+  assert.equal(f.config.selector!.owned.size, 0);
+});
+
+test("viewer: relative scripts and pi-only options are unsupported before any pane", async (t) => {
+  const f = await fixture(t);
+  await writeFile(join(f.root, "v.ts"), "void 0;\n");
+  await assert.rejects(
+    f.transport.launch({ ...f.input, viewer: { script: "v.ts" }, prompt: "" }),
+    errorCode("unsupported"),
+  );
+  await assert.rejects(
+    f.transport.launch({ ...f.input, viewer: { script: join(f.root, "v.ts"), prompt: "" }, skills: ["demo-evidence"] }),
+    errorCode("unsupported"),
+  );
+  await assert.rejects(
+    f.transport.launch({
+      ...f.input,
+      viewer: { script: join(f.root, "v.ts"), prompt: "" },
+      delegatedTools: [INTEGRATE],
+    }),
+    errorCode("unsupported"),
+  );
+  await assert.rejects(
+    f.transport.launch({
+      ...f.input,
+      viewer: { script: join(f.root, "v.ts"), prompt: "" },
+      session: { kind: "new" },
+    }),
+    errorCode("unsupported"),
+  );
+  // A viewer launch with a prompt is refused too.
+  await assert.rejects(
+    f.transport.launch({ ...f.input, viewer: { script: join(f.root, "v.ts") } }),
+    errorCode("unsupported"),
+  );
+  assert.equal(f.fake.createCount, 0, "nothing was created");
+  assert.ok(!f.fake.calls.some((c) => c.executable === "fake-herdr"), "Herdr was never called");
+});

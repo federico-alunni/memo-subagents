@@ -138,6 +138,12 @@ export interface LaunchSpec {
    * when Herdr refuses, e.g. older server or a non-Git caller space). "auto"/"visible": the pane
    * selector decides between the visible split and a tab (see pane-selector.ts). Default "tab". */
   placement?: Placement | PlacementMode;
+  /** "worktree" placement only: the checkout root to open as a Herdr worktree space when `cwd` is a
+   * sub-directory of it (default `cwd`). The child still starts in `cwd`. */
+  spaceRoot?: string;
+  /** Read-only terminal program instead of a pi child (a mirror viewer): the same exact identity,
+   * readiness and shutdown contract, but no model, no prompt, no session and no presence row. */
+  viewer?: { script: string; args?: string[]; env?: Record<string, string> };
   display: {
     label: string;
     group?: string;
@@ -606,6 +612,21 @@ export class AgentRuntime {
     const requested = input.placement ?? "tab";
     if (!["split-right", "split-down", "tab", "worktree", "auto", "visible"].includes(requested))
       throw new RuntimeError("unsupported", `Unknown placement: ${requested}`);
+    // A mirror viewer is a read-only terminal program under the child contract: no model work at all.
+    const viewer = input.viewer;
+    if (viewer) {
+      if (typeof viewer.script !== "string" || !viewer.script.startsWith("/"))
+        throw new RuntimeError("unsupported", "Viewer script must be an absolute path");
+      if (input.prompt !== "")
+        throw new RuntimeError("unsupported", "A viewer runs an empty task only");
+      if (input.skills?.length || input.session || input.delegatedTools?.length || input.question ||
+          input.appendSystemPrompt?.length || input.systemPrompt !== undefined || input.bashAllow?.length ||
+          input.bashAsk || input.isolation === "profile" || input.exit !== undefined && input.exit !== "parent")
+        throw new RuntimeError("unsupported", "Viewer launches accept no pi-child options");
+      await readFile(viewer.script, "utf8").catch(() => {
+        throw new RuntimeError("unsupported", `Viewer script unavailable: ${viewer.script}`);
+      });
+    }
     // "auto"/"visible" become "split-right" or "tab" once the caller's layout is read.
     let placement: Placement =
       requested === "auto" || requested === "visible" ? "tab" : requested;
@@ -726,25 +747,28 @@ export class AgentRuntime {
           "unsupported",
           `Child environment variable not allowed: ${name}`,
         );
-    const help = await this.run(
-      this.config.piExecutable ?? "pi",
-      ["-ne", "-ns", "-np", "--no-approve", "--help"],
-      cwd,
-      { PI_CODING_AGENT_DIR: profile },
-    );
-    for (const flag of [
-      "--session-id",
-      "--session-dir",
-      "--no-extensions",
-      "--no-skills",
-      "--no-prompt-templates",
-      "--no-approve",
-    ])
-      if (help.exitCode || !help.stdout.includes(flag))
-        throw new RuntimeError(
-          "unsupported",
-          `Pi CLI lacks required ${flag}; no child launched`,
-        );
+    // A viewer is started with node, not pi: no CLI capability check.
+    if (!viewer) {
+      const help = await this.run(
+        this.config.piExecutable ?? "pi",
+        ["-ne", "-ns", "-np", "--no-approve", "--help"],
+        cwd,
+        { PI_CODING_AGENT_DIR: profile },
+      );
+      for (const flag of [
+        "--session-id",
+        "--session-dir",
+        "--no-extensions",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-approve",
+      ])
+        if (help.exitCode || !help.stdout.includes(flag))
+          throw new RuntimeError(
+            "unsupported",
+            `Pi CLI lacks required ${flag}; no child launched`,
+          );
+    }
     // Exclusive attempt allocation, only after every `unsupported` check: an uncertain spawn must never replay.
     await mkdir(protocolDir, { mode: 0o700 });
     let paneId: string | undefined;
@@ -771,15 +795,16 @@ export class AgentRuntime {
         },
       );
     };
-    presence().upsert({
-      key: protocolDir,
-      ...(input.display.group ? { group: input.display.group } : {}),
-      label: input.display.label,
-      model: input.model,
-      thinking: input.thinking,
-      startedAt: Date.now(),
-      state: "launching",
-    });
+    if (!viewer)
+      presence().upsert({
+        key: protocolDir,
+        ...(input.display.group ? { group: input.display.group } : {}),
+        label: input.display.label,
+        model: input.model,
+        thinking: input.thinking,
+        startedAt: Date.now(),
+        state: "launching",
+      });
     try {
       await evidence("intent");
       const parent = (await this.herdr(["pane", "current", "--current"], cwd))
@@ -806,6 +831,8 @@ export class AgentRuntime {
       let space: { workspaceId: string; fresh: boolean } | undefined;
       let created: any;
       if (placement === "worktree") {
+        const root = input.spaceRoot ? await privateCwd(input.spaceRoot) : cwd;
+        if (!within(root, cwd)) throw new Error("Worktree space root must contain the child cwd");
         let opened: any;
         try {
           opened = await this.herdr(
@@ -815,7 +842,7 @@ export class AgentRuntime {
               "--workspace",
               parent.workspace_id,
               "--path",
-              cwd,
+              root,
               "--label",
               label,
               "--no-focus",
@@ -837,7 +864,7 @@ export class AgentRuntime {
             typeof ws?.workspace_id !== "string" ||
             ws.workspace_id === parent.workspace_id ||
             typeof checkout !== "string" ||
-            (await realpath(checkout).catch(() => undefined)) !== cwd
+            (await realpath(checkout).catch(() => undefined)) !== root
           )
             throw new Error("Herdr worktree space identity mismatch");
           space = { workspaceId: ws.workspace_id, fresh: !opened.already_open };
@@ -1084,6 +1111,7 @@ export class AgentRuntime {
         ...(sessionFile ? { sessionFile } : {}),
         display: { ...input.display },
         launchedAt: Date.now(),
+        ...(viewer ? { viewer: true } : {}),
       };
       const task: TaskCommand = {
         scope: boot.scope,
@@ -1128,7 +1156,10 @@ export class AgentRuntime {
         ]),
       ];
       // pane run necessarily crosses a shell. All executable/path/argv values are POSIX quoted; task text never enters it.
-      const command = `cd ${quote(cwd)} && env ${CHILD_ENV.protocolDir}=${quote(protocolDir)} ${CHILD_ENV.nonce}=${quote(boot.nonce)} ${CHILD_ENV.agentId}=${quote(input.agentId)} ${CHILD_ENV.scope}=${quote(input.scope)} ${CHILD_ENV.attempt}=${quote(String(input.attempt))} ${extraEnv.map(([name, value]) => `${name}=${quote(value)} `).join("")}PI_CODING_AGENT_DIR=${quote(profile)} ${quote(this.config.piExecutable ?? "pi")} ${args.map(quote).join(" ")}`;
+      const prefix = `cd ${quote(cwd)} && env ${CHILD_ENV.protocolDir}=${quote(protocolDir)} ${CHILD_ENV.nonce}=${quote(boot.nonce)} ${CHILD_ENV.agentId}=${quote(input.agentId)} ${CHILD_ENV.scope}=${quote(input.scope)} ${CHILD_ENV.attempt}=${quote(String(input.attempt))} ${extraEnv.map(([name, value]) => `${name}=${quote(value)} `).join("")}PI_CODING_AGENT_DIR=${quote(profile)} `;
+      const command = viewer
+        ? `${prefix}${Object.entries(viewer.env ?? {}).map(([name, value]) => `${name}=${quote(value)} `).join("")}PI_MEMO_MIRROR_VIEW=1 ${quote("node")} ${quote("--experimental-strip-types")} ${quote(viewer.script)} ${(viewer.args ?? []).map(quote).join(" ")}`
+        : `${prefix}${quote(this.config.piExecutable ?? "pi")} ${args.map(quote).join(" ")}`;
       // Preparing private input is not permission to adopt a changed or no-longer-ready occupant.
       phase = "pre-run";
       if (!(await probe()))
@@ -1501,6 +1532,8 @@ export class AgentRuntime {
     // A superseded handle (before dispatch) must not repaint the agent's single row.
     const current = await json<TaskCommand>(join(h.protocolDir, "task.json"));
     if (!current || !sameTask(current, h)) return;
+    // A mirror viewer is a pane, not an agent: it never has a presence row.
+    if ((await json<Boot>(join(h.protocolDir, "boot.json")))?.viewer) return;
     const registry = presence();
     if (!registry.get(h.protocolDir)) {
       // Rebuild the row in a new process (cold restart) for a live agent only.

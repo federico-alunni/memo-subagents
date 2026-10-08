@@ -12,6 +12,8 @@ import {
   mkdirSync,
 } from "node:fs";
 import { homedir } from "node:os";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import {
   isTerminalAvailable,
   terminalSetupHint,
@@ -21,6 +23,20 @@ import {
 } from "./terminal.ts";
 import type { CompletionResult } from "./completion.ts";
 import { paneSelector } from "./pane-selector.ts";
+import {
+  HANDOFF_SPEC,
+  HANDOFF_TOOL,
+  childDelegateHook,
+  createHandoffServer,
+  deliverHandoffResult,
+  deliverReplacedResult,
+  shouldSuppressDelivery,
+} from "./handoff.ts";
+import type { HandoffParams } from "./handoff.ts";
+import { MirrorManager } from "./runtime/mirror-manager.ts";
+import type { MirrorSlot } from "./runtime/mirror-manager.ts";
+import { themePalette } from "./runtime/mirror-view.ts";
+import type { MirrorStatus } from "./runtime/mirror-view.ts";
 import { randomBytes, randomUUID } from "node:crypto";
 import {
   buildAuthenticatedModelCatalog,
@@ -95,9 +111,10 @@ import {
 } from "./runtime/presence.ts";
 import { RuntimeError } from "./runtime/index.ts";
 import { validBashAllowEntry } from "./runtime/protocol.ts";
-import type { AgentHandle, LaunchSpec, Observation } from "./runtime/index.ts";
+import type { AgentHandle, ChildRecord, LaunchSpec, Observation } from "./runtime/index.ts";
 import {
   subagentRuntime,
+  subagentStateDir,
   superviseSubagent,
   type SupervisedOutcome,
 } from "./runtime-client.ts";
@@ -209,6 +226,18 @@ const SubagentParams = Type.Object({
     Type.String({
       description:
         "Commit-ish the worktree starts from (requires worktree: true). Default: HEAD of the source checkout, resolved to a commit at spawn time.",
+    }),
+  ),
+  worktreeSpace: Type.Optional(
+    Type.Boolean({
+      description:
+        "With worktree: true, open the worktree as its own Herdr workspace. The main tab shows a read-only mirror of the sub-agent (promote it with /subagent or Ctrl+Alt+X). That sub-agent can start further agents in its own workspace with handoff.",
+    }),
+  ),
+  handoff: Type.Optional(
+    Type.Union([Type.Literal("wait"), Type.Literal("replace")], {
+      description:
+        "Only for a sub-agent that runs in a worktree space. Start this agent in a new tab of YOUR OWN worktree space (same checkout and branch). \"wait\": you wait for its result, delivered to you as your next task; end your turn and do not touch the checkout meanwhile. \"replace\": it takes over your work and you end; the main session receives only its final result.",
     }),
   ),
 });
@@ -669,6 +698,25 @@ interface RunningSubagent {
   runtimePlan: ResolvedRuntimePlan | undefined;
   /** Set when the child runs in a pi-memo-subagents git worktree. */
   worktree?: WorktreeInfo;
+  /** Worktree-space agents: the slot (one mirror, one widget row) this agent belongs to. */
+  slot?: AgentSlot;
+  /** The slot's handoff mode that created this agent (undefined for the slot's first agent). */
+  handoff?: { mode: "wait" | "replace"; parentId: string };
+  /** replace: this agent ended by handing its work to `replacedBy`; its own result never reaches the model. */
+  replacedBy?: string;
+  /** Request ids of delegated handoff requests already served (dedup across /reload). */
+  servedRequests?: Set<string>;
+}
+
+/** A worktree-space workspace: its agents (a handoff chain) share one mirror and one widget row. */
+interface AgentSlot {
+  id: string;
+  /** The first agent's name. */
+  name: string;
+  startTime: number;
+  /** Names in launch order. */
+  chain: string[];
+  worktree?: Pick<WorktreeInfo, "branch"> & Partial<WorktreeInfo>;
 }
 
 interface SubagentRuntime {
@@ -933,40 +981,141 @@ function renderWidgetLines(
   ];
 }
 
+/** One widget row per worktree-space slot: its handoff chain, the slot's own clock, the active member's state. */
+function slotRow(
+  slot: AgentSlot,
+  members: RunningSubagent[],
+  now: number,
+): { left: string; right: string; count: RowCount } {
+  const sorted = [...members].sort((a, b) => a.startTime - b.startTime);
+  const first = sorted[0];
+  const active = sorted[sorted.length - 1];
+  const activeProjection = projectLifecycle(ensureLifecycle(active), now);
+  const prefix = first.name === slot.name ? slot.name : `${slot.name} › ${first.name}`;
+  const agentTag = first.agent ? ` (${first.agent})` : "";
+  const chain = sorted.slice(1).map((member) => ` › ${member.name}`).join("");
+  const branch = slot.worktree?.branch ?? first.worktree?.branch;
+  const elapsed = formatElapsedMMSS(slot.startTime, activeProjection.runtimeEndedAt ?? now);
+  const mirror = slotMirrorPane(slot.id);
+  const selected =
+    paneSelector.state.selected !== undefined &&
+    (paneSelector.state.selected === mirror || sorted.some((member) => member.surface === paneSelector.state.selected))
+      ? "▶"
+      : " ";
+  const left = ` ${selected} ${elapsed}  ⧉ ${prefix}${agentTag}${chain}${branch ? ` ⎇ ${branch}` : ""} `;
+  const runtimeTag = active.runtimePlan ? `${active.runtimePlan.modelId}|${active.runtimePlan.thinking} · ` : "";
+  // A waiting parent shows who it waits for; a child that waits for the user keeps its own attention label.
+  const status =
+    sorted.length > 1 && activeProjection.kind !== "blocked"
+      ? `waiting › ${active.name}${
+          activeProjection.stateDurationSince == null
+            ? ""
+            : ` ${formatElapsedDuration(now - activeProjection.stateDurationSince)}`
+        }`
+      : formatLifecycleWidgetLabel(activeProjection, now).trim();
+  return {
+    left,
+    right: statusConfig.enabled ? ` ${runtimeTag}${status} ` : ` ${runtimeTag}starting… `,
+    count: lifecycleRowCount(activeProjection),
+  };
+}
+
 function renderSubagentWidgetLines(
   agents: RunningSubagent[],
   width: number,
   runtimeRows: PresenceEntry[] = [],
 ): string[] {
   const now = Date.now();
-  const rendered = agents.map((agent) => ({ agent, projection: projectLifecycle(ensureLifecycle(agent), now) }));
-  const { info, accent } = widgetHeader([
-    ...rendered.map(({ projection }) => lifecycleRowCount(projection)),
-    ...runtimeRows.map(presenceRowCount),
-  ]);
-
-  const lines: string[] = [borderTop("Subagents", info, width, accent)];
-
-  for (const { agent, projection } of rendered) {
+  type Row = { left: string; right: string; count: RowCount };
+  const rows: Row[] = [];
+  const slotAt = new Map<string, number>();
+  const slotMembers = new Map<string, RunningSubagent[]>();
+  for (const agent of agents) {
+    if (agent.slot) {
+      const members = slotMembers.get(agent.slot.id) ?? [];
+      members.push(agent);
+      slotMembers.set(agent.slot.id, members);
+      if (!slotAt.has(agent.slot.id)) {
+        slotAt.set(agent.slot.id, rows.length);
+        rows.push(undefined as unknown as Row); // filled once every member is known
+      }
+      continue;
+    }
+    const projection = projectLifecycle(ensureLifecycle(agent), now);
     const elapsed = formatElapsedMMSS(agent.startTime, projection.runtimeEndedAt ?? now);
     const agentTag = agent.agent ? ` (${agent.agent})` : "";
     const worktreeTag = agent.worktree ? ` ⎇ ${agent.worktree.branch}` : "";
     const selected = paneSelector.state.selected === agent.surface ? "▶" : " ";
-    const left = ` ${selected} ${elapsed}  ${agent.name}${agentTag}${worktreeTag} `;
     const runtimeTag = agent.runtimePlan
       ? `${agent.runtimePlan.modelId}|${agent.runtimePlan.thinking} · `
       : "";
-    const right = statusConfig.enabled
-      ? ` ${runtimeTag}${formatLifecycleWidgetLabel(projection, now).trim()} `
-      : ` ${runtimeTag}starting… `;
-
-    lines.push(borderLine(left, right, width, accent));
+    rows.push({
+      left: ` ${selected} ${elapsed}  ${agent.name}${agentTag}${worktreeTag} `,
+      right: statusConfig.enabled
+        ? ` ${runtimeTag}${formatLifecycleWidgetLabel(projection, now).trim()} `
+        : ` ${runtimeTag}starting… `,
+      count: lifecycleRowCount(projection),
+    });
   }
+  for (const [slotId, index] of slotAt) {
+    const members = slotMembers.get(slotId)!;
+    rows[index] = slotRow(members[0].slot!, members, now);
+  }
+  const { info, accent } = widgetHeader([...rows.map((row) => row.count), ...runtimeRows.map(presenceRowCount)]);
+
+  const lines: string[] = [borderTop("Subagents", info, width, accent)];
+  for (const row of rows) lines.push(borderLine(row.left, row.right, width, accent));
   for (const row of runtimeRows) lines.push(presenceRowLine(row, width, accent, now));
 
   lines.push(borderLine(SELECTOR_HINT, "", width, accent));
   lines.push(borderBottom(width, accent));
   return lines;
+}
+
+/** Pane of the slot's mirror viewer (undefined while none is open). */
+function slotMirrorPane(slotId: string): string | undefined {
+  return mirrorManager()?.paneFor(slotId);
+}
+
+const MIRROR_MANAGER_KEY = Symbol.for("pi-memo-subagents/mirror-manager");
+
+/** The process-wide mirror manager (survives /reload with the running entries); undefined outside Herdr. */
+function mirrorManager(): MirrorManager | undefined {
+  const store = globalThis as unknown as Record<symbol, MirrorManager | undefined>;
+  if (store[MIRROR_MANAGER_KEY]) return store[MIRROR_MANAGER_KEY];
+  if (!isTerminalAvailable()) return undefined;
+  const identity = processIdentitySync(process.pid);
+  if (!identity) return undefined;
+  return (store[MIRROR_MANAGER_KEY] = new MirrorManager({
+    runtime: subagentRuntime(),
+    stateDir: subagentStateDir(),
+    viewerScript: fileURLToPath(new URL("./runtime/mirror-viewer.ts", import.meta.url)),
+    cwd: process.cwd(),
+    owner: { pid: process.pid, identity },
+    ownerAlive: async (owner) => processIdentitySync(owner.pid) === owner.identity,
+  }));
+}
+
+/** `ps` start time + command of a process: the identity a reused PID cannot fake. */
+function processIdentitySync(pid: number): string | undefined {
+  try {
+    const out = execFileSync("ps", ["-p", String(pid), "-o", "lstart=", "-o", "command="], { encoding: "utf8", timeout: 4000 }).trim();
+    return out || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** One Herdr CLI call (JSON in, `result` out); throws on a Herdr error. */
+function herdrCli(args: string[]): unknown {
+  const response = JSON.parse(execFileSync(process.env.HERDR_BIN_PATH || "herdr", args, { encoding: "utf8", timeout: 10000 }));
+  if (response.error) throw new Error(response.error.message ?? "Herdr request failed");
+  return response.result;
+}
+
+/** This pi runs as a worktree-space subagent: the runtime declared the internal handoff transport. */
+function isWorktreeSpaceChild(): boolean {
+  return process.env.PI_SUBAGENT_WORKTREE_SPACE === "1" && !!process.env.PI_SUBAGENT_ID;
 }
 
 function updateWidget() {
@@ -1104,17 +1253,71 @@ interface SelectorChoice {
   name: string;
   label: string;
   running?: RunningSubagent;
+  /** A worktree-space slot: `paneId` is its mirror's pane; the agents live in another workspace. */
+  slot?: AgentSlot;
+}
+
+/** One entry per worktree-space slot (its mirror pane), then every other running agent as before. */
+function slotSelectorChoices(
+  agents: RunningSubagent[],
+  mirrorPane: (slotId: string) => string | undefined,
+): SelectorChoice[] {
+  const choices: SelectorChoice[] = [];
+  const seen = new Set<string>();
+  for (const agent of agents) {
+    if (!agent.slot) {
+      choices.push({
+        paneId: agent.surface,
+        name: agent.name,
+        running: agent,
+        label: `${agent.name} [${agent.id}] · ${projectLifecycle(ensureLifecycle(agent), Date.now()).kind}`,
+      });
+      continue;
+    }
+    if (seen.has(agent.slot.id)) continue;
+    seen.add(agent.slot.id);
+    const pane = mirrorPane(agent.slot.id);
+    if (!pane) continue;
+    const members = agents.filter((member) => member.slot?.id === agent.slot!.id).sort((a, b) => a.startTime - b.startTime);
+    const active = members[members.length - 1];
+    choices.push({
+      paneId: pane,
+      name: agent.slot.name,
+      slot: agent.slot,
+      label: `⧉ ${agent.slot.chain.join(" › ")} · ${projectLifecycle(ensureLifecycle(active), Date.now()).kind}`,
+    });
+  }
+  return choices;
+}
+
+/**
+ * Promote a slot: its agents live in another Herdr workspace, so nothing is moved. Herdr's focus goes to the
+ * active (newest living) agent's terminal; the mirror stays where it is. Returns the focused pane.
+ */
+function promoteSlot(
+  agents: RunningSubagent[],
+  slotId: string,
+  herdr: (args: string[]) => unknown,
+): string | undefined {
+  const members = agents.filter((agent) => agent.slot?.id === slotId).sort((a, b) => a.startTime - b.startTime);
+  const active = members[members.length - 1];
+  if (!active) return undefined;
+  try {
+    herdr(["agent", "focus", active.surface]);
+  } catch {
+    // Herdr only focuses panes where it detects an agent: otherwise go to the pane's workspace and tab.
+    const pane = (herdr(["pane", "get", active.surface]) as { pane?: { workspace_id?: string; tab_id?: string } }).pane;
+    if (!pane?.workspace_id || !pane.tab_id) throw new Error("The agent's pane is not available");
+    herdr(["workspace", "focus", pane.workspace_id]);
+    herdr(["tab", "focus", pane.tab_id]);
+  }
+  return active.surface;
 }
 
 /** This session's subagents, then other runtime agents shown-able beside the main pane (same workspace). */
 function selectorChoices(): SelectorChoice[] {
   const own = Array.from(runningSubagents.values());
-  const choices: SelectorChoice[] = own.map((agent) => ({
-    paneId: agent.surface,
-    name: agent.name,
-    running: agent,
-    label: `${agent.name} [${agent.id}] · ${projectLifecycle(ensureLifecycle(agent), Date.now()).kind}`,
-  }));
+  const choices: SelectorChoice[] = slotSelectorChoices(own, slotMirrorPane);
   let selectable: Set<string>;
   try {
     selectable = new Set(paneSelector.selectable());
@@ -1124,6 +1327,7 @@ function selectorChoices(): SelectorChoice[] {
   for (const entry of presence().list()) {
     if (!entry.paneId || !selectable.has(entry.paneId) || own.some((agent) => agent.surface === entry.paneId))
       continue;
+    if (own.some((agent) => agent.slot && slotMirrorPane(agent.slot.id) === entry.paneId)) continue;
     const status = presenceStatus(entry, Date.now());
     choices.push({
       paneId: entry.paneId,
@@ -1312,11 +1516,32 @@ function validateWorktreeParams(params: {
   worktree?: boolean;
   worktreeBranch?: string;
   worktreeBase?: string;
-}): string | null {
+  worktreeSpace?: boolean;
+  handoff?: string;
+  fork?: boolean;
+}): string | undefined {
   if (params.worktree !== true && (params.worktreeBranch != null || params.worktreeBase != null)) {
     return "worktreeBranch and worktreeBase require worktree: true.";
   }
-  return null;
+  if (params.worktreeSpace === true && params.worktree !== true) return "worktreeSpace requires worktree: true.";
+  if (params.worktreeSpace === true && params.handoff != null)
+    return "handoff is only available from a subagent that runs in a worktree space, and it cannot be combined with worktreeSpace (the new agent uses your own worktree space).";
+  if (params.worktreeSpace === true && params.fork === true)
+    return "worktreeSpace cannot be combined with fork: true (a worktree-space agent starts a fresh session).";
+  if (params.handoff != null && (params.worktree != null || params.worktreeBranch != null || params.worktreeBase != null))
+    return "handoff cannot be combined with worktree options: the new agent uses your own worktree.";
+  return undefined;
+}
+
+/** `handoff` is a wait/replace mode, only available inside a worktree space (the caller passes that fact). */
+function validateHandoffParams(handoff: unknown, context: { worktreeSpace?: boolean } = {}): string | undefined {
+  if (!context.worktreeSpace)
+    return handoff === undefined || handoff === null
+      ? "handoff is only available from a subagent that runs in a worktree space."
+      : "handoff is only available from a subagent that runs in a worktree space (this session is not one).";
+  if (handoff !== undefined && handoff !== "wait" && handoff !== "replace")
+    return 'handoff must be "wait" or "replace".';
+  return undefined;
 }
 
 interface DirtySourcePromptContext {
@@ -1572,6 +1797,13 @@ export const __test__ = {
   resolveResultPresentation,
   resolveResumeLaunchBehavior,
   validateWorktreeParams,
+  validateHandoffParams,
+  slotSelectorChoices,
+  promoteSlot,
+  deliverHandoffResult,
+  deliverReplacedResult,
+  shouldSuppressDelivery,
+  createHandoffServer,
   validateThinkingParam,
   confirmDirtyWorktreeSource,
   insertBeforeSessionRef,
@@ -1589,6 +1821,7 @@ function startWidgetRefresh() {
   updateWidget(); // immediate first render
   widgetInterval = setInterval(() => {
     updateWidget();
+    void syncMirrors();
   }, 1000);
   (globalThis as any)[WIDGET_INTERVAL_KEY] = widgetInterval;
 }
@@ -1600,6 +1833,15 @@ function startWidgetRefresh() {
  * Call watchSubagent() on the returned object to observe completion.
  */
 type LaunchContext = Parameters<typeof launchSubagentInner>[1];
+
+/** Launch variants beyond a plain subagent: a planned worktree, a worktree space, or a handoff into one. */
+interface LaunchOptions {
+  worktreePlan?: WorktreePlan;
+  /** Open the worktree as its own Herdr workspace (the main tab shows a mirror). */
+  worktreeSpace?: boolean;
+  /** B of a handoff: the parent's slot and worktree; no worktree is created, the checkout is the parent's. */
+  handoff?: { mode: "wait" | "replace"; parent: RunningSubagent };
+}
 
 interface LaunchState {
   worktree?: WorktreeInfo;
@@ -1614,7 +1856,7 @@ async function launchSubagent(
   params: typeof SubagentParams.static,
   ctx: LaunchContext,
   parentThinking: ThinkingLevel,
-  options?: { worktreePlan?: WorktreePlan },
+  options?: LaunchOptions,
 ): Promise<RunningSubagent> {
   const state: LaunchState = {};
   try {
@@ -1707,10 +1949,12 @@ function subagentEnv(options: {
   agent?: string;
   id: string;
   denySet?: Set<string>;
+  worktreeSpace?: boolean;
 }): Record<string, string> {
   return {
     PI_SUBAGENT_NAME: options.name,
     PI_SUBAGENT_ID: options.id,
+    ...(options.worktreeSpace ? { PI_SUBAGENT_WORKTREE_SPACE: "1" } : {}),
     ...(options.agent ? { PI_SUBAGENT_AGENT: options.agent } : {}),
     ...(options.denySet && options.denySet.size > 0 ? { PI_DENY_TOOLS: [...options.denySet].join(",") } : {}),
   };
@@ -1739,7 +1983,7 @@ async function launchSubagentInner(
     };
   },
   parentThinking: ThinkingLevel,
-  options: { worktreePlan?: WorktreePlan } | undefined,
+  options: LaunchOptions | undefined,
   launchState: LaunchState,
 ): Promise<RunningSubagent> {
   const startTime = Date.now();
@@ -1786,7 +2030,8 @@ async function launchSubagentInner(
   if (options?.worktreePlan) {
     launchState.worktree = await createWorktree(options.worktreePlan);
   }
-  const worktree = launchState.worktree;
+  // A handoff runs in its parent's checkout: nothing is created or rolled back for it.
+  const worktree = options?.handoff ? options.handoff.parent.worktree : launchState.worktree;
   const { effectiveCwd, effectiveAgentDir } = worktree
     ? resolveWorktreePaths(worktree.cwd)
     : resolvedPaths;
@@ -1847,6 +2092,9 @@ async function launchSubagentInner(
     writeFileSync(systemPromptFile, identity, "utf8");
   }
 
+  // A worktree-space agent (and every agent a handoff adds to its space) lives in its own Herdr workspace:
+  // the main tab shows a mirror of it, and it may hand work to further agents of that space.
+  const inSlot = !!worktree && (options?.worktreeSpace === true || !!options?.handoff);
   const spec: LaunchSpec = {
     scope: sessionId,
     agentId: id,
@@ -1867,13 +2115,16 @@ async function launchSubagentInner(
     exit: effectiveAutoExit ? "auto" : "tool",
     skills: splitList(params.skills ?? agentDefs?.skills),
     session: { kind: "file", path: subagentSessionFile },
-    env: subagentEnv({ name: params.name, agent: params.agent, id, denySet }),
+    env: subagentEnv({ name: params.name, agent: params.agent, id, denySet, worktreeSpace: inSlot }),
+    ...(inSlot ? { delegatedTools: [HANDOFF_SPEC] } : {}),
     ...(systemPromptFile
       ? systemPromptMode === "replace"
         ? { systemPrompt: systemPromptFile }
         : { appendSystemPrompt: [systemPromptFile] }
       : {}),
-    placement: surfacePlacement(),
+    ...(inSlot && worktree
+      ? { placement: "worktree" as const, spaceRoot: worktree.path }
+      : { placement: surfacePlacement() }),
     display: { label: params.name },
   };
   const handle = await subagentRuntime().launch(spec);
@@ -1894,9 +2145,21 @@ async function launchSubagentInner(
     lifecycle: createLifecycle(startTime),
     ...(worktree ? { worktree } : {}),
   };
+  if (inSlot) {
+    if (options?.handoff) {
+      // B joins its parent's slot: same mirror, same widget row, the chain grows.
+      const slot = options.handoff.parent.slot!;
+      slot.chain.push(params.name);
+      running.slot = slot;
+      running.handoff = { mode: options.handoff.mode, parentId: options.handoff.parent.id };
+    } else {
+      running.slot = { id, name: params.name, startTime, chain: [params.name], worktree: worktree! };
+    }
+  }
 
   runningSubagents.set(id, running);
-  if (worktree) {
+  // A handoff agent shares its parent's worktree and registry record.
+  if (worktree && !options?.handoff) {
     try {
       writeWorktreeRecord(getWorktreeRegistryDir(), {
         id: worktree.id,
@@ -1974,7 +2237,10 @@ async function watchSubagent(
       runtime: subagentRuntime(),
       handle: () => running.handle!,
       signal,
-      onObservation: (o) => observeSubagentObservation(running, o),
+      onObservation: (o) => {
+        observeSubagentObservation(running, o);
+        if (running.slot && o.requests.length > 0) void serveHandoff(running, o.requests);
+      },
     });
     paneSelector.forget(running.surface);
     const result = completionFromOutcome(outcome, name);
@@ -2053,6 +2319,322 @@ async function watchSubagent(
   }
 }
 
+/** Serves the handoff requests of a slot member (once each); needs the process' extension API. */
+async function serveHandoff(running: RunningSubagent, requests: ChildRecord[]): Promise<void> {
+  const pi = runtime.pi;
+  if (!pi) return;
+  running.servedRequests ??= new Set();
+  const serve = createHandoffServer({
+    runtime: subagentRuntime(),
+    launch: (parent, params) => launchHandoff(parent as RunningSubagent, params, pi),
+  });
+  await serve(running, requests, running.servedRequests);
+}
+
+/** What each slot's mirror shows now: the newest living member (the one working), in its pane. */
+function mirrorSlots(): MirrorSlot[] {
+  const seen = new Set<string>();
+  const slots: MirrorSlot[] = [];
+  for (const agent of runningSubagents.values()) {
+    if (!agent.slot || seen.has(agent.slot.id)) continue;
+    seen.add(agent.slot.id);
+    const members = slotMembers(agent.slot.id);
+    const active = members[members.length - 1];
+    const projection = projectLifecycle(ensureLifecycle(active), Date.now());
+    slots.push({
+      slotId: agent.slot.id,
+      view: {
+        version: 1,
+        paneId: active.surface,
+        name: agent.slot.name,
+        ...(active.agent ? { agent: active.agent } : {}),
+        ...(agent.slot.worktree?.branch ? { branch: agent.slot.worktree.branch } : {}),
+        startedAt: active.startTime,
+        status: mirrorStatus(projection.kind),
+        ...(projection.kind === "blocked" ? { attention: true } : {}),
+        palette: currentPalette(),
+      },
+    });
+  }
+  return slots;
+}
+
+function mirrorStatus(kind: LifecycleProjection["kind"]): MirrorStatus {
+  switch (kind) {
+    case "blocked":
+      return "question";
+    case "stalled":
+      return "stalled";
+    case "waiting":
+      return "waiting";
+    case "completed":
+    case "finalizing":
+      return "done";
+    case "failed":
+      return "error";
+    case "starting":
+    case "running":
+      return "starting";
+    default:
+      return "active";
+  }
+}
+
+let palette: ReturnType<typeof themePalette> | undefined;
+function currentPalette(): ReturnType<typeof themePalette> | undefined {
+  const theme = runtime.latestCtx?.ui?.theme as { getFgAnsi(token: string): string } | undefined;
+  if (theme) palette = themePalette(theme);
+  return palette;
+}
+
+let syncing = false;
+/** Opens, updates and closes the mirrors to match the running slots (display only; never throws). */
+async function syncMirrors(): Promise<void> {
+  const manager = mirrorManager();
+  if (!manager || syncing) return;
+  syncing = true;
+  try {
+    await manager.sync(mirrorSlots());
+  } catch {
+    // A mirror is a convenience: the agents and their results never depend on it.
+  } finally {
+    syncing = false;
+  }
+}
+
+/**
+ * Child side of a handoff: the request goes to the main session (which owns the new agent and its mirror)
+ * through the runtime's delegated-tool protocol. wait: this agent must end its turn and leave the checkout
+ * alone until the result arrives as its next task (its auto exit is held once). replace: this agent ends.
+ */
+async function requestHandoff(params: typeof SubagentParams.static & { handoff: "wait" | "replace" }) {
+  const fail = (message: string) => ({
+    content: [{ type: "text" as const, text: `Error: ${message}` }],
+    details: { error: message },
+  });
+  const hook = childDelegateHook();
+  if (!hook) return fail("handoff is not available: this session is not a worktree-space subagent of a pi-memo-subagents main session.");
+  const { handoff: mode, ...spawn } = params;
+  let answer: any;
+  try {
+    answer = await hook.request(HANDOFF_TOOL, { mode, spawn });
+  } catch (error) {
+    return fail(`the handoff request failed (${error instanceof Error ? error.message : String(error)}). Nothing was started; do not retry blindly.`);
+  }
+  if (answer?.error) return fail(`the main session could not start "${params.name}": ${answer.error}`);
+  if (mode === "replace") {
+    // This agent hands its work over and ends; the new agent's final result goes to the main session.
+    const summary = `Handed over to "${params.name}".`;
+    setTimeout(() => void hook.end("replace", { summary }).catch(() => {}), 200); // let this result reach the model first
+    return {
+      content: [{ type: "text" as const, text: `"${params.name}" takes over your work in this worktree space and you are ending now. Do nothing more.` }],
+      details: { handoff: "replace", name: params.name, id: answer?.id },
+    };
+  }
+  hook.holdAutoExit();
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text:
+          `"${params.name}" was started in a new tab of this worktree space (same checkout and branch). ` +
+          `End your turn now and do not touch the checkout until its result arrives as your next task. ` +
+          `Do NOT poll or assume what it will do.`,
+      },
+    ],
+    details: { handoff: "wait", name: params.name, id: answer?.id },
+  };
+}
+
+/** The running agents of a slot, oldest first. */
+function slotMembers(slotId: string): RunningSubagent[] {
+  return [...runningSubagents.values()].filter((agent) => agent.slot?.id === slotId).sort((a, b) => a.startTime - b.startTime);
+}
+
+/**
+ * The end of a slot member. Returns true when the slot handled it (the caller then delivers nothing):
+ *  - a parent that ended by `replace` is dropped: its work continues in the agent that replaced it;
+ *  - the last agent of a slot that was replaced reports to the main session with the whole chain;
+ *  - a handoff agent started with `wait` gives its result to its parent as the parent's next task
+ *    (when the parent is gone, the result goes to the main session like any other).
+ */
+async function routeSlotEnd(running: RunningSubagent, result: SubagentResult, pi: ExtensionAPI): Promise<boolean> {
+  const slot = running.slot!;
+  const finish = (delivery: "suppressed" | "delivered") => {
+    running.lifecycle = markDelivery(running.lifecycle, delivery);
+    runningSubagents.delete(running.id);
+    updateWidget();
+  };
+  if (shouldSuppressDelivery(running)) {
+    // replace: this agent handed the slot over; its own end is not news for the model.
+    finish("suppressed");
+    return true;
+  }
+  const handoff = running.handoff;
+  if (!handoff) return false;
+  const parent = runningSubagents.get(handoff.parentId);
+  if (handoff.mode === "wait" && parent?.handle) {
+    finish("suppressed");
+    try {
+      await deliverHandoffResult(subagentRuntime(), parent, result, running.name);
+    } catch (error) {
+      // The parent can no longer take the result: the main session must not lose it.
+      selectCompletionApi(pi, runtime.pi).sendMessage(
+        {
+          customType: "subagent_result",
+          content:
+            `Sub-agent "${running.name}" finished but its result could not be handed to "${parent.name}" ` +
+            `(${error instanceof Error ? error.message : String(error)}).\n\n${resolveResultPresentation(result, running.name)}`,
+          display: true,
+          details: { name: running.name, exitCode: result.exitCode, elapsed: result.elapsed, sessionFile: result.sessionFile },
+        },
+        { triggerTurn: true, deliverAs: "steer" },
+      );
+    }
+    return true;
+  }
+  if (handoff.mode === "replace") {
+    finish("delivered");
+    deliverReplacedResult(selectCompletionApi(pi, runtime.pi), { slot, result, agent: running.agent });
+    return true;
+  }
+  return false;
+}
+
+/** Launch B for a worktree-space agent that called `subagent` with `handoff` (served by the main session). */
+async function launchHandoff(parent: RunningSubagent, request: HandoffParams, pi: ExtensionAPI): Promise<{ id: string }> {
+  const ctx = runtime.latestCtx;
+  if (!ctx) throw new Error("The main session is not available to start the agent");
+  if (!parent.slot || !parent.worktree) throw new Error("The requesting agent does not run in a worktree space");
+  const spawn = request.spawn as typeof SubagentParams.static;
+  if (!spawn?.name || !spawn?.task) throw new Error("A handoff needs a name and a task for the new agent");
+  const params = { ...spawn, cwd: parent.worktree.cwd } as typeof SubagentParams.static;
+  delete (params as Record<string, unknown>).handoff;
+  const parentThinking = pi.getThinkingLevel();
+  const running = await launchSubagent(params, ctx as unknown as LaunchContext, parentThinking as ThinkingLevel, {
+    handoff: { mode: request.mode, parent },
+  });
+  if (request.mode === "replace") {
+    // The parent ends itself right after this answer: remember who takes over, so its own end stays silent.
+    parent.replacedBy = running.name;
+  }
+  startSupervision(running, pi);
+  void syncMirrors();
+  return { id: running.id };
+}
+
+/**
+ * Supervise a launched subagent in the background and route its end: to the main session as a
+ * `subagent_result` / `subagent_ping` steer (unchanged for plain subagents), or, for a worktree-space slot,
+ * through the handoff rules (wait: to the parent agent; replace: the slot's final result to the main session).
+ */
+function startSupervision(running: RunningSubagent, pi: ExtensionAPI): void {
+  // Create a separate AbortController for the watcher
+  // (the tool's signal completes when we return)
+  const watcherAbort = new AbortController();
+  running.abortController = watcherAbort;
+
+  // Start widget refresh and status supervision when the first agent launches
+  startWidgetRefresh();
+  startStatusRefresh(pi);
+
+  // Fire-and-forget: start watching in background
+  watchSubagent(running, watcherAbort.signal)
+    .then(async (result) => {
+      if (!shouldDeliverSubagentCompletion(running)) {
+        running.lifecycle = markDelivery(running.lifecycle, "suppressed");
+        runningSubagents.delete(running.id);
+        updateWidget();
+        return;
+      }
+      // A worktree-space agent that ended after a handoff: the slot, not the model, decides what happens.
+      if (running.slot && (await routeSlotEnd(running, result, pi))) return;
+      running.lifecycle = markDelivery(running.lifecycle, "delivered");
+      runningSubagents.delete(running.id);
+      updateWidget();
+      const completionApi = selectCompletionApi(pi, runtime.pi);
+      // Only worktree children await git state; others deliver synchronously as before.
+      const worktreeReport = running.worktree
+        ? await describeWorktreeForResult(running.worktree)
+        : undefined;
+
+      if (result.ping) {
+        // Subagent is requesting help — steer a ping message with session path for resume
+        const sessionRef = `\n\nSession: ${result.sessionFile}\nResume: pi --session ${result.sessionFile}`;
+        completionApi.sendMessage(
+          {
+            customType: "subagent_ping",
+            content: `Sub-agent "${result.ping.name}" needs help (${formatElapsed(result.elapsed)}):\n\n${result.ping.message}${worktreeReport ? `\n\n${worktreeReport.text}` : ""}${sessionRef}`,
+            display: true,
+            details: {
+              name: result.ping.name,
+              message: result.ping.message,
+              agent: running.agent,
+              sessionFile: result.sessionFile,
+              ...(worktreeReport ? { worktree: worktreeReport.details } : {}),
+            },
+          },
+          { triggerTurn: true, deliverAs: "steer" },
+        );
+        return;
+      }
+
+      const basePresentation = resolveResultPresentation(result, running.name);
+      const runtimePresentation = running.runtimePlan?.runtimeMismatch
+        ? `${basePresentation}\n\nRuntime warning: ${running.runtimePlan.runtimeMismatch}`
+        : basePresentation;
+      const presentation = worktreeReport
+        ? insertBeforeSessionRef(runtimePresentation, worktreeReport.text)
+        : runtimePresentation;
+
+      completionApi.sendMessage(
+        {
+          customType: "subagent_result",
+          content: presentation,
+          display: true,
+          details: {
+            name: running.name,
+            task: running.task,
+            agent: running.agent,
+            exitCode: result.exitCode,
+            elapsed: result.elapsed,
+            sessionFile: result.sessionFile,
+            ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
+            ...(running.runtimePlan ? { runtimePlan: running.runtimePlan } : {}),
+            ...(worktreeReport ? { worktree: worktreeReport.details } : {}),
+          },
+        },
+        { triggerTurn: true, deliverAs: "steer" },
+      );
+    })
+    .catch((err) => {
+      if (!shouldDeliverSubagentCompletion(running)) {
+        running.lifecycle = markDelivery(running.lifecycle, "suppressed");
+        runningSubagents.delete(running.id);
+        updateWidget();
+        return;
+      }
+      running.lifecycle = markDelivery(running.lifecycle, "delivered");
+      runningSubagents.delete(running.id);
+      updateWidget();
+      selectCompletionApi(pi, runtime.pi).sendMessage(
+        {
+          customType: "subagent_result",
+          content: `Sub-agent "${running.name}" error: ${err?.message ?? String(err)}${running.worktree ? `\n\n${worktreeLines(running.worktree)}` : ""}`,
+          display: true,
+          details: {
+            name: running.name,
+            task: running.task,
+            error: err?.message,
+            ...(running.worktree ? { worktree: worktreeDetails(running.worktree) } : {}),
+          },
+        },
+        { triggerTurn: true, deliverAs: "steer" },
+      );
+    });
+
+}
+
 export default function subagentsExtension(pi: ExtensionAPI) {
   runtime.pi = pi;
 
@@ -2080,6 +2662,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     for (const agent of runningSubagents.values()) {
       paneSelector.state.owned.set(agent.surface, agent.name);
     }
+    // Mirrors of sessions that no longer exist (crash) are closed; a live session's are never touched.
+    void mirrorManager()?.reconcile().catch(() => {});
     if (runningSubagents.size > 0) {
       startWidgetRefresh();
       startStatusRefresh(pi);
@@ -2104,6 +2688,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       (globalThis as any)[STATUS_INTERVAL_KEY] = null;
     }
 
+    // /reload keeps the agents and their mirrors; quitting closes the mirrors this process owns.
+    if (!shouldPreserveSubagentsOnShutdown((event as any).reason)) void mirrorManager()?.closeAll().catch(() => {});
     cleanupSubagentsForShutdown((event as any).reason, runningSubagents);
   });
 
@@ -2154,13 +2740,16 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           };
         }
 
-        const worktreeParamError = validateWorktreeParams(params);
+        const worktreeParamError = validateWorktreeParams(params) ?? (params.handoff === undefined ? undefined : validateHandoffParams(params.handoff, { worktreeSpace: isWorktreeSpaceChild() }));
         if (worktreeParamError) {
           return {
             content: [{ type: "text", text: `Error: ${worktreeParamError}` }],
             details: { error: worktreeParamError },
           };
         }
+
+        // handoff: this agent runs in a worktree space and asks the main session to start `params` in it.
+        if (params.handoff) return requestHandoff(params as typeof SubagentParams.static & { handoff: "wait" | "replace" });
 
         const thinkingParamError = validateThinkingParam(
           params,
@@ -2241,7 +2830,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             params,
             ctx,
             parentThinking,
-            worktreePlan ? { worktreePlan } : undefined,
+            worktreePlan
+              ? { worktreePlan, ...(params.worktreeSpace === true ? { worktreeSpace: true } : {}) }
+              : undefined,
           );
         } catch (error) {
           if (!(error instanceof RuntimeError && error.code === "launch_uncertain")) throw error;
@@ -2258,107 +2849,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           };
         }
 
-        // Create a separate AbortController for the watcher
-        // (the tool's signal completes when we return)
-        const watcherAbort = new AbortController();
-        running.abortController = watcherAbort;
-
-        // Start widget refresh and status supervision when the first agent launches
-        startWidgetRefresh();
-        startStatusRefresh(pi);
-
-        // Fire-and-forget: start watching in background
-        watchSubagent(running, watcherAbort.signal)
-          .then(async (result) => {
-            if (!shouldDeliverSubagentCompletion(running)) {
-              running.lifecycle = markDelivery(running.lifecycle, "suppressed");
-              runningSubagents.delete(running.id);
-              updateWidget();
-              return;
-            }
-            running.lifecycle = markDelivery(running.lifecycle, "delivered");
-            runningSubagents.delete(running.id);
-            updateWidget();
-            const completionApi = selectCompletionApi(pi, runtime.pi);
-            // Only worktree children await git state; others deliver synchronously as before.
-            const worktreeReport = running.worktree
-              ? await describeWorktreeForResult(running.worktree)
-              : undefined;
-
-            if (result.ping) {
-              // Subagent is requesting help — steer a ping message with session path for resume
-              const sessionRef = `\n\nSession: ${result.sessionFile}\nResume: pi --session ${result.sessionFile}`;
-              completionApi.sendMessage(
-                {
-                  customType: "subagent_ping",
-                  content: `Sub-agent "${result.ping.name}" needs help (${formatElapsed(result.elapsed)}):\n\n${result.ping.message}${worktreeReport ? `\n\n${worktreeReport.text}` : ""}${sessionRef}`,
-                  display: true,
-                  details: {
-                    name: result.ping.name,
-                    message: result.ping.message,
-                    agent: running.agent,
-                    sessionFile: result.sessionFile,
-                    ...(worktreeReport ? { worktree: worktreeReport.details } : {}),
-                  },
-                },
-                { triggerTurn: true, deliverAs: "steer" },
-              );
-              return;
-            }
-
-            const basePresentation = resolveResultPresentation(result, running.name);
-            const runtimePresentation = running.runtimePlan?.runtimeMismatch
-              ? `${basePresentation}\n\nRuntime warning: ${running.runtimePlan.runtimeMismatch}`
-              : basePresentation;
-            const presentation = worktreeReport
-              ? insertBeforeSessionRef(runtimePresentation, worktreeReport.text)
-              : runtimePresentation;
-
-            completionApi.sendMessage(
-              {
-                customType: "subagent_result",
-                content: presentation,
-                display: true,
-                details: {
-                  name: running.name,
-                  task: running.task,
-                  agent: running.agent,
-                  exitCode: result.exitCode,
-                  elapsed: result.elapsed,
-                  sessionFile: result.sessionFile,
-                  ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
-                  ...(running.runtimePlan ? { runtimePlan: running.runtimePlan } : {}),
-                  ...(worktreeReport ? { worktree: worktreeReport.details } : {}),
-                },
-              },
-              { triggerTurn: true, deliverAs: "steer" },
-            );
-          })
-          .catch((err) => {
-            if (!shouldDeliverSubagentCompletion(running)) {
-              running.lifecycle = markDelivery(running.lifecycle, "suppressed");
-              runningSubagents.delete(running.id);
-              updateWidget();
-              return;
-            }
-            running.lifecycle = markDelivery(running.lifecycle, "delivered");
-            runningSubagents.delete(running.id);
-            updateWidget();
-            selectCompletionApi(pi, runtime.pi).sendMessage(
-              {
-                customType: "subagent_result",
-                content: `Sub-agent "${running.name}" error: ${err?.message ?? String(err)}${running.worktree ? `\n\n${worktreeLines(running.worktree)}` : ""}`,
-                display: true,
-                details: {
-                  name: running.name,
-                  task: running.task,
-                  error: err?.message,
-                  ...(running.worktree ? { worktree: worktreeDetails(running.worktree) } : {}),
-                },
-              },
-              { triggerTurn: true, deliverAs: "steer" },
-            );
-          });
+        // Supervise in the background (the tool's signal completes when we return).
+        startSupervision(running, pi);
 
         // Return immediately
         return {
@@ -2976,11 +3468,19 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         if (!selected) return;
         chosen = choices[labels.indexOf(selected)];
       }
-      const stillOpen = chosen?.running
-        ? runningSubagents.get(chosen.running.id) === chosen.running
-        : !!chosen && paneSelector.state.owned.has(chosen.paneId);
+      const stillOpen = chosen?.slot
+        ? slotMembers(chosen.slot.id).length > 0
+        : chosen?.running
+          ? runningSubagents.get(chosen.running.id) === chosen.running
+          : !!chosen && paneSelector.state.owned.has(chosen.paneId);
       if (!chosen || !stillOpen) {
         ctx.ui.notify("This agent has already finished", "info");
+        return;
+      }
+      if (chosen.slot && chosen.paneId === visible && !cycle) {
+        // The slot's mirror is already beside the main pane: choosing it again promotes the agent itself.
+        const focused = promoteSlot(slotMembers(chosen.slot.id), chosen.slot.id, (args) => herdrCli(args));
+        ctx.ui.notify(focused ? `Focus moved to ${chosen.slot.chain.at(-1)} (${focused})` : "This agent has already finished", "info");
         return;
       }
       if (chosen.running) paneSelector.state.owned.set(chosen.paneId, chosen.name);
