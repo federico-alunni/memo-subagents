@@ -560,6 +560,23 @@ export class AgentRuntime {
     if (!current || !sameTask(h, current))
       throw new RuntimeError("cleanup_blocked", "Task identity changed");
   }
+  /** Whether `launch` ever allocated the exclusive directory of this attempt. `false` proves the
+   * attempt created nothing (no pane, no process): every launch effect comes after the `mkdir`.
+   * Read-only; the caller must make sure no launch of this attempt is still in flight. */
+  async attemptAllocated(
+    scope: string,
+    agentId: string,
+    attempt: number,
+  ): Promise<boolean> {
+    const dir = join(this.root, taskKey(`${scope}\0${agentId}\0${attempt}`));
+    try {
+      await stat(dir);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+  }
   async launch(input: LaunchSpec): Promise<AgentHandle> {
     if (
       typeof input.model !== "string" ||

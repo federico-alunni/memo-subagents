@@ -1312,6 +1312,8 @@ test("unsupported CLI fails before pane creation; readiness failure is launch_un
   f.fake.cliUnsupported = true;
   await assert.rejects(f.transport.launch(f.input), errorCode("unsupported"));
   assert.equal(f.fake.createCount, 0);
+  const { scope, agentId } = f.input;
+  assert.equal(await f.transport.attemptAllocated(scope, agentId, 1), false);
   f.fake.cliUnsupported = false;
   f.fake.readySuppressed = true;
   await assert.rejects(
@@ -1319,11 +1321,23 @@ test("unsupported CLI fails before pane creation; readiness failure is launch_un
     errorCode("launch_uncertain"),
   );
   assert.equal(f.fake.createCount, 1);
+  assert.equal(await f.transport.attemptAllocated(scope, agentId, 2), true);
   await assert.rejects(
     f.transport.launch({ ...f.input, attempt: 2 }),
     (e: any) => e.code === "EEXIST",
   );
   assert.equal(f.fake.createCount, 1);
+});
+
+test("attemptAllocated rethrows errors other than ENOENT: no proof, never a false 'not allocated'", async (t) => {
+  const f = await fixture(t);
+  // The runtime root is a regular file: stat of the attempt directory fails with ENOTDIR.
+  await mkdir(f.stateDir, { recursive: true });
+  await writeFile(join(f.stateDir, "runtime"), "not a directory");
+  await assert.rejects(
+    new AgentRuntime(f.config).attemptAllocated(f.input.scope, f.input.agentId, 1),
+    (e: any) => e.code === "ENOTDIR",
+  );
 });
 
 test("settled record without matching acceptance is not completion evidence", async (t) => {
