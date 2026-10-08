@@ -189,7 +189,7 @@ describe("authenticated model catalog", () => {
     assert.match(catalog, /non-reasoning/);
     assert.match(
       catalog,
-      /Named agents keep their configured runtime when model and thinking overrides are omitted/,
+      /Thinking: explicit, or the named agent's frontmatter default; never inherited from the parent/,
     );
   });
 

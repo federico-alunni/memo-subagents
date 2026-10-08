@@ -57,7 +57,8 @@ The default surface is `selector` (`PI_SUBAGENT_SURFACE`): the first child opens
 | `name` | string | Display name (widget, pane title). Required. |
 | `task` | string | Task prompt. Required. |
 | `agent` | string | Agent definition to load defaults from. |
-| `model` / `thinking` | string | Explicit runtime override (exact `provider/model-id`; `off`…`max`). |
+| `model` | string | Explicit model override (exact `provider/model-id`). Omitted: the agent's default, otherwise the parent model. |
+| `thinking` | string | `off`…`max`. **Required** unless the named agent declares `thinking` in its frontmatter; never inherited from the parent. An explicit value overrides the frontmatter. |
 | `systemPrompt`, `skills`, `tools` | string | Extra role instructions / comma-separated skills / tools. |
 | `cwd` | string | Child working directory (absolute, or relative to the current directory). |
 | `fork` | boolean | Full-context fork of the current conversation. |

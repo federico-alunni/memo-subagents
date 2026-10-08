@@ -1655,7 +1655,7 @@ describe("commands", () => {
 });
 
 describe("tool registration", () => {
-  it("advertises named agents and tells callers to preserve their runtime defaults", async () => {
+  it("advertises named agents and requires thinking unless an agent declares a default", async () => {
     await withIsolatedAgentEnv(async ({ globalAgentsDir }) => {
       writeAgentFile(
         globalAgentsDir,
@@ -1698,10 +1698,12 @@ describe("tool registration", () => {
         guidance,
         /researcher.*Researches external topics using authoritative sources/,
       );
-      assert.match(guidance, /omit.*model.*thinking.*named agent.*defaults/i);
+      assert.match(guidance, /researcher \[global; defaults: model fake\/research, thinking max\]/);
+      assert.match(guidance, /thinking is required unless the named agent declares a thinking default/);
+      assert.match(guidance, /never inherited/);
       assert.match(
         subagent.parameters.properties.thinking.description,
-        /named agent's thinking default/i,
+        /Required unless the named agent declares a thinking default.*never inherited/i,
       );
     });
   });
@@ -1732,7 +1734,8 @@ describe("tool registration", () => {
     });
 
     assert.match(subagent.promptGuidelines.join("\n"), /fake\/fast/);
-    assert.match(subagent.promptGuidelines.join("\n"), /inherit the parent runtime/);
+    assert.match(subagent.promptGuidelines.join("\n"), /thinking is required unless the named agent declares a thinking default/);
+    assert.doesNotMatch(subagent.promptGuidelines.join("\n"), /inherit the parent runtime/);
   });
 
   it("ignores an inherited deny list in a parent process", () => {

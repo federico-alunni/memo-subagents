@@ -131,9 +131,9 @@ function buildSubagentRoutingGuidelines(
 ): string[] {
   return [
     "Choose the named agent whose description most closely matches the task; do not use one agent as a generic default.",
-    "Omit model and thinking when invoking a named agent so its configured defaults apply. Passing either field is an explicit one-off override and takes precedence over agent frontmatter.",
-    "For a bare spawn, omit model and thinking to inherit the parent runtime.",
-    "When an intentional runtime override is necessary, prefer changing thinking before changing models: minimal/low for bounded mechanical work, medium for ordinary implementation or review, and high+ for architecture, concurrency, security, or hard diagnosis.",
+    "thinking is required unless the named agent declares a thinking default in its frontmatter (shown in the catalog below). Thinking is never inherited from your own level: decide it for each spawn.",
+    "Choose thinking by the task's difficulty: minimal/low for bounded mechanical work, medium for ordinary implementation or review, and high+ for architecture, concurrency, security, or hard diagnosis.",
+    "Omit model to use the named agent's model default (otherwise your model). Passing model or thinking explicitly overrides agent frontmatter for this spawn; prefer changing thinking before changing models.",
     "When overriding a subagent model, use an exact authenticated provider/model-id from the live catalog below. Do not invent aliases or fuzzy names.",
     agentCatalog ?? "Available named subagent catalog becomes available after session start.",
     modelCatalog ?? "Authenticated subagent model catalog becomes available after session start.",
@@ -146,7 +146,7 @@ const ThinkingLevelSchema = Type.Union(
   THINKING_LEVELS.map((level) => Type.Literal(level)),
   {
     description:
-      "Pi thinking level. Omit to use a named agent's thinking default, then the parent level. Passing a value explicitly overrides agent frontmatter for this spawn.",
+      "Pi thinking level. Required unless the named agent declares a thinking default in its frontmatter; never inherited from the caller. Passing a value explicitly overrides agent frontmatter for this spawn.",
   },
 );
 
@@ -427,7 +427,7 @@ function buildAvailableAgentCatalog(
   const sorted = [...agents].sort((a, b) => a.name.localeCompare(b.name));
   const visible = sorted.slice(0, limit);
   const lines = [
-    "Available named subagents (choose by role; omit model/thinking to use agent defaults):",
+    "Available named subagents (choose by role; omit model/thinking to use agent defaults; agents without a thinking default require thinking):",
   ];
 
   for (const agent of visible) {
@@ -1288,6 +1288,26 @@ function getWorktreeRegistryDir(): string {
   return worktreeRegistryDir(getAgentConfigDir());
 }
 
+/**
+ * `thinking` must be decided for every spawn: passed explicitly or declared by the named agent's
+ * frontmatter. The tool never falls back to the caller's level (the runtime still accepts a parent level).
+ */
+function validateThinkingParam(
+  params: { thinking?: string; agent?: string },
+  agentDefs: { thinking?: string } | null,
+): string | null {
+  if (params.thinking != null || agentDefs?.thinking) return null;
+  const who = params.agent
+    ? `Agent "${params.agent}" declares no thinking default`
+    : "A bare spawn has no thinking default";
+  return (
+    `thinking is required. ${who}, and thinking is never inherited from the caller. ` +
+    `Pass thinking (off, minimal, low, medium, high, xhigh, max) chosen for this task: ` +
+    `minimal/low for bounded mechanical work, medium for ordinary implementation or review, ` +
+    `high+ for architecture, concurrency, security or hard diagnosis.`
+  );
+}
+
 function validateWorktreeParams(params: {
   worktree?: boolean;
   worktreeBranch?: string;
@@ -1552,6 +1572,7 @@ export const __test__ = {
   resolveResultPresentation,
   resolveResumeLaunchBehavior,
   validateWorktreeParams,
+  validateThinkingParam,
   confirmDirtyWorktreeSource,
   insertBeforeSessionRef,
   extractWorktreeBlock,
@@ -2138,6 +2159,17 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           return {
             content: [{ type: "text", text: `Error: ${worktreeParamError}` }],
             details: { error: worktreeParamError },
+          };
+        }
+
+        const thinkingParamError = validateThinkingParam(
+          params,
+          params.agent ? loadAgentDefaults(params.agent) : null,
+        );
+        if (thinkingParamError) {
+          return {
+            content: [{ type: "text", text: `Error: ${thinkingParamError} No subagent was started.` }],
+            details: { error: thinkingParamError },
           };
         }
 

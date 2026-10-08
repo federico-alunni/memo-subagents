@@ -214,7 +214,7 @@ describe("subagent worktree launch", () => {
   it("without worktree the child is a plain profile launch through the agent runtime", async () => {
     const repo = makeRepo();
     const { tools } = setup();
-    const result = await tools.get("subagent").execute("t", { name: "plain", task: "do it", fork: true }, undefined, undefined, ctx(repo));
+    const result = await tools.get("subagent").execute("t", { name: "plain", task: "do it", thinking: "high", fork: true }, undefined, undefined, ctx(repo));
     const d = result.details;
     assert.equal(d.status, "started");
     assert.equal(d.worktree, undefined);
@@ -249,7 +249,7 @@ describe("subagent worktree launch", () => {
       "---\nname: planner-test\ntools: read, bash, caller_ping\nskills: review\nspawning: false\nauto-exit: false\nsystem-prompt: append\n---\nYou plan.\n",
     );
     const { tools } = setup();
-    const result = await tools.get("subagent").execute("t", { name: "P", task: "plan", agent: "planner-test" }, undefined, undefined, ctx(repo));
+    const result = await tools.get("subagent").execute("t", { name: "P", task: "plan", thinking: "high", agent: "planner-test" }, undefined, undefined, ctx(repo));
     const spec = launched(result.details);
     assert.deepEqual(spec.tools, ["read", "bash"]);
     assert.ok(spec.denyTools?.includes("subagent"));
@@ -309,7 +309,7 @@ describe("subagent worktree launch", () => {
     const link = join(root, `link-${repoCounter}`);
     execFileSync("ln", ["-s", repo, link]);
     const { tools } = setup();
-    const result = await tools.get("subagent").execute("t", { name: "sym", task: "t", cwd: link }, undefined, undefined, ctx(root));
+    const result = await tools.get("subagent").execute("t", { name: "sym", task: "t", thinking: "high", cwd: link }, undefined, undefined, ctx(root));
     const spec = launched(result.details);
     assert.equal(spec.cwd, repo);
     assert.equal(JSON.parse(readFileSync(result.details.sessionFile, "utf8").split("\n")[0]).cwd, repo);
@@ -322,7 +322,7 @@ describe("subagent worktree launch", () => {
     writeFileSync(join(agentDir, "agents", "ro-test.md"), "---\nname: ro-test\nbash: readonly\n---\nRead only.\n");
     try {
       const { tools } = setup();
-      const result = await tools.get("subagent").execute("t", { name: "ro", task: "t", agent: "ro-test" }, undefined, undefined, ctx(repo));
+      const result = await tools.get("subagent").execute("t", { name: "ro", task: "t", thinking: "high", agent: "ro-test" }, undefined, undefined, ctx(repo));
       const spec = launched(result.details);
       assert.equal(spec.bash, "readonly");
       assert.deepEqual(spec.bashAllow, []);
@@ -347,7 +347,7 @@ describe("subagent worktree launch", () => {
     try {
       const { tools } = setup();
       const run = async (agent: string) => {
-        const result = await tools.get("subagent").execute("t", { name: agent, task: "t", agent }, undefined, undefined, ctx(repo));
+        const result = await tools.get("subagent").execute("t", { name: agent, task: "t", thinking: "high", agent }, undefined, undefined, ctx(repo));
         __test__.runningSubagents.get(result.details.id)?.abortController?.abort();
         return launched(result.details);
       };
@@ -389,7 +389,7 @@ describe("subagent worktree launch", () => {
       for (const [name, fields, error] of cases) {
         writeFileSync(join(agentDir, "agents", `${name}.md`), `---\nname: ${name}\n${fields}---\nRole.\n`);
         await assert.rejects(
-          tools.get("subagent").execute("t", { name, task: "t", agent: name, worktree: true }, undefined, undefined, ctx(repo)),
+          tools.get("subagent").execute("t", { name, task: "t", thinking: "high", agent: name, worktree: true }, undefined, undefined, ctx(repo)),
           error,
           name,
         );
@@ -397,6 +397,34 @@ describe("subagent worktree launch", () => {
       assert.equal(panesCreated(), panes);
       assert.ok(!existsSync(join(dirname(repo), `${basename(repo)}-memo-worktrees`)));
       assert.equal(sh(repo, "worktree", "list").split("\n").length, 1);
+    } finally {
+      rmSync(join(agentDir, "agents"), { recursive: true, force: true });
+    }
+  });
+
+  it("requires thinking unless the named agent declares a default; never inherits the parent level", async () => {
+    const repo = makeRepo();
+    mkdirSync(join(agentDir, "agents"), { recursive: true });
+    writeFileSync(join(agentDir, "agents", "no-thinking-test.md"), "---\nname: no-thinking-test\n---\nRole.\n");
+    writeFileSync(join(agentDir, "agents", "medium-test.md"), "---\nname: medium-test\nthinking: medium\n---\nRole.\n");
+    try {
+      const { tools } = setup();
+      const panes = panesCreated();
+      const bare = await tools.get("subagent").execute("t", { name: "bare", task: "t", worktree: true }, undefined, undefined, ctx(repo));
+      assert.match(bare.details.error, /thinking is required\. A bare spawn has no thinking default/);
+      assert.match(bare.content[0].text, /No subagent was started/);
+      const named = await tools.get("subagent").execute("t", { name: "n", task: "t", agent: "no-thinking-test" }, undefined, undefined, ctx(repo));
+      assert.match(named.details.error, /Agent "no-thinking-test" declares no thinking default/);
+      assert.equal(panesCreated(), panes);
+      assert.ok(!existsSync(join(dirname(repo), `${basename(repo)}-memo-worktrees`)));
+
+      // The parent runs at "high": the agent default wins, an explicit value overrides it.
+      const byDefault = await tools.get("subagent").execute("t", { name: "d", task: "t", agent: "medium-test" }, undefined, undefined, ctx(repo));
+      assert.equal(launched(byDefault.details).thinking, "medium");
+      __test__.runningSubagents.get(byDefault.details.id)?.abortController?.abort();
+      const explicit = await tools.get("subagent").execute("t", { name: "e", task: "t", agent: "no-thinking-test", thinking: "low" }, undefined, undefined, ctx(repo));
+      assert.equal(launched(explicit.details).thinking, "low");
+      __test__.runningSubagents.get(explicit.details.id)?.abortController?.abort();
     } finally {
       rmSync(join(agentDir, "agents"), { recursive: true, force: true });
     }
@@ -415,7 +443,7 @@ describe("subagent worktree launch", () => {
     const plain = join(root, "not-a-repo");
     mkdirSync(plain, { recursive: true });
     const panes = panesCreated();
-    const result = await tools.get("subagent").execute("t", { name: "n", task: "t", worktree: true }, undefined, undefined, ctx(plain));
+    const result = await tools.get("subagent").execute("t", { name: "n", task: "t", thinking: "high", worktree: true }, undefined, undefined, ctx(plain));
     assert.match(result.details.error, /not inside a git work tree/);
     assert.equal(panesCreated(), panes);
   });
@@ -425,7 +453,7 @@ describe("subagent worktree launch", () => {
     const { tools, sent } = setup();
     const result = await tools.get("subagent").execute(
       "t",
-      { name: "WT Test", task: "build it", fork: true, worktree: true, cwd: join(repo, "packages", "api") },
+      { name: "WT Test", task: "build it", thinking: "high", fork: true, worktree: true, cwd: join(repo, "packages", "api") },
       undefined,
       undefined,
       ctx(repo),
@@ -520,7 +548,7 @@ describe("subagent worktree launch", () => {
     const panes = panesCreated();
     const result = await tools.get("subagent").execute(
       "t",
-      { name: "dirty", task: "t", worktree: true },
+      { name: "dirty", task: "t", thinking: "high", worktree: true },
       undefined,
       undefined,
       ctx(repo, { hasUI: true, select: async (title, options) => { asked = { title, options }; return options[1]; } }),
@@ -541,7 +569,7 @@ describe("subagent worktree launch", () => {
     const { tools } = setup();
     const result = await tools.get("subagent").execute(
       "t",
-      { name: "dirty-ok", task: "t", worktree: true, fork: true },
+      { name: "dirty-ok", task: "t", thinking: "high", worktree: true, fork: true },
       undefined,
       undefined,
       ctx(repo, { hasUI: true, select: async (_title, options) => options[0] }),
@@ -560,7 +588,7 @@ describe("subagent worktree launch", () => {
     const { tools } = setup();
     const result = await tools.get("subagent").execute(
       "t",
-      { name: "headless", task: "t", worktree: true, worktreeBranch: "feature/headless" },
+      { name: "headless", task: "t", thinking: "high", worktree: true, worktreeBranch: "feature/headless" },
       undefined,
       undefined,
       ctx(repo),
@@ -580,13 +608,13 @@ describe("subagent worktree launch", () => {
     fake.failLaunch = new RuntimeError("launch_failed", "shell never ready");
     try {
       await assert.rejects(
-        tools.get("subagent").execute("t", { name: "fails", task: "t", worktree: true }, undefined, undefined, ctx(repo)),
+        tools.get("subagent").execute("t", { name: "fails", task: "t", thinking: "high", worktree: true }, undefined, undefined, ctx(repo)),
         /rolled back/,
       );
       assert.equal(worktrees(), 1);
       assert.equal(sh(repo, "branch", "--list", "memo/*"), "");
       fake.failLaunch = new RuntimeError("launch_uncertain", "child readiness timed out", { paneId: "w1:p9" });
-      const unsure = await tools.get("subagent").execute("t", { name: "unsure", task: "t", worktree: true }, undefined, undefined, ctx(repo));
+      const unsure = await tools.get("subagent").execute("t", { name: "unsure", task: "t", thinking: "high", worktree: true }, undefined, undefined, ctx(repo));
       assert.equal(unsure.details.uncertain, true);
       assert.equal(unsure.details.paneId, "w1:p9");
       assert.match(unsure.content[0].text, /Do NOT launch it again[\s\S]*kept for inspection|kept for inspection[\s\S]*Do NOT launch it again/);

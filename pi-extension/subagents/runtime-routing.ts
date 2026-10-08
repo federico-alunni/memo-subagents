@@ -302,12 +302,12 @@ export function buildAuthenticatedModelCatalog(
     ].filter(Boolean);
     lines.push(`- ${model.provider}/${model.id} — ${facts.join(", ")}`);
   }
-  if (models.length === 0) lines.push("- none discovered; inherit the parent runtime");
+  if (models.length === 0) lines.push("- none discovered; omit model to use the parent model");
   if (models.length > visibleModels.length) {
     lines.push(`- … ${models.length - visibleModels.length} more authenticated models omitted`);
   }
   lines.push(
-    "Named agents keep their configured runtime when model and thinking overrides are omitted; bare spawns inherit the parent runtime. Pass overrides only when intentional.",
+    "Omitted model: the named agent's default, otherwise the parent model. Thinking: explicit, or the named agent's frontmatter default; never inherited from the parent.",
   );
   return lines.join("\n");
 }
