@@ -1,0 +1,7 @@
+╭─ ⛟  Convoy │ panel-refresh │ phase foundation ────────────────────────────────── ▰▰▱▱▱▱ 2/6 ─╮
+│ B build · S simplify · R review · C correction · ☑ checkpoint · ● stallo                     │
+│ ▾ foundation ● attiva     B S R C  ☑          │                         B S R C  ☑           │
+│   ● fix-core-lock         ✓ ✓ ✓ ·  ☑          │ ● feat-run-control      ✓ ✓ ▶ ·  ☐           │
+│   ● chore-pr-automation   ✓ ▶ · ·  ☐ ⚠12m     │ ● feat-plan-view        ✓ ✓ ✓ ·  ☑           │
+│ ▾ runtime ○ in coda                                                                          │
+│   ● feat-planner-core     ✓ ✓ ✓ ↺2 ☐          │ ● docs-panel            · · · ·  ☐           │

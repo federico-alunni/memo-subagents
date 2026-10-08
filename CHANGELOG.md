@@ -16,6 +16,9 @@
 - `LaunchSpec.viewer`: AgentRuntime launch capability for launching read-only terminal programs with child identity and shutdown guarantees, omitting pi CLI checks and presence rows.
 - `LaunchSpec.spaceRoot`: Allows launching worktree-space children from sub-directories within the worktree checkout.
 - `DelegatedToolSpec.internal`: Policy flag for internal delegated transports (e.g. `subagent_handoff`), accessible to child extensions without being exposed as visible model tools.
+- **Convoy surface mode & issue #86 panel**: Opt-in `PI_SUBAGENT_SURFACE=convoy` renders the approved issue #86 panel above the editor (`runtime/convoy-panel.ts`), featuring the `╭─ ⛟ Convoy │ <title> │ phase <phase> ...` header bar with progress indicators, stages grid (`B S R C ☑`), selection marker `▸` in the free cell before the dot without shifting alignment, stall durations (`⚠12m` or `?40s`), and selected worker detail row (`⎇ <branch> · <status>`).
+  - Implemented as a pure, dependency-free function (`renderConvoyPanel(data, width, theme): string[]`) verified against golden byte-for-byte tests for all 3 scenarios (planning, execution, compact) at W=96 and W=140.
+  - Leaves existing surfaces (`selector`, `split`, `tab`) and their tests completely unchanged.
 - Pure mirror rendering module (`runtime/mirror-view.ts`) and standalone viewer process (`runtime/mirror-viewer.ts`).
 
 ## 0.3.0 — 2026-10-08

@@ -35,7 +35,8 @@ import {
 import type { HandoffParams } from "./handoff.ts";
 import { MirrorManager } from "./runtime/mirror-manager.ts";
 import type { MirrorSlot } from "./runtime/mirror-manager.ts";
-import { themePalette } from "./runtime/mirror-view.ts";
+import { themePalette, paletteTheme } from "./runtime/mirror-view.ts";
+import { buildConvoyPanelDataFromAgents, renderConvoyPanel } from "./runtime/convoy-panel.ts";
 import type { MirrorStatus } from "./runtime/mirror-view.ts";
 import { randomBytes, randomUUID } from "node:crypto";
 import {
@@ -969,7 +970,14 @@ function renderWidgetLines(
   agents: RunningSubagent[],
   entries: PresenceEntry[],
   width: number,
+  theme?: any,
 ): string[] {
+  if (surfaceMode() === "convoy") {
+    const data = buildConvoyPanelDataFromAgents(agents, runtime.selectedSlotId);
+    const p = currentPalette();
+    const mirrorTheme = theme?.fg ? theme : p ? paletteTheme(p) : paletteTheme({});
+    return renderConvoyPanel(data, width, mirrorTheme);
+  }
   // Subagent-tool children are rendered from their richer running entry, not their presence row.
   const own = new Set(agents.map((agent) => agent.handle?.protocolDir).filter(Boolean));
   entries = entries.filter((entry) => !own.has(entry.key));
@@ -1142,11 +1150,11 @@ function updateWidget() {
 
   latestCtx.ui.setWidget(
     "subagent-status",
-    (_tui: any, _theme: any) => {
+    (_tui: any, theme: any) => {
       return {
         invalidate() {},
         render(width: number) {
-          return renderWidgetLines(Array.from(runningSubagents.values()), presence().list(), width);
+          return renderWidgetLines(Array.from(runningSubagents.values()), presence().list(), width, theme);
         },
       };
     },
@@ -1807,6 +1815,8 @@ export const __test__ = {
   validateHandoffParams,
   slotSelectorChoices,
   promoteSlot,
+  renderConvoyPanel,
+  buildConvoyPanelDataFromAgents,
   deliverHandoffResult,
   deliverReplacedResult,
   shouldSuppressDelivery,
@@ -1919,9 +1929,9 @@ function surfacePlacement(): "auto" | "split-right" | "tab" {
   return mode === "selector" ? "auto" : mode === "tab" ? "tab" : "split-right";
 }
 
-function surfaceMode(): "selector" | "split" | "tab" {
+function surfaceMode(): "selector" | "split" | "tab" | "convoy" {
   const mode = process.env.PI_SUBAGENT_SURFACE ?? "selector";
-  return mode === "tab" || mode === "split" ? mode : "selector";
+  return mode === "convoy" || mode === "tab" || mode === "split" ? mode : "selector";
 }
 
 function splitList(value: string | undefined): string[] {
