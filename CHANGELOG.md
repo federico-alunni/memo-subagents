@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.4.0-beta.2 — 2026-10-09
+
+### Changed
+
+- **Generic status panel**: the opt-in `convoy` surface of 0.4.0-beta.1 becomes `PI_SUBAGENT_SURFACE=panel` (`runtime/panel.ts`). `renderPanel(data, width, theme): string[]` stays a pure, dependency-free renderer, but everything it shows now comes from the data: brand (default `⧉ Subagents`), title, phase, progress (only with `total > 0`), stage columns with their glyphs and legend, groups with their notes, free rows. Golden tests cover free rows, staged groups and compact mode at W=96 and W=140.
+  - Built-in data: worktree slots render as a grid of items (state dot, `?40s` waiting / `⚠12m` stalled flags, agent chain, `▸` selection, `⎇ <branch> · <status>` detail row); other agents render as one row each (`? planner`, `◐ research · ↳ planner`).
+
+### Added
+
+- **Inter-extension status panels**: another extension supplies its own panel with `pi.events.emit("subagents:panel", { source, data })` (`data: null` removes it). Supplied panels are rendered above the editor in every surface; subagents they name (`subagent` on an item or row) leave the extension's own rows, and the selected one gets the `▸` marker. `subagents:ready` is emitted at session start so a provider loaded earlier can send its panel again. See [docs/panel.md](docs/panel.md).
+
+### Removed
+
+- `PI_SUBAGENT_SURFACE=convoy`, `runtime/convoy-panel.ts`, `renderConvoyPanel` and `buildConvoyPanelDataFromAgents` (replaced by the generic panel above).
+
 ## 0.4.0-beta.1 — 2026-10-08
 
 ### Added

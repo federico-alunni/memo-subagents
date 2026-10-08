@@ -115,22 +115,21 @@ describe("spawning: one transport for every request", () => {
   });
 });
 
-describe("spawning: convoy planning rows", () => {
-  it("delegated agents render as #86 planning rows: icon by state, name, status, requester", () => {
+describe("spawning: panel rows", () => {
+  it("delegated agents render as panel rows: icon by state, name, status, requester", () => {
     const planner = agent("planner", { startTime: 1 }, { kind: "blocked", startedAt: 60_000, reason: "question" });
     const research = agent("research", { startTime: 2, spawnedBy: { mode: "delegate", parentId: "planner" } });
     const originalNow = Date.now;
     Date.now = () => 65_000;
     try {
-      const data = testApi.convoyPlanningData([planner, research]);
-      assert.equal(data.phase, "planning");
-      assert.equal(data.total, 0);
-      assert.deepEqual(data.planning.map((r: any) => [r.icon, r.label]), [["?", "planner"], ["◐", "research"]]);
-      assert.match(data.planning[1].extra, /↳ planner/);
+      const data = testApi.agentRowsPanelData([planner, research]);
+      assert.equal(data.total, undefined);
+      assert.deepEqual(data.rows.map((r: any) => [r.icon, r.label]), [["?", "planner"], ["◐", "research"]]);
+      assert.match(data.rows[1].extra, /↳ planner/);
       const theme = paletteTheme({});
-      const lines = testApi.renderConvoyPanel(data, 96, theme);
+      const lines = testApi.renderPanel(data, 96, theme);
       for (const line of lines) assert.equal(visibleWidth(stripAnsi(line)), 96);
-      assert.match(stripAnsi(lines[0]), /phase planning ─+ ─╮$/, "no progress bar without tasks");
+      assert.match(stripAnsi(lines[0]), /^╭─ ⧉  Subagents ─+╮$/, "no progress bar without a total");
       assert.match(stripAnsi(lines[1]), /^│ \? planner/);
     } finally {
       Date.now = originalNow;

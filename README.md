@@ -43,7 +43,7 @@ For a profile launched with `pi -ne` (packages disabled), load it explicitly wit
 
 ## Herdr UX
 
-The default surface is `selector` (`PI_SUBAGENT_SURFACE`): the first child opens a half-width split on the right, further children run in background tabs of the same workspace. `/subagent` without arguments picks which open child is shown on the right without restarting anything; `Ctrl+Alt+X` cycles to the next one. `PI_SUBAGENT_SURFACE=split`, `tab`, or `convoy` (issue #86 Convoy panel with stacked mirrors) restore or enable other surface layouts. Details: [docs/pane-selector.md](docs/pane-selector.md).
+The default surface is `selector` (`PI_SUBAGENT_SURFACE`): the first child opens a half-width split on the right, further children run in background tabs of the same workspace. `/subagent` without arguments picks which open child is shown on the right without restarting anything; `Ctrl+Alt+X` cycles to the next one. `PI_SUBAGENT_SURFACE=split`, `tab`, or `panel` (status panel above the editor) restore or enable other surface layouts. Other extensions can supply their own status panel through `pi.events` ([docs/panel.md](docs/panel.md)). Details: [docs/pane-selector.md](docs/pane-selector.md).
 
 ## Tools and commands
 
@@ -125,7 +125,7 @@ Optional. Put it in **`~/.pi/agent/pi-memo-subagents.json`** (`$PI_CODING_AGENT_
 - `models`: default model per agent name (tool argument → frontmatter → `models.agents` → `models.default` → parent).
 - `worktrees` (optional, both keys optional): `root` puts worktrees under `<root>/<repoName>/`; `branchPrefix` changes the generated branch prefix. Unknown keys are rejected.
 
-Environment: `PI_SUBAGENT_SURFACE` (`selector` | `split` | `tab` | `convoy`) and the host composition variables `PI_MEMO_SUBAGENTS_CHILD_EXTENSIONS` / `PI_MEMO_SUBAGENTS_CHILD_ENV` ([docs/child-host.md](docs/child-host.md)).
+Environment: `PI_SUBAGENT_SURFACE` (`selector` | `split` | `tab` | `panel`) and the host composition variables `PI_MEMO_SUBAGENTS_CHILD_EXTENSIONS` / `PI_MEMO_SUBAGENTS_CHILD_ENV` ([docs/child-host.md](docs/child-host.md)).
 
 ## Development
 

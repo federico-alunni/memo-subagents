@@ -131,7 +131,7 @@ test("header: status symbol, slot, agent, branch and duration in theme tokens; b
   assert.equal(visibleWidth(stripTags(mirrorHeader(view(), 12, tagTheme, now))), 12, "never wider than the pane");
 });
 
-test("header status symbols follow the #86 preview", () => {
+test("header status symbols follow the approved preview", () => {
   const symbol = (status: MirrorView["status"]) => stripTags(mirrorHeader(view({ status }), 60, tagTheme, 0)).slice(3, 4);
   assert.equal(symbol("active"), "●");
   assert.equal(symbol("starting"), "◐");

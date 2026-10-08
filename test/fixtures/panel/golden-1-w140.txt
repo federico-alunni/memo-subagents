@@ -1,4 +1,4 @@
-╭─ ⛟  Convoy │ panel-refresh │ phase pianificazione ────────────────────────────────────────────────────────────────────────── ▱▱▱▱▱▱ 0/6 ─╮
+╭─ ⛟  Pipeline │ panel-refresh │ phase pianificazione ──────────────────────────────────────────────────────────────────────── ▱▱▱▱▱▱ 0/6 ─╮
 │ ? planner      aspetta una tua risposta                                                                                                  │
 │ ✓ research     2 ricerche su 2 completate                                                                                                │
 │ ◐ challenger   critica il piano · secondo giro di revisione                                                                              │

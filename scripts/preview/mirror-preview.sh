@@ -4,7 +4,7 @@
 # Usage: bash scripts/preview/mirror-preview.sh            (total width 160, mirror 50%)
 #        W=200 R=0.4 bash scripts/preview/mirror-preview.sh
 #        ONLY=D bash scripts/preview/mirror-preview.sh     (one scenario: A..F)
-# Mirror colors: pi cursor-dark theme tokens used by the issue #86 preview.
+# Mirror colors: pi cursor-dark theme tokens used by the approved preview.
 # Widget colors: the widget's own accents (index.ts ACTIVE/OPEN/ATTENTION_ACCENT).
 # Mirror header: <slot name> │ <active agent> │ ⎇ <branch> ─── <active agent elapsed>.
 # Widget row: slot elapsed, chain A › B, status of the slot.
