@@ -104,7 +104,7 @@ interface LaunchSpec {
   display: {
     label: string;            // widget row / tab label
     group?: string;           // widget group title (default group = generic subagents)
-    agentsPanelName?: string; // Herdr Agents panel name (default: "└─ <label>" under the caller pane)
+    agentsPanelName?: string; // Herdr Agents panel name (default: "<caller workspace>-<caller tab>-sub<n>")
   };
 }
 
@@ -244,7 +244,7 @@ Persist handles verbatim. Clients never read protocol files directly; ask for a 
 
 Other exports: `sameAgent`, `sameTask`, `validTask`, `taskKey`, `onceRequestId(taskToken, tool)`,
 `THINKING_LEVELS`, `nodeRunner`, `readProcessTerminal`, `processIdentity`, `terminalName`,
-`hostCompositionFromEnv`, `treeDisplayName(label, depth)`, `presence`, `presenceActive` and the types.
+`hostCompositionFromEnv`, `subagentPanelName(workspace, tab, n)`, `nextSubagentIndex(siblingNames)`, `presence`, `presenceActive` and the types.
 
 ## Child side
 

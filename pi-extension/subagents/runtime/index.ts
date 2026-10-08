@@ -1,5 +1,10 @@
 // Public surface of `memo-subagents/runtime`. Contract: docs/runtime.md.
-export { AgentRuntime, RuntimeError, treeDisplayName } from "./agent-runtime.ts";
+export {
+  AgentRuntime,
+  RuntimeError,
+  nextSubagentIndex,
+  subagentPanelName,
+} from "./agent-runtime.ts";
 export type { RuntimeConfig, LaunchSpec, Observation } from "./agent-runtime.ts";
 export {
   nodeRunner,

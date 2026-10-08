@@ -124,10 +124,31 @@ export interface LaunchSpec {
     agentsPanelName?: string;
   };
 }
-/** Herdr Agents-panel name at `depth` (1 = direct child): "└─ name", "┊ └─ name", … */
-export function treeDisplayName(name: string, depth: number): string {
-  const label = name.replace(/[\r\n\t]+/g, " ").trim() || "agent";
-  return `${"┊ ".repeat(Math.max(0, depth - 1))}└─ ${label}`;
+/** Herdr Agents-panel name of a subagent: "<caller workspace>-<caller tab>-sub<index>",
+ * e.g. "local-vilipellis-PLAN-sub1". Missing labels are omitted ("sub1"). */
+export function subagentPanelName(
+  workspace: string | undefined,
+  tab: string | undefined,
+  index: number,
+): string {
+  return [workspace, tab]
+    .map((s) => (typeof s === "string" ? s.replace(/[\r\n\t]+/g, " ").trim() : ""))
+    .filter(Boolean)
+    .concat(`sub${index}`)
+    .join("-");
+}
+/** Index of a new subagent of a caller pane: the first number ≥ 1 not used by its live
+ * subagents ("active + 1" without gaps), read from their panel names. */
+export function nextSubagentIndex(siblingNames: readonly unknown[]): number {
+  const used = new Set(
+    siblingNames.flatMap((n) => {
+      const m = typeof n === "string" ? /(?:^|-)sub(\d+)$/.exec(n) : null;
+      return m ? [Number(m[1])] : [];
+    }),
+  );
+  let index = 1;
+  while (used.has(index)) index++;
+  return index;
 }
 export interface Observation {
   kind:
@@ -190,6 +211,15 @@ const observers = (observerRegistry[observerKey] ??= new Map<
   string,
   () => void
 >());
+// Panel naming reads the siblings and then reports the new name: serialized across every
+// runtime instance of the process so concurrent launches of one caller get distinct indices.
+const namingRegistry = globalThis as unknown as Record<symbol, Promise<void> | undefined>;
+const namingKey = Symbol.for("memo-subagents/panel-naming");
+function serializeNaming(step: () => Promise<void>): Promise<void> {
+  const next = (namingRegistry[namingKey] ?? Promise.resolve()).then(step, step);
+  namingRegistry[namingKey] = next.catch(() => {});
+  return next;
+}
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const quote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
@@ -266,6 +296,39 @@ export class AgentRuntime {
     if (!data.result)
       throw new Error("Unsupported Herdr response: missing result");
     return data.result;
+  }
+  /** Display only: "<caller workspace>-<caller tab>-sub<n>", n = first index free among the
+   * caller pane's live subagents (any runtime client). Unreadable parts are omitted. */
+  private async panelName(
+    parent: { pane_id?: string; workspace_id?: string; tab_id?: string },
+    paneId: string,
+    cwd: string,
+  ): Promise<string> {
+    const [workspace, tab, siblings] = await Promise.all([
+      parent.workspace_id
+        ? this.herdr(["workspace", "get", parent.workspace_id], cwd)
+            .then((r) => r?.workspace?.label as string | undefined)
+            .catch(() => undefined)
+        : undefined,
+      parent.tab_id
+        ? this.herdr(["tab", "get", parent.tab_id], cwd)
+            .then((r) => r?.tab?.label as string | undefined)
+            .catch(() => undefined)
+        : undefined,
+      parent.pane_id
+        ? this.herdr(["pane", "list"], cwd)
+            .then((r) =>
+              (Array.isArray(r?.panes) ? r.panes : [])
+                .filter(
+                  (p: any) =>
+                    p?.tokens?.parent === parent.pane_id && p?.pane_id !== paneId,
+                )
+                .map((p: any) => p.display_agent),
+            )
+            .catch(() => [])
+        : [],
+    ]);
+    return subagentPanelName(workspace, tab, nextSubagentIndex(siblings));
   }
   private checkHandle(h: AgentHandle): void {
     try {
@@ -715,30 +778,35 @@ export class AgentRuntime {
         await this.herdr(["tab", "rename", p.tab_id, label], cwd).catch(
           () => {},
         );
-      // Display only: Herdr Agents panel tree under the caller pane, one level deeper than it.
+      // Display only: Herdr Agents panel name "<workspace>-<tab>-sub<n>" of the caller pane,
+      // plus parent/depth tokens. Every failure leaves the launch untouched.
       const parentDepth = Number(parent.tokens?.tree_depth);
       const depth =
         (Number.isSafeInteger(parentDepth) && parentDepth > 0 ? parentDepth : 0) + 1;
-      await this.herdr(
-        [
-          "pane",
-          "report-metadata",
-          paneId,
-          "--source",
-          "memo-subagents",
-          "--display-agent",
-          input.display.agentsPanelName ?? treeDisplayName(label, depth),
-          ...(parent.pane_id
-            ? [
-                "--token",
-                `parent=${parent.pane_id}`,
-                "--token",
-                `tree_depth=${depth}`,
-              ]
-            : []),
-        ],
-        cwd,
-      ).catch(() => {});
+      await serializeNaming(async () => {
+        const name =
+          input.display.agentsPanelName ?? (await this.panelName(parent, paneId!, cwd));
+        await this.herdr(
+          [
+            "pane",
+            "report-metadata",
+            paneId!,
+            "--source",
+            "memo-subagents",
+            "--display-agent",
+            name,
+            ...(parent.pane_id
+              ? [
+                  "--token",
+                  `parent=${parent.pane_id}`,
+                  "--token",
+                  `tree_depth=${depth}`,
+                ]
+              : []),
+          ],
+          cwd,
+        );
+      }).catch(() => {});
       presence().update(protocolDir, { paneId });
       createdPane = p;
       phase = "shell-readiness";

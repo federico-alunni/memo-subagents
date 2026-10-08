@@ -15,7 +15,9 @@ import { join } from "node:path";
 import {
   AgentRuntime,
   RuntimeError,
+  nextSubagentIndex,
   readProcessTerminal,
+  subagentPanelName,
   presence,
 } from "../../pi-extension/subagents/runtime/index.ts";
 import type {
@@ -100,6 +102,10 @@ class FakeHerdr {
   uncertainCreate = false;
   uncertainRun = false;
   emptyRun = false;
+  /** Labels and live panes seen by the Agents-panel naming (display only). */
+  workspaceLabel: string | undefined = "local-app";
+  tabLabel: string | undefined = "PLAN";
+  livePanes: unknown[] = [];
   /** Herdr `worktree open` outcome for worker launches. */
   worktree: "open" | "already-open" | "refused" | "mismatch" = "open";
   workspace = "workspace-1";
@@ -149,6 +155,12 @@ class FakeHerdr {
       return this.result({ pane: this.pane() });
     }
     if (a[1] === "rename" || a[1] === "report-metadata") return this.result({});
+    if (a[0] === "workspace" && a[1] === "get")
+      return this.result({ workspace: { workspace_id: a[2], label: this.workspaceLabel } });
+    if (a[0] === "tab" && a[1] === "get")
+      return this.result({ tab: { tab_id: a[2], label: this.tabLabel } });
+    if (a[0] === "pane" && a[1] === "list")
+      return this.result({ panes: this.livePanes });
     if (a[0] === "worktree" && a[1] === "open") {
       if (this.worktree === "refused")
         return {
@@ -363,7 +375,7 @@ test("triage opens beside the master pane (split right, no focus); workers keep 
   assert.equal(split.argv[split.argv.indexOf("--direction") + 1], "right");
   assert.ok(split.argv.includes("--no-focus"));
   assert.equal(split.argv[split.argv.indexOf("--cwd") + 1], f.cwd);
-  assert.ok(!f.fake.calls.some((c) => c.argv[0] === "tab"));
+  assert.ok(!f.fake.calls.some((c) => c.argv[0] === "tab" && c.argv[1] !== "get"));
   assert.ok(
     f.fake.calls.some(
       (c) =>
@@ -411,11 +423,71 @@ test("worker opens its checkout as a Herdr worktree space under the master space
   const meta = f.fake.calls.find((c) => c.argv[1] === "report-metadata");
   assert.ok(meta);
   assert.equal(meta.argv[2], h.paneId);
-  assert.equal(meta.argv[meta.argv.indexOf("--display-agent") + 1], "└─ #56 worker");
+  assert.equal(meta.argv[meta.argv.indexOf("--display-agent") + 1], "local-app-PLAN-sub1");
   assert.ok(meta.argv.includes("parent=master-pane"));
   assert.ok(meta.argv.includes("tree_depth=1"));
   // Owned cleanup closes only the exact pane (Herdr then closes the emptied space).
   assert.equal((await f.transport.observe(h)).kind, "active");
+});
+
+test("Agents panel name: caller workspace-tab-sub<first free index>, display only", async (t) => {
+  assert.equal(subagentPanelName("local-app", "PLAN", 1), "local-app-PLAN-sub1");
+  assert.equal(subagentPanelName(undefined, " ", 3), "sub3");
+  assert.equal(subagentPanelName("a\nb", "t", 2), "a b-t-sub2");
+  assert.equal(nextSubagentIndex([]), 1);
+  assert.equal(nextSubagentIndex(["x-PLAN-sub1", "x-PLAN-sub2"]), 3);
+  assert.equal(nextSubagentIndex(["x-PLAN-sub2", "\u2514\u2500 old", undefined, "subsub"]), 1);
+  assert.equal(nextSubagentIndex(["sub1", "x-y-sub3"]), 2);
+  const name = (f: { fake: FakeHerdr }) => {
+    const meta = f.fake.calls.find((c) => c.argv[1] === "report-metadata")!;
+    return meta.argv[meta.argv.indexOf("--display-agent") + 1];
+  };
+  // Live subagents of this caller (any client) count; other callers' panes do not.
+  const f = await fixture(t);
+  f.fake.livePanes = [
+    { pane_id: "a", tokens: { parent: "master-pane" }, display_agent: "local-app-PLAN-sub1" },
+    { pane_id: "b", tokens: { parent: "master-pane" }, display_agent: "local-app-PLAN-sub2" },
+    { pane_id: "c", tokens: { parent: "other-pane" }, display_agent: "local-app-PLAN-sub3" },
+    { pane_id: "d" },
+  ];
+  await f.transport.launch({ ...f.input, placement: "tab" });
+  assert.equal(name(f), "local-app-PLAN-sub3");
+  const ws = f.fake.calls.find((c) => c.argv[0] === "workspace")!;
+  assert.deepEqual(ws.argv, ["workspace", "get", "workspace-1"]);
+  assert.deepEqual(f.fake.calls.find((c) => c.argv[0] === "tab" && c.argv[1] === "get")!.argv, ["tab", "get", "tab-1"]);
+  // Unreadable labels/panes never fail the launch.
+  const u = await fixture(t);
+  u.fake.onCall = (c) =>
+    ["workspace", "tab"].includes(c.argv[0]) && c.argv[1] === "get"
+      ? { exitCode: 1, stdout: "", stderr: JSON.stringify({ error: { code: "x", message: "no" } }) }
+      : c.argv[1] === "list"
+        ? { exitCode: 0, stdout: "garbage" }
+        : undefined;
+  const uh = await u.transport.launch(u.input);
+  assert.equal(name(u), "sub1");
+  assert.equal((await u.transport.observe(uh)).kind, "active");
+  // An explicit agentsPanelName wins and reads nothing.
+  const e = await fixture(t);
+  await e.transport.launch({ ...e.input, display: { label: "w", agentsPanelName: "custom" } });
+  assert.equal(name(e), "custom");
+  assert.ok(!e.fake.calls.some((c) => c.argv[1] === "list"));
+  // Concurrent launches of one caller (separate runtimes) get distinct indices.
+  const shared: unknown[] = [];
+  const [p, q] = [await fixture(t), await fixture(t)];
+  for (const [g, id] of [[p, "p"], [q, "q"]] as const) {
+    g.fake.livePanes = shared;
+    g.fake.onCall = async (c) => {
+      if (c.argv[1] === "list") await new Promise((r) => setTimeout(r, 20));
+      if (c.argv[1] === "report-metadata")
+        shared.push({
+          pane_id: id,
+          tokens: { parent: "master-pane" },
+          display_agent: c.argv[c.argv.indexOf("--display-agent") + 1],
+        });
+    };
+  }
+  await Promise.all([p.transport.launch(p.input), q.transport.launch(q.input)]);
+  assert.deepEqual([name(p), name(q)].sort(), ["local-app-PLAN-sub1", "local-app-PLAN-sub2"]);
 });
 
 test("worktree space: refusal falls back to a master tab, already-open gets its own tab, mismatch/lost response never run", async (t) => {
@@ -595,7 +667,7 @@ test("delayed shell/foreground/OS readiness observes only the returned pane befo
   );
   assert.ok(
     f.fake.calls
-      .filter((c) => c.argv[1] === "get")
+      .filter((c) => c.argv[0] === "pane" && c.argv[1] === "get")
       .every((c) => c.argv[2] === h.paneId),
   );
   assert.ok(
@@ -629,7 +701,7 @@ test("vanished or changed newly created pane/occupant fails without adopting or 
     let probes = 0;
     let gets = 0;
     f.fake.onCall = (call) => {
-      if (call.argv[1] === "get") {
+      if (call.argv[0] === "pane" && call.argv[1] === "get") {
         gets++;
         if (gets === 2) {
           if (change === "vanished") f.fake.missing = true;
