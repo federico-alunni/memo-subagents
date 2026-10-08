@@ -122,7 +122,7 @@ try {
   const workspaces = herdr(['workspace', 'list']).workspaces ?? [];
   console.log('focused workspace after promotion:', workspaces.filter((w) => w.focused).map((w) => w.label ?? w.workspace_id).join(', ') || 'unknown', '(worker workspace:', worker.workspace.workspace_id + ')');
   assert.equal(focusedWorkspaces(), worker.workspace.workspace_id, 'agent focus moved the view to the worker workspace');
-  herdr(['workspace', 'focus', herdr(['pane', 'get', focusedBeforePane]).pane.workspace_id]); // give the view back
+  if (focusedBefore) herdr(['workspace', 'focus', focusedBefore]); // give the view back
 
   // 7. close: orderly stop + close, split gone, worker untouched
   // As the widget tick does: the end is proven by the runtime (exact exit, then pane gone); an exiting

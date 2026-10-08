@@ -228,3 +228,9 @@ test("viewer: a frame is produced only when the screen, the view or the size cha
   assert.ok(nextFrame(undefined, undefined, undefined, 5, 30, 0));
   assert.equal(await readView("/nonexistent/view.json"), undefined);
 });
+
+test("polling constants: normal rate is 1s, attention rate is 100ms (~10 fps)", async () => {
+  const { MIRROR_POLL_MS, MIRROR_ATTENTION_POLL_MS } = await import("../pi-extension/subagents/runtime/mirror-viewer.ts");
+  assert.equal(MIRROR_POLL_MS, 1000);
+  assert.equal(MIRROR_ATTENTION_POLL_MS, 100);
+});

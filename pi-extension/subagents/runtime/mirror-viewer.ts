@@ -15,10 +15,12 @@ import { json, privateDirectory } from "./protocol.ts";
 import type { Boot } from "./protocol.ts";
 import { decodeInputKey, paletteTheme, renderMirrorFrame, renderMirrorLines, splitScreen } from "./mirror-view.ts";
 import type { MirrorView } from "./mirror-view.ts";
-import { realpathSync } from "node:fs";
+import { realpathSync, watch } from "node:fs";
 
 export const VIEW_FILE_ENV = "PI_MEMO_MIRROR_VIEW_FILE";
 export const MIRROR_POLL_MS = 1000;
+/** High-framerate polling (~10 fps) when the agent awaits user dialog interaction. */
+export const MIRROR_ATTENTION_POLL_MS = 100;
 
 type ReadPane = (paneId: string) => Promise<string | undefined>;
 
@@ -140,7 +142,8 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
       const decoded = decodeInputKey(chunk);
       if (!decoded) return;
       await sendInput(current.paneId, decoded);
-      // Fast-forward next repaint after user input
+      // Fast-forward immediate repaints for snappy typing/navigation feedback
+      setTimeout(() => void tick(), 30);
       setTimeout(() => void tick(), 100);
     });
   }
@@ -175,9 +178,29 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     previous = undefined;
     void tick();
   });
+  let pollTimer: ReturnType<typeof setTimeout> | undefined;
+  const scheduleNext = () => {
+    if (stopped) return;
+    if (pollTimer) clearTimeout(pollTimer);
+    const interval = lastView?.attention ? MIRROR_ATTENTION_POLL_MS : MIRROR_POLL_MS;
+    pollTimer = setTimeout(async () => {
+      await tick().catch(() => {});
+      scheduleNext();
+    }, interval);
+    pollTimer.unref?.();
+  };
+
+  try {
+    const watcher = watch(viewFile, () => {
+      void tick().then(() => scheduleNext()).catch(() => {});
+    });
+    watcher.unref?.();
+  } catch {
+    // If watch is unavailable or unsupported on this platform, polling continues.
+  }
+
   await tick();
-  const timer = setInterval(() => void tick().catch(() => {}), MIRROR_POLL_MS);
-  timer.unref?.();
+  scheduleNext();
 }
 
 if (process.env.PI_MEMO_MIRROR_VIEW === "1" && process.argv[1]?.endsWith("mirror-viewer.ts"))
