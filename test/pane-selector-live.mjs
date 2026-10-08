@@ -37,12 +37,29 @@ try {
     assert.equal(run(['pane', 'current']).pane.pane_id, focusedBefore);
     for (const child of ids) assert.equal(run(['pane', 'get', child]).pane.terminal_id, identities.get(child));
   }
-  run(['pane', 'close', ids[0]]);
+  // Visible finishes → promotion: the runtime forgets the pane, then closes it; the next open agent in
+  // menu order (owned order here) is moved into the split, same pane and terminal.
+  assert.equal(selector.visible(), ids[0]);
+  assert.equal(state.selected, ids[0]);
   selector.forget(ids[0]);
-  assert.equal(run(['pane', 'layout', '--pane', parent]).layout.panes.length, 1);
-  await selector.select(ids[1]);
+  run(['pane', 'close', ids[0]]);
+  await selector.promoteVacated();
+  layout = run(['pane', 'layout', '--pane', parent]).layout;
+  assert.equal(layout.panes.length, 2);
+  assert.equal(layout.splits.length, 1);
   assert.equal(selector.visible(), ids[1]);
-  console.log('PASS: 10 shells, one split, selection changes, terminal IDs preserved, focus unchanged, completion cleanup.');
+  assert.equal(state.selected, ids[1]);
+  assert.equal(layout.focused_pane_id, parent);
+  assert.equal(run(['pane', 'current']).pane.pane_id, focusedBefore);
+  for (const child of ids.slice(1)) assert.equal(run(['pane', 'get', child]).pane.terminal_id, identities.get(child));
+  // A finished background agent leaves the split alone.
+  selector.forget(ids[5]);
+  run(['pane', 'close', ids[5]]);
+  await selector.promoteVacated();
+  assert.equal(selector.visible(), ids[1]);
+  await selector.select(ids[2]);
+  assert.equal(selector.visible(), ids[2]);
+  console.log('PASS: 10 shells, one split, selection changes, terminal IDs preserved, focus unchanged, visible finishes → promotion.');
 } finally {
   run(['workspace', 'close', workspace]);
   console.log(`Removed owned test workspace ${workspace}`);

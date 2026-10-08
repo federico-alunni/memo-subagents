@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import extension, { __test__ } from '../pi-extension/subagents/index.ts';
-import { paneSelector } from '../pi-extension/subagents/pane-selector.ts';
+import { paneSelector, PaneSelector } from '../pi-extension/subagents/pane-selector.ts';
 import { createLifecycle } from '../pi-extension/subagents/lifecycle.ts';
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -112,5 +112,51 @@ test('Ctrl+Alt+X cycles to the next open agent without a menu', async () => {
     __test__.runningSubagents.delete(b.id);
     paneSelector.forget(a.surface);
     paneSelector.forget(b.surface);
+  }
+});
+
+test('visible subagent finishes: the next one in menu order is promoted, selected and its handle synced', async () => {
+  fixture();
+  const state = paneSelector.state;
+  const a = { id: 'promote-test-a', name: 'Promote A', surface: 'promote-pane-a', startTime: Date.now(), lifecycle: createLifecycle(Date.now()), handle: { paneId: 'promote-pane-a', protocolDir: '/tmp/pa', taskToken: 'ta', tabId: 'main', workspaceId: 'w1' } };
+  const b = { id: 'promote-test-b', name: 'Promote B', surface: 'promote-pane-b', startTime: Date.now(), lifecycle: createLifecycle(Date.now()), handle: { paneId: 'promote-pane-b', protocolDir: '/tmp/pb', taskToken: 'tb', tabId: 'bg', workspaceId: 'w1' } };
+  const c = { id: 'promote-test-c', name: 'Promote C', surface: 'promote-pane-c', startTime: Date.now(), lifecycle: createLifecycle(Date.now()), handle: { paneId: 'promote-pane-c', protocolDir: '/tmp/pc', taskToken: 'tc', tabId: 'bg2', workspaceId: 'w1' } };
+  const panes = new Map([
+    ['main', { pane_id: 'main', tab_id: 'main', workspace_id: 'w1' }],
+    [a.surface, { pane_id: a.surface, tab_id: 'main', workspace_id: 'w1' }],
+    [b.surface, { pane_id: b.surface, tab_id: 'bg', workspace_id: 'w1' }],
+    [c.surface, { pane_id: c.surface, tab_id: 'bg2', workspace_id: 'w1' }],
+  ]);
+  const view = new PaneSelector(state, (args) => {
+    if (args[1] === 'get') { const pane = panes.get(args[2]); if (!pane) throw new Error('pane_not_found'); return { pane }; }
+    if (args[1] === 'layout') return { layout: { panes: [...panes.values()].filter(p => p.tab_id === 'main') } };
+    throw new Error(`direct Herdr call not expected: ${args.join(' ')}`);
+  }, () => 'main', { pollMs: 5, timeoutMs: 500 });
+  for (const agent of [a, b, c]) {
+    __test__.runningSubagents.set(agent.id, agent);
+    state.owned.set(agent.surface, agent.name);
+    state.controls.set(agent.surface, {
+      handle: agent.handle,
+      move: async (h, to) => { panes.get(h.paneId).tab_id = to.split.tab; return { ...h, tabId: to.split.tab }; },
+    });
+  }
+  state.selected = a.surface;
+  try {
+    // The runtime forgets the finished agent (still listed in the menu), then closes its pane.
+    paneSelector.forget(a.surface);
+    panes.delete(a.surface);
+    await view.promoteVacated();
+    assert.equal(state.selected, b.surface);
+    assert.equal(panes.get(b.surface).tab_id, 'main');
+    assert.equal(panes.get(c.surface).tab_id, 'bg2');
+    assert.equal(b.handle.tabId, 'main'); // syncSelectorHandles ran after the promotion.
+  } finally {
+    state.onVacated = () => { void paneSelector.promoteVacated(); };
+    for (const agent of [a, b, c]) {
+      __test__.runningSubagents.delete(agent.id);
+      state.owned.delete(agent.surface);
+      state.controls.delete(agent.surface);
+    }
+    state.selected = undefined;
   }
 });

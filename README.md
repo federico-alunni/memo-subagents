@@ -43,7 +43,7 @@ For a profile launched with `pi -ne` (packages disabled), load it explicitly wit
 
 ## Herdr UX
 
-The default surface is `selector` (`PI_SUBAGENT_SURFACE`): the first child opens a half-width split on the right, further children run in background tabs of the same workspace. `/subagent` without arguments picks which open child is shown on the right without restarting anything; `Ctrl+Alt+X` cycles to the next one. `PI_SUBAGENT_SURFACE=split` or `tab` restore the upstream behaviours. Details: [docs/pane-selector.md](docs/pane-selector.md).
+The default surface is `selector` (`PI_SUBAGENT_SURFACE`): a child opens a half-width split on the right whenever it is free, further children run in background tabs of the same workspace; when the visible child finishes, the next open agent in menu order is moved into the split (same pane, no restart). `/subagent` without arguments picks which open child is shown on the right without restarting anything; `Ctrl+Alt+X` cycles to the next one. `PI_SUBAGENT_SURFACE=split` or `tab` restore the upstream behaviours. Details: [docs/pane-selector.md](docs/pane-selector.md).
 
 ## Tools and commands
 
