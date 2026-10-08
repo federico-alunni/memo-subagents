@@ -1,4 +1,4 @@
-// memo-subagents host composition: MEMO_SUBAGENTS_CHILD_EXTENSIONS / MEMO_SUBAGENTS_CHILD_ENV.
+// pi-memo-subagents host composition: MEMO_SUBAGENTS_CHILD_EXTENSIONS / MEMO_SUBAGENTS_CHILD_ENV.
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { readFileSync } from "node:fs";
@@ -31,7 +31,7 @@ function withEnv<T>(vars: Record<string, string | undefined>, run: () => T): T {
   }
 }
 
-describe("memo-subagents host child composition", () => {
+describe("pi-memo-subagents host child composition", () => {
   it("parses only absolute, de-duplicated extensions", () => {
     assert.deepEqual(
       hostChildExtensions({ MEMO_SUBAGENTS_CHILD_EXTENSIONS: "/a/ext::relative:/b/ext:/a/ext: /c " }),
@@ -76,7 +76,7 @@ describe("memo-subagents host child composition", () => {
     );
     assert.deepEqual(config.hostExtensions, ["/host/cpa ext"]);
     assert.deepEqual(config.hostEnv, { CPA_PROXY_CONFIG: "/host/config.yaml" });
-    assert.match(config.stateDir, /memo-subagents-/);
+    assert.match(config.stateDir, /pi-memo-subagents-/);
     assert.equal(config.startupTimeoutMs, 120000);
     const bare = withEnv({}, () => subagentRuntimeConfig());
     assert.deepEqual(bare.hostExtensions, []);
@@ -85,7 +85,7 @@ describe("memo-subagents host child composition", () => {
 
   it("the package registers only its own extension entry point", () => {
     const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-    assert.equal(pkg.name, "memo-subagents");
+    assert.equal(pkg.name, "pi-memo-subagents");
     assert.deepEqual(pkg.pi.extensions, ["./pi-extension/subagents/index.ts"]);
   });
 });

@@ -1,5 +1,5 @@
 {
-  "name": "memo-subagents",
+  "name": "pi-memo-subagents",
   "version": "0.2.0",
   "description": "Interactive pi subagents in Herdr: external agent definitions, pane selector, optional git worktrees",
   "keywords": [

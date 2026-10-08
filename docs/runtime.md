@@ -1,4 +1,4 @@
-# Agent runtime (`memo-subagents/runtime`)
+# Agent runtime (`pi-memo-subagents/runtime`)
 
 A library for **code** (not for the model) that launches and controls pi children in Herdr panes with exact
 identities and durable evidence. It is the single agent-launching infrastructure: the memo `subagent` tool
@@ -6,7 +6,7 @@ identities and durable evidence. It is the single agent-launching infrastructure
 (pi-issue-round, isolated workflow agents) are clients of it, and all share the widget (see [Presence](#presence-widget)).
 
 ```ts
-import { AgentRuntime, RuntimeError } from "memo-subagents/runtime";
+import { AgentRuntime, RuntimeError } from "pi-memo-subagents/runtime";
 ```
 
 The library imports no pi package at runtime (types only) and keeps no global state except two display/observer
@@ -17,10 +17,10 @@ scheduling and its own durable state; runtime records are **evidence**, not anot
 ## Consuming it from another package
 
 ```json
-"dependencies": { "memo-subagents": "file:../memo-subagents" }
+"dependencies": { "pi-memo-subagents": "file:../pi-memo-subagents" }
 ```
 
-Import only `memo-subagents/runtime` (never the extension entry). Under pi, extensions are loaded with jiti and
+Import only `pi-memo-subagents/runtime` (never the extension entry). Under pi, extensions are loaded with jiti and
 TypeScript works from anywhere. Node's own type stripping (e.g. `node --experimental-strip-types --test`) refuses
 `.ts` files **inside `node_modules`**: a `file:` dependency is a symlink whose real path is outside `node_modules`,
 so tests keep working; a copied install (git/npm tarball) needs a TypeScript loader in the test runner.
@@ -176,7 +176,7 @@ interface DelegatedToolSpec {
 
 ### Question
 
-There is one `question` tool, from the **pi-memo-question** package (a dependency of memo-subagents, also installed
+There is one `question` tool, from the **pi-memo-question** package (a dependency of pi-memo-subagents, also installed
 for the main agent). The runtime adds its extension with `-e` (real path, so pi loads it once even if the profile
 installs the package too):
 
@@ -292,8 +292,8 @@ shell and process must still match). For workflow children any tab change not re
 
 ## Presence (widget)
 
-Every agent launched by any `AgentRuntime` in the process appears in the memo-subagents widget. The registry
-(`Symbol.for("memo-subagents/runtime-presence")`) is display-only and shared even if the module is loaded twice.
+Every agent launched by any `AgentRuntime` in the process appears in the pi-memo-subagents widget. The registry
+(`Symbol.for("pi-memo-subagents/runtime-presence")`) is display-only and shared even if the module is loaded twice.
 The runtime updates rows itself (launch, observe/watch, dispatch, stop, close); clients add workflow state with
 `annotate` (e.g. `{ status: "in verifica", active: false }`) and can retire a row early with `forget`.
 After a cold restart, observing a persisted handle of a live agent rebuilds its row from `boot.json`; a superseded
@@ -315,7 +315,7 @@ One process-wide selector state (`selectorState()`, `Symbol.for("pi-subagents/pa
   runtime; a caller tab with another (foreign) split, a zoomed caller or a split already reserved by a concurrent
   launch gives a tab. The decision is a synchronous check-and-set on the layout read just before, so concurrent
   launches never get two splits. The handle carries the effective placement (`split-right`, or none for a tab);
-- the memo-subagents `/subagent` menu and Ctrl+Alt+X list this session's subagents and every other owned agent of the
+- the pi-memo-subagents `/subagent` menu and Ctrl+Alt+X list this session's subagents and every other owned agent of the
   caller's workspace, and move them through their controls (`PaneSelector.select`). Agents in other workspaces
   (e.g. Herdr worktree spaces) are never moved.
 

@@ -1,5 +1,5 @@
 {
-  "package": "memo-subagents",
+  "package": "pi-memo-subagents",
   "version": "0.2.0",
   "upstream": {
     "repository": "https://github.com/0xRichardH/pi-herdr-subagents",
@@ -10,14 +10,14 @@
   },
   "importedFrom": {
     "commit": "17fdebb",
-    "source": "pi-issue-round vendored copy (src/memo-subagents), itself the local package ~/.pi/agent/local-packages/pi-herdr-subagents (0.2.0 + local selector) plus the IR_CHILD_* driver patch"
+    "source": "pi-issue-round vendored copy (src/pi-memo-subagents), itself the local package ~/.pi/agent/local-packages/pi-herdr-subagents (0.2.0 + local selector) plus the IR_CHILD_* driver patch"
   },
   "chain": [
     "pi-herdr-subagents v0.2.0 (upstream tag 7180d98)",
     "installed npm copy: terminal.ts made configurable with PI_SUBAGENT_SURFACE (split/tab)",
     "local package: pane selector (pane-selector.ts, default surface 'selector', /subagent picker, Ctrl+Alt+X, widget ▶, randomBytes(12) ids); bundled agents/, /plan and plan-skill.md removed",
     "pi-issue-round vendored copy: IR_CHILD_* host patch in harness/drivers/pi.ts",
-    "memo-subagents 0.1.0: see changes"
+    "pi-memo-subagents 0.1.0: see changes"
   ],
   "changes": [
     "child-host.ts: MEMO_SUBAGENTS_CHILD_EXTENSIONS / MEMO_SUBAGENTS_CHILD_ENV replace IR_CHILD_* (which is no longer read); applied to fresh pi launches and to subagent_resume (buildResumeCommand).",
@@ -27,7 +27,7 @@
     "Symbol.for('pi-subagents/*') runtime keys are unchanged; therefore never load together with pi-herdr-subagents.",
     "Tests live in test/ (upstream layout); test/integration copied from upstream v0.2.0 as opt-in (npm run test:integration).",
     "Pi only: harness/drivers/{claude,codex,opencode,grok,generic}.ts, harness/pane-summary.ts and plugin/ (Claude Code hook) removed; registry resolves only pi and rejects other `cli` values; resumeSessionId/claudeSessionId removed from index.ts.",
-    "runtime/: AgentRuntime library (memo-subagents/runtime) ported from pi-issue-round@b3b19aa transport/child/protocol/readonly-bash/question-dialog (the dialog later moved to pi-memo-question), made role-agnostic; presence registry; index.ts renders runtime agents in the unified widget.",
+    "runtime/: AgentRuntime library (pi-memo-subagents/runtime) ported from pi-issue-round@b3b19aa transport/child/protocol/readonly-bash/question-dialog (the dialog later moved to pi-memo-question), made role-agnostic; presence registry; index.ts renders runtime agents in the unified widget.",
     "Subagent tool on the agent runtime (runtime-client.ts): pi driver, subagent-done.ts (widget kept as runtime/child/identity-widget.ts), launch scripts, sentinel/sidecar completion, pane creation in herdr.ts/terminal.ts and test/integration removed; pane-selector reserves placement and moves through the runtime."
   ],
   "files": [

@@ -1,17 +1,17 @@
-# memo-subagents
+# pi-memo-subagents
 
 Interactive, non-blocking [pi](https://github.com/badlogic/pi-mono) subagents running in [Herdr](https://herdr.dev) panes — using **agent definitions you keep elsewhere** (`~/.pi/agent/agents/*.md` and project `.pi/agents/*.md`), with an in-session pane selector, optional **git worktree isolation** and host-controlled child composition for custom pi profiles.
 
-memo-subagents is a derivative of [pi-herdr-subagents](https://github.com/0xRichardH/pi-herdr-subagents) v0.2.0 (itself derived from [pi-interactive-subagents](https://github.com/HazAT/pi-interactive-subagents)). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and [provenance.json](provenance.json).
+pi-memo-subagents is a derivative of [pi-herdr-subagents](https://github.com/0xRichardH/pi-herdr-subagents) v0.2.0 (itself derived from [pi-interactive-subagents](https://github.com/HazAT/pi-interactive-subagents)). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and [provenance.json](provenance.json).
 
-> **Never load memo-subagents together with pi-herdr-subagents** (or another copy of it). Both register the same tools (`subagent`, `subagents_list`, `subagent_resume`, `subagent_interrupt`) and share the same `globalThis` runtime keys (`Symbol.for("pi-subagents/…")`, kept unchanged so `/reload` adoption keeps working). Remove the other package first, with pi closed and no subagents running.
+> **Never load pi-memo-subagents together with pi-herdr-subagents** (or another copy of it). Both register the same tools (`subagent`, `subagents_list`, `subagent_resume`, `subagent_interrupt`) and share the same `globalThis` runtime keys (`Symbol.for("pi-subagents/…")`, kept unchanged so `/reload` adoption keeps working). Remove the other package first, with pi closed and no subagents running.
 
 ## What it does
 
 - `subagent({ name, task, agent?, … })` returns immediately; the child runs in its own Herdr pane and its result is **steered back** into the main session when it finishes (`subagent_result`), or when it asks for help (`caller_ping` → `subagent_ping`).
 - No bundled agents and no `/plan` command: only global (`$PI_CODING_AGENT_DIR/agents`, default `~/.pi/agent/agents`) and project (`.pi/agents`) definitions are discovered. Project definitions override global ones with the same name.
 - Live widget above the editor with lifecycle state (`starting`, `active`, `waiting`, `stalled`, `interrupted`, …), model/thinking, the selected pane (`▶`) and the worktree branch (`⎇`).
-- Every child is launched and supervised by the package's agent runtime (`memo-subagents/runtime`): the child's pane, shell, process and session are identified exactly, its end is recorded by the child itself (`subagent_done`, automatic exit after a normal run, `caller_ping`, or the user quitting pi) and its pane is closed only when that end is proven. Stall detection, interrupt, resume and reload survival work as before, with these differences:
+- Every child is launched and supervised by the package's agent runtime (`pi-memo-subagents/runtime`): the child's pane, shell, process and session are identified exactly, its end is recorded by the child itself (`subagent_done`, automatic exit after a normal run, `caller_ping`, or the user quitting pi) and its pane is closed only when that end is proven. Stall detection, interrupt, resume and reload survival work as before, with these differences:
   - a child is never force-closed: when the parent session quits, settled idle children are stopped and closed, busy ones keep their pane;
   - a child that ends without an orderly exit (crash, kill) is reported as an error, not as a success;
   - a launch whose outcome is uncertain (e.g. the child waits for a project trust prompt for longer than 120 s) is reported as such: do not relaunch, check the pane;
@@ -23,12 +23,12 @@ memo-subagents is a derivative of [pi-herdr-subagents](https://github.com/0xRich
 Requires pi and Herdr (start `herdr`, then run `pi` inside it).
 
 ```bash
-pi install /path/to/memo-subagents
+pi install /path/to/pi-memo-subagents
 # or
 pi install git:github.com/federico-alunni/pi-memo-subagents
 ```
 
-For a profile launched with `pi -ne` (packages disabled), load it explicitly with `pi -ne -e /path/to/memo-subagents …`; see [docs/child-host.md](docs/child-host.md) for host extensions/variables that children need.
+For a profile launched with `pi -ne` (packages disabled), load it explicitly with `pi -ne -e /path/to/pi-memo-subagents …`; see [docs/child-host.md](docs/child-host.md) for host extensions/variables that children need.
 
 ## Herdr UX
 
@@ -79,11 +79,11 @@ Bash levels per agent:
 
 With `bash: readonly` (or `bash-allow`) a plain command outside the read-only list and `bash-allow` is **asked** in the subagent's pane: `Rifiuta` (first, the default), `Permetti una volta`, `Permetti sempre in questa sessione dell'agente`. "Always" covers commands starting with the same first two words (or the same single word) and lasts only for that subagent process; nothing is written to disk or to the agent definition. Without a UI, on cancel or abort, and for commands with shell grammar the command is blocked without asking. An unknown `bash` value or an invalid `bash-allow` fails the launch before any worktree or pane is created.
 
-memo-subagents launches **only pi** children: the upstream drivers for other CLIs (Claude Code, Codex, OpenCode, Grok, generic `command` templates) and the Claude Code plugin hook were removed. A definition with `cli:` other than `pi` is rejected at spawn time.
+pi-memo-subagents launches **only pi** children: the upstream drivers for other CLIs (Claude Code, Codex, OpenCode, Grok, generic `command` templates) and the Claude Code plugin hook were removed. A definition with `cli:` other than `pi` is rejected at spawn time.
 
 ## Agent runtime (for other packages)
 
-`memo-subagents/runtime` is the library behind agent launching: exact pane/process identities, durable evidence,
+`pi-memo-subagents/runtime` is the library behind agent launching: exact pane/process identities, durable evidence,
 long-lived children with correlated tasks, delegated tools, read-only bash policy, proven shutdown. Other packages
 (pi-issue-round) launch their agents through it instead of their own transport, and every runtime agent appears in
 the same widget, grouped by client. The `subagent` tool is a client of the same runtime. Contract:

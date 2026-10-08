@@ -51,7 +51,7 @@ In every proceed case the warning is included in the child task note, in the too
 
 ## Registry and resume
 
-Each worktree spawn writes `$PI_CODING_AGENT_DIR/memo-subagents/worktrees/<id>.json` (atomic write) with `{ id, name, agent, repo, sourceCwd, path, cwd, branch, base, sessionFile, parentSession, createdAt, removedAt? }`. The running entry (`RunningSubagent.worktree`) also survives `/reload`.
+Each worktree spawn writes `$PI_CODING_AGENT_DIR/pi-memo-subagents/worktrees/<id>.json` (atomic write) with `{ id, name, agent, repo, sourceCwd, path, cwd, branch, base, sessionFile, parentSession, createdAt, removedAt? }`. The running entry (`RunningSubagent.worktree`) also survives `/reload`.
 
 `subagent_resume` looks the session up in the registry. If found and the worktree still exists and is registered with git, the resumed child runs with `cd <worktree cwd>`; if it was removed, the resume is refused (it would run in the wrong checkout). Sessions without a record resume exactly as before.
 

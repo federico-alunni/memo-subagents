@@ -232,7 +232,7 @@ const observerRegistry = globalThis as unknown as Record<
   symbol,
   Map<string, () => void> | undefined
 >;
-const observerKey = Symbol.for("memo-subagents/runtime-observers");
+const observerKey = Symbol.for("pi-memo-subagents/runtime-observers");
 const observers = (observerRegistry[observerKey] ??= new Map<
   string,
   () => void
@@ -240,7 +240,7 @@ const observers = (observerRegistry[observerKey] ??= new Map<
 // Panel naming reads the siblings and then reports the new name: serialized across every
 // runtime instance of the process so concurrent launches of one caller get distinct indices.
 const namingRegistry = globalThis as unknown as Record<symbol, Promise<void> | undefined>;
-const namingKey = Symbol.for("memo-subagents/panel-naming");
+const namingKey = Symbol.for("pi-memo-subagents/panel-naming");
 function serializeNaming(step: () => Promise<void>): Promise<void> {
   const next = (namingRegistry[namingKey] ?? Promise.resolve()).then(step, step);
   namingRegistry[namingKey] = next.catch(() => {});
@@ -906,7 +906,7 @@ export class AgentRuntime {
             "report-metadata",
             paneId!,
             "--source",
-            "memo-subagents",
+            "pi-memo-subagents",
             "--display-agent",
             name,
             ...(parent.pane_id
@@ -1455,7 +1455,7 @@ export class AgentRuntime {
     this.checkHandle(h);
     return readSubagentActivityFile(join(h.protocolDir, "activity.json"), h.nonce);
   }
-  /** Display only: workflow status of the agent row in the memo-subagents widget. */
+  /** Display only: workflow status of the agent row in the pi-memo-subagents widget. */
   annotate(h: AgentHandle, note: { status?: string; active?: boolean }): void {
     presence().update(h.protocolDir, {
       ...(note.status !== undefined ? { status: note.status } : {}),

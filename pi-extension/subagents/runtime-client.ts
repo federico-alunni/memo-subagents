@@ -13,14 +13,14 @@ import type {
   RuntimeConfig,
 } from "./runtime/index.ts";
 
-const INSTANCE_KEY = Symbol.for("memo-subagents/subagent-runtime");
+const INSTANCE_KEY = Symbol.for("pi-memo-subagents/subagent-runtime");
 
 /**
  * Private evidence root of generic subagents: per user, outside any project checkout (a child may run in
  * the home directory). Children do not survive a reboot, and resume never needs old evidence.
  */
 export function subagentStateDir(): string {
-  return join(tmpdir(), `memo-subagents-${process.getuid?.() ?? "user"}`);
+  return join(tmpdir(), `pi-memo-subagents-${process.getuid?.() ?? "user"}`);
 }
 
 export function subagentRuntimeConfig(): RuntimeConfig {

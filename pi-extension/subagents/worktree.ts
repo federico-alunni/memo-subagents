@@ -577,7 +577,7 @@ export interface WorktreeRecord {
 }
 
 export function worktreeRegistryDir(agentConfigDir: string): string {
-  return join(agentConfigDir, "memo-subagents", "worktrees");
+  return join(agentConfigDir, "pi-memo-subagents", "worktrees");
 }
 
 function recordFile(dir: string, id: string): string {

@@ -1,6 +1,6 @@
 # Pane selector
 
-memo-subagents keeps one agent visible next to the main pane and runs the others in background tabs. The selector lives in the agent runtime and is shared by every runtime client of the process: the `subagent` tool and Issue Round use the same placement rules and the same menu. This was a local customization of pi-herdr-subagents 0.2.0 (originally documented in `LOCAL-SELECTOR.md` of that local package) and is now part of this package.
+pi-memo-subagents keeps one agent visible next to the main pane and runs the others in background tabs. The selector lives in the agent runtime and is shared by every runtime client of the process: the `subagent` tool and Issue Round use the same placement rules and the same menu. This was a local customization of pi-herdr-subagents 0.2.0 (originally documented in `LOCAL-SELECTOR.md` of that local package) and is now part of this package.
 
 ## Behaviour
 

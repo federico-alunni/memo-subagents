@@ -35,5 +35,5 @@ export async function inspectPane(paneId: PaneId): Promise<import("./lifecycle.t
 
 /** Cosmetic task token in Herdr's pane metadata. */
 export function setPaneTask(paneId: PaneId, task: string): void {
-  reportHerdrPaneTask(paneId, task, "memo-subagents");
+  reportHerdrPaneTask(paneId, task, "pi-memo-subagents");
 }

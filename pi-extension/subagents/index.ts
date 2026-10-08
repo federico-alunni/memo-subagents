@@ -109,7 +109,7 @@ const WIDGET_INTERVAL_KEY = Symbol.for("pi-subagents/widget-interval");
 const STATUS_INTERVAL_KEY = Symbol.for("pi-subagents/status-interval");
 const RUNTIME_KEY = Symbol.for("pi-subagents/runtime");
 // Unsubscribe of the widget's presence listener, replaced on /reload.
-const PRESENCE_WIDGET_KEY = Symbol.for("memo-subagents/presence-widget-unsubscribe");
+const PRESENCE_WIDGET_KEY = Symbol.for("pi-memo-subagents/presence-widget-unsubscribe");
 
 {
   const prevInterval = (globalThis as any)[WIDGET_INTERVAL_KEY];
@@ -233,7 +233,7 @@ interface AgentDefaults {
   systemPromptMode?: "append" | "replace";
   sessionMode?: SubagentSessionMode;
   cwd?: string;
-  /** Parsed only to reject non-pi definitions (memo-subagents launches only pi). */
+  /** Parsed only to reject non-pi definitions (pi-memo-subagents launches only pi). */
   cli?: string;
   body?: string;
   disableModelInvocation?: boolean;
@@ -666,7 +666,7 @@ interface RunningSubagent {
   interactive: boolean;
   /** Parent-resolved model/thinking selection and provenance. */
   runtimePlan: ResolvedRuntimePlan | undefined;
-  /** Set when the child runs in a memo-subagents git worktree. */
+  /** Set when the child runs in a pi-memo-subagents git worktree. */
   worktree?: WorktreeInfo;
 }
 
@@ -1292,7 +1292,7 @@ async function confirmDirtyWorktreeSource(
 
 function worktreeTaskNote(info: WorktreeInfo): string {
   return [
-    `[memo-subagents worktree] You are working in the git worktree ${info.cwd} on the new branch ${info.branch} (base ${info.base.slice(0, 7)}). ` +
+    `[pi-memo-subagents worktree] You are working in the git worktree ${info.cwd} on the new branch ${info.branch} (base ${info.base.slice(0, 7)}). ` +
       `Commit your work on that branch. Do not modify the original checkout ${info.repo}. Nothing is merged automatically.`,
     ...info.warnings.map((warning) => `Warning: ${warning}`),
   ].join("\n");
@@ -1436,14 +1436,14 @@ async function removeWorktreeEntry(options: {
   const id = options.id?.trim();
   const path = options.path?.trim();
   if (!id && !path) {
-    return { ok: false, text: "Provide the id or path of a memo-subagents worktree.", details: { error: "missing target" } };
+    return { ok: false, text: "Provide the id or path of a pi-memo-subagents worktree.", details: { error: "missing target" } };
   }
   const matches = records.filter((record) =>
     id ? record.id === id || (id.length >= 4 && record.id.startsWith(id)) : samePath(record.path, path!),
   );
   if (matches.length !== 1) {
     const text = matches.length === 0
-      ? `No memo-subagents worktree matches ${id ? `id "${id}"` : `path ${path}`}. Only worktrees created by subagent are managed here.`
+      ? `No pi-memo-subagents worktree matches ${id ? `id "${id}"` : `path ${path}`}. Only worktrees created by subagent are managed here.`
       : `Ambiguous id "${id}": ${matches.map((record) => record.id).join(", ")}`;
     return { ok: false, text, details: { error: text } };
   }
@@ -1643,7 +1643,7 @@ function subagentToolPolicy(
   };
 }
 
-/** Identity variables read by memo-subagents inside the child (self-spawn guard, denied tools). */
+/** Identity variables read by pi-memo-subagents inside the child (self-spawn guard, denied tools). */
 function subagentEnv(options: {
   name: string;
   agent?: string;
@@ -1712,7 +1712,7 @@ async function launchSubagentInner(
   // Only pi agents: a definition with another cli is refused before any worktree or pane.
   if (agentDefs && !isPiAgent(agentDefs)) {
     throw new Error(
-      `Unsupported subagent cli "${agentDefs.cli}": memo-subagents launches only pi subagents. ` +
+      `Unsupported subagent cli "${agentDefs.cli}": pi-memo-subagents launches only pi subagents. ` +
         "Remove the `cli` field from the agent definition.",
     );
   }
@@ -2833,7 +2833,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         }
         const entries = await listWorktreeEntries({ cwd: ctx.cwd, all: params.all });
         const text = entries.length === 0
-          ? "No memo-subagents worktrees found."
+          ? "No pi-memo-subagents worktrees found."
           : entries.map(formatWorktreeEntry).join("\n");
         return {
           content: [{ type: "text", text }],
@@ -2851,7 +2851,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       if (!ctx.hasUI) return;
       const entries = await listWorktreeEntries({ cwd: ctx.cwd });
       if (entries.length === 0) {
-        ctx.ui.notify("No memo-subagents worktrees for this repository", "info");
+        ctx.ui.notify("No pi-memo-subagents worktrees for this repository", "info");
         return;
       }
       const labels = entries.map(formatWorktreeEntry);

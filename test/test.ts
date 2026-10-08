@@ -1115,7 +1115,7 @@ describe("subagent discovery", () => {
     );
   });
 
-  // memo-subagents ships no agents: only global and project definitions are discovered.
+  // pi-memo-subagents ships no agents: only global and project definitions are discovered.
   it("bundles no agents of its own", async () => {
     await withIsolatedAgentEnv(() => {
       assert.deepEqual(testApi.discoverAgentDefinitions(), []);

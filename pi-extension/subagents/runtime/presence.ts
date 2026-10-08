@@ -41,7 +41,7 @@ export interface PresenceRegistry {
   subscribe(listener: () => void): () => void;
 }
 
-const PRESENCE_KEY = Symbol.for("memo-subagents/runtime-presence");
+const PRESENCE_KEY = Symbol.for("pi-memo-subagents/runtime-presence");
 
 function createRegistry(): PresenceRegistry {
   const entries = new Map<string, PresenceEntry>();

@@ -442,7 +442,7 @@ describe("subagent worktree launch", () => {
 
     const spec = launched(d);
     assert.equal(spec.cwd, wt.cwd);
-    assert.match(spec.prompt, /\[memo-subagents worktree\] You are working in the git worktree/);
+    assert.match(spec.prompt, /\[pi-memo-subagents worktree\] You are working in the git worktree/);
     assert.ok(spec.prompt.includes(`Do not modify the original checkout ${repo}`));
     assert.equal(dirname(d.sessionFile), sessionDirFor(wt.cwd));
     const header = JSON.parse(readFileSync(d.sessionFile, "utf8").split("\n")[0]);
@@ -569,7 +569,7 @@ describe("subagent worktree launch", () => {
     assert.equal(result.details.worktree.branch, "feature/headless");
     assert.match(result.details.worktree.warnings[0], /1 uncommitted/);
     // Wrapped (non-fork) delivery: the note is in the task prompt.
-    assert.match(launched(result.details).prompt, /\[memo-subagents worktree\][\s\S]*Warning: The source checkout/);
+    assert.match(launched(result.details).prompt, /\[pi-memo-subagents worktree\][\s\S]*Warning: The source checkout/);
     __test__.runningSubagents.get(result.details.id)?.abortController?.abort();
   });
 

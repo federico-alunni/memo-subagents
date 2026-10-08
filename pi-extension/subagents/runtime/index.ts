@@ -1,4 +1,4 @@
-// Public surface of `memo-subagents/runtime`. Contract: docs/runtime.md.
+// Public surface of `pi-memo-subagents/runtime`. Contract: docs/runtime.md.
 export {
   AgentRuntime,
   RuntimeError,
