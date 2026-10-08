@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import extension, { __test__ } from '../pi-extension/subagents/index.ts';
 import { paneSelector } from '../pi-extension/subagents/pane-selector.ts';
 import { createLifecycle } from '../pi-extension/subagents/lifecycle.ts';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -12,6 +12,15 @@ const agentDir = mkdtempSync(join(tmpdir(), 'memo-subagents-agents-'));
 mkdirSync(join(agentDir, 'agents'));
 writeFileSync(join(agentDir, 'agents', 'worker.md'), '---\nname: worker\ndescription: Test worker\n---\nYou are a test worker.\n');
 process.env.PI_CODING_AGENT_DIR = agentDir;
+
+// Hermetic Herdr: these tests must not depend on running inside a real Herdr (CI has neither the binary nor the
+// variables). A stub `herdr` on PATH and the pane variables make the extension see an interactive Herdr session.
+const binDir = mkdtempSync(join(tmpdir(), 'memo-subagents-bin-'));
+writeFileSync(join(binDir, 'herdr'), '#!/bin/sh\nexit 0\n');
+chmodSync(join(binDir, 'herdr'), 0o755);
+process.env.PATH = `${binDir}:${process.env.PATH ?? ''}`;
+process.env.HERDR_ENV = '1';
+process.env.HERDR_PANE_ID = 'test-pane-0';
 
 function fixture() {
   const commands = new Map();
