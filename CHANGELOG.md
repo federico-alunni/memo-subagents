@@ -13,6 +13,7 @@
 
 ### Added
 
+- `PI_SUBAGENT_PANE_LINGER`: delays closing a completed subagent's pane (e.g. `30s`, `2m`), so the user can inspect its final terminal output before the pane closes.
 - `group` for agents started by scripts (socket `spawn`): inherited by agents they start; reported by `list` and the lifecycle events. `subagents:ready` carries a snapshot `{ agents: { id, name, agent, group }[] }`.
 - [docs/socket.md](docs/socket.md): the session socket, its tokens and methods.
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { subagentEnd, superviseSubagent } from "../pi-extension/subagents/runtime-client.ts";
+import { parsePaneLinger, subagentEnd, superviseSubagent } from "../pi-extension/subagents/runtime-client.ts";
 
 const exit = (reason: string, extra: object = {}) => ({ kind: "exit", reason, ...extra }) as any;
 const obs = (kind: string, extra: object = {}) => ({ kind, requests: [], ...extra }) as any;
@@ -108,5 +108,30 @@ describe("subagent supervision on the agent runtime", () => {
     });
     assert.equal(cancelled.end.kind, "cancelled");
     assert.deepEqual(calls, ["stop"]);
+  });
+  it("delays closing the pane when paneLingerMs is set", async () => {
+    assert.equal(parsePaneLinger("30s"), 30000);
+    assert.equal(parsePaneLinger("2m"), 120000);
+    assert.equal(parsePaneLinger("5000"), 5000);
+    assert.equal(parsePaneLinger("0"), 0);
+
+    const calls: string[] = [];
+    const runtime = {
+      async observe() { return obs("stopped", { exit: exit("done") }); },
+      async close() { calls.push("close"); },
+      forget() { calls.push("forget"); },
+    };
+    const outcome = await superviseSubagent({
+      runtime: runtime as any,
+      handle: () => ({ tabId: "t1" }) as any,
+      signal: new AbortController().signal,
+      intervalMs: 1,
+      paneLingerMs: 30,
+    });
+    assert.equal(outcome.closed, false);
+    assert.equal(outcome.lingering, true);
+    assert.equal(calls.length, 0, "not closed immediately");
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(calls.length, 1, "closed after linger");
   });
 });

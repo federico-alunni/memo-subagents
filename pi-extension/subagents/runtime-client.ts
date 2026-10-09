@@ -63,6 +63,26 @@ export interface SupervisedOutcome {
   /** The child's pane was closed by the runtime after the end (proven). */
   closed: boolean;
   closeError?: string;
+  /** True when the pane is being kept open for an inspection linger window before closing. */
+  lingering?: boolean;
+}
+
+/** Parses `PI_SUBAGENT_PANE_LINGER` (e.g. `30s`, `2m`, `120000`, `60`) into milliseconds. */
+export function parsePaneLinger(raw: string | undefined): number {
+  if (!raw || typeof raw !== "string") return 0;
+  const str = raw.trim().toLowerCase();
+  if (!str || str === "0" || str === "false" || str === "off") return 0;
+  if (str.endsWith("m")) {
+    const mins = parseFloat(str.slice(0, -1));
+    return isNaN(mins) ? 0 : Math.max(0, Math.round(mins * 60_000));
+  }
+  if (str.endsWith("s")) {
+    const secs = parseFloat(str.slice(0, -1));
+    return isNaN(secs) ? 0 : Math.max(0, Math.round(secs * 1_000));
+  }
+  const num = parseFloat(str);
+  if (isNaN(num) || num <= 0) return 0;
+  return num <= 600 ? Math.round(num * 1_000) : Math.round(num);
 }
 
 function exitEnd(exit: ChildRecord): SupervisedEnd {
@@ -93,6 +113,7 @@ export async function superviseSubagent(options: {
   handle: () => AgentHandle;
   signal: AbortSignal;
   intervalMs?: number;
+  paneLingerMs?: number;
   onObservation?: (o: Observation, handle: AgentHandle) => void;
 }): Promise<SupervisedOutcome> {
   const { runtime, signal } = options;
@@ -138,6 +159,15 @@ export async function superviseSubagent(options: {
   if (end.kind === "ended" && end.reason === "pane-closed") {
     runtime.forget(options.handle());
     return { end, closed: true };
+  }
+  const linger = options.paneLingerMs ?? parsePaneLinger(process.env.PI_SUBAGENT_PANE_LINGER);
+  if (linger > 0 && (end.kind === "done" || (end.kind === "ended" && end.reason === "user-quit"))) {
+    const handle = options.handle();
+    const timer = setTimeout(() => {
+      void runtime.close(handle).catch(() => runtime.forget(handle));
+    }, linger);
+    timer.unref?.();
+    return { end, closed: false, lingering: true };
   }
   try {
     await runtime.close(options.handle());
