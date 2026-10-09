@@ -2786,6 +2786,8 @@ function mirrorSlots(): MirrorSlot[] {
     const members = slotMembers(agent.slot.id);
     const active = members[members.length - 1];
     const projection = projectLifecycle(ensureLifecycle(active), Date.now());
+    const activeModel = active.runtimePlan?.model ?? active.model;
+    const activeThinking = active.runtimePlan?.thinking ?? active.thinking;
     slots.push({
       slotId: agent.slot.id,
       view: {
@@ -2794,6 +2796,8 @@ function mirrorSlots(): MirrorSlot[] {
         paneId: active.surface,
         name: agent.slot.name,
         ...(active.agent ? { agent: active.agent } : {}),
+        ...(activeModel ? { model: activeModel } : {}),
+        ...(activeThinking ? { thinking: activeThinking } : {}),
         ...(agent.slot.worktree?.branch ? { branch: agent.slot.worktree.branch } : {}),
         startedAt: active.startTime,
         status: mirrorStatus(projection.kind),

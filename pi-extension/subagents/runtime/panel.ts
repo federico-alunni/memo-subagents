@@ -281,7 +281,9 @@ export function renderPanel(data: PanelData, width: number, theme: MirrorTheme):
   const headers = columns.length > 0
     ? theme.fg("muted", theme.bold(columns.map((column) => pad(column.header, columnWidth(column))).join(" ")))
     : "";
-  for (const group of data.groups ?? []) {
+  const groups = data.groups ?? [];
+  if (groups.length === 1) {
+    const group = groups[0];
     const active = group.status === "active";
     const arrow = theme.fg(active ? "accent" : "muted", "▾");
     const note = group.note ?? DEFAULT_NOTES[group.status];
@@ -289,9 +291,7 @@ export function renderPanel(data: PanelData, width: number, theme: MirrorTheme):
       ? `${theme.fg(active ? "accent" : "muted", active ? "●" : "○")} ${theme.fg("muted", theme.italic(note))}`
       : "";
     const label = `${arrow} ${theme.bold(group.name)} ${dot}`.trimEnd();
-    // Column headers only over groups whose items carry marks (free-text groups have none).
     if (active && headers && group.items.some((item) => item.marks)) {
-      // The label must leave a space before the headers: drop the note, then cut, when the pane is narrow.
       const room = 2 + 2 + idW + 1;
       const short = `${arrow} ${theme.bold(group.name)} ${theme.fg("accent", "●")}`;
       const fitted = visibleWidth(label) <= room ? label : visibleWidth(short) <= room ? short : fit(short, room);
@@ -302,6 +302,71 @@ export function renderPanel(data: PanelData, width: number, theme: MirrorTheme):
       lines.push(row(label));
     }
     for (let i = 0; i < group.items.length; i += 2) lines.push(formatPair(group.items[i], group.items[i + 1]));
+  } else if (groups.length >= 2) {
+    const groupHeight = (g: PanelGroup): number => (g.status === "completed" ? 1 : 1 + g.items.length);
+    let bestSplit = 1;
+    let minMax = Infinity;
+    for (let i = 1; i < groups.length; i++) {
+      const h1 = groups.slice(0, i).reduce((s, g) => s + groupHeight(g), 0);
+      const h2 = groups.slice(i).reduce((s, g) => s + groupHeight(g), 0);
+      const maxH = Math.max(h1, h2);
+      if (maxH < minMax) {
+        minMax = maxH;
+        bestSplit = i;
+      }
+    }
+    const col1Groups = groups.slice(0, bestSplit);
+    const col2Groups = groups.slice(bestSplit);
+
+    const renderColGroupLines = (groupList: PanelGroup[], isLeft: boolean): string[] => {
+      const colLines: string[] = [];
+      for (const group of groupList) {
+        const active = group.status === "active";
+        const isCompleted = group.status === "completed";
+        const arrow = theme.fg(active ? "accent" : "muted", "▾");
+        const note = isCompleted
+          ? theme.fg("success", `✓ completata (${group.items.length}/${group.items.length})`)
+          : group.note ?? DEFAULT_NOTES[group.status];
+        const dot = isCompleted
+          ? ` ${note}`
+          : note
+            ? ` ${theme.fg(active ? "accent" : "muted", active ? "●" : "○")} ${theme.fg("muted", theme.italic(note))}`
+            : "";
+        const label = `${arrow} ${theme.bold(group.name)}${dot}`.trimEnd();
+        const isFirst = colLines.length === 0;
+
+        if (isFirst && headers && group.items.some((item) => item.marks)) {
+          const room = cellWidth - visibleWidth(headers) - 1;
+          const short = `${arrow} ${theme.bold(group.name)} ${theme.fg(active ? "accent" : "muted", active ? "●" : "○")}`;
+          const fitted = visibleWidth(label) <= room ? label : visibleWidth(short) <= room ? short : fit(short, room);
+          const fill = cellWidth - visibleWidth(fitted) - visibleWidth(headers);
+          const headerLine = `${fitted}${" ".repeat(Math.max(1, fill))}${headers}`;
+          colLines.push(isLeft ? `  ${headerLine}` : ` ${headerLine}`);
+        } else {
+          colLines.push(isLeft ? `  ${pad(label, cellWidth)}` : ` ${pad(label, cellWidth)}`);
+        }
+
+        if (!isCompleted) {
+          for (const item of group.items) {
+            const prefix = isLeft
+              ? (item.selected ? ` ${theme.fg("accent", "▸")}` : "  ")
+              : (item.selected ? theme.fg("accent", "▸") : " ");
+            colLines.push(`${prefix}${pad(formatCell(item), cellWidth)}`);
+          }
+        }
+      }
+      return colLines;
+    };
+
+    const col1Lines = renderColGroupLines(col1Groups, true);
+    const col2Lines = renderColGroupLines(col2Groups, false);
+    const maxLines = Math.max(col1Lines.length, col2Lines.length);
+
+    for (let i = 0; i < maxLines; i++) {
+      const left = col1Lines[i] ?? `  ${pad("", cellWidth)}`;
+      const right = col2Lines[i] ?? ` ${pad("", cellWidth)}`;
+      lines.push(row(`${left} ${sepBar}${right}`));
+    }
   }
 
   // Detail row for the selected item, hint right-aligned when there is room.

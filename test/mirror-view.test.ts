@@ -118,16 +118,17 @@ test("header: status symbol, slot, agent, branch and duration in theme tokens; b
   const now = 192_000; // 03:12
   const wide = mirrorHeader(view(), 80, tagTheme, now);
   assert.equal(visibleWidth(stripTags(wide)), 80);
-  assert.match(stripTags(wide), /^╭─ ● fix-lock │ worker │ ⎇ memo\/fix-lock-1a2b3c4d ─+ 03:12 ─╮$/);
+  assert.match(stripTags(wide), /^╭─ ● ⧉ fix-lock │ worker │ ⎇ memo\/fix-lock-1a2b3c4d ─+ 03:12 ─╮$/);
   assert.ok(wide.startsWith(fg("accent", "╭─")));
   assert.ok(wide.includes(fg("accent", "●")));
+  assert.ok(wide.includes(fg("accent", "⧉")));
   assert.ok(wide.includes(b(fg("text", "fix-lock"))));
   assert.ok(wide.includes(`${fg("muted", "│")} ${it("worker")}`));
   assert.ok(wide.includes(`${fg("accent", "⎇")} memo/fix-lock-1a2b3c4d`));
   assert.ok(wide.includes(fg("muted", "03:12")));
   assert.ok(wide.endsWith(fg("accent", "─╮")));
-  assert.match(stripTags(mirrorHeader(view(), 40, tagTheme, now)), /^╭─ ● fix-lock │ worker ─+ 03:12 ─╮$/);
-  assert.match(stripTags(mirrorHeader(view(), 28, tagTheme, now)), /^╭─ ● fix-lock ─+ 03:12 ─╮$/);
+  assert.match(stripTags(mirrorHeader(view(), 40, tagTheme, now)), /^╭─ ● ⧉ fix-lock │ worker ─+ 03:12 ─╮$/);
+  assert.match(stripTags(mirrorHeader(view(), 28, tagTheme, now)), /^╭─ ● ⧉ fix-lock ─+ 03:12 ─╮$/);
   assert.equal(visibleWidth(stripTags(mirrorHeader(view(), 12, tagTheme, now))), 12, "never wider than the pane");
 });
 
@@ -247,34 +248,34 @@ test("renderStackedMirrors: stacks N worker boxes in a single column with balanc
   const single = renderStackedMirrors([s1], screens, 20, 60, tagTheme, 0);
   assert.equal(single.length, 20);
   for (const line of single) assert.equal(visibleWidth(stripTags(line)), 60);
-  assert.match(stripTags(single[0]), /^╭─ ● worker-1/);
+  assert.match(stripTags(single[0]), /^╭─ ● ⧉ worker-1/);
 
   // 2 slots: 12 rows each in 24 rows
   const two = renderStackedMirrors([s1, s2], screens, 24, 60, tagTheme, 0);
   assert.equal(two.length, 24);
-  assert.match(stripTags(two[0]), /^╭─ ● worker-1/);
-  assert.match(stripTags(two[12]), /^╭─ ● worker-2/);
+  assert.match(stripTags(two[0]), /^╭─ ● ⧉ worker-1/);
+  assert.match(stripTags(two[12]), /^╭─ ● ⧉ worker-2/);
 
   // Uneven rows: 25 rows -> 13 + 12
   const uneven = renderStackedMirrors([s1, s2], screens, 25, 60, tagTheme, 0);
   assert.equal(uneven.length, 25);
-  assert.match(stripTags(uneven[0]), /^╭─ ● worker-1/);
-  assert.match(stripTags(uneven[13]), /^╭─ ● worker-2/);
+  assert.match(stripTags(uneven[0]), /^╭─ ● ⧉ worker-1/);
+  assert.match(stripTags(uneven[13]), /^╭─ ● ⧉ worker-2/);
 
   // 3 slots: 8 rows each in 24 rows
   const three = renderStackedMirrors([s1, s2, s3], screens, 24, 60, tagTheme, 0);
   assert.equal(three.length, 24);
-  assert.match(stripTags(three[0]), /^╭─ ● worker-1/);
-  assert.match(stripTags(three[8]), /^╭─ ● worker-2/);
-  assert.match(stripTags(three[16]), /^╭─ ● worker-3/);
+  assert.match(stripTags(three[0]), /^╭─ ● ⧉ worker-1/);
+  assert.match(stripTags(three[8]), /^╭─ ● ⧉ worker-2/);
+  assert.match(stripTags(three[16]), /^╭─ ● ⧉ worker-3/);
 
   // Minimum height constraint (6 rows per box) and overflow indication
   // With 15 rows and 4 slots, only 2 boxes can fit (min 6 rows). 15 rows -> 8 + 7
   const s4 = view({ slotId: "s4", name: "worker-4" });
   const overflow = renderStackedMirrors([s1, s2, s3, s4], screens, 15, 60, tagTheme, 0);
   assert.equal(overflow.length, 15);
-  assert.match(stripTags(overflow[0]), /^╭─ ● worker-1/);
-  assert.match(stripTags(overflow[8]), /^╭─ ● worker-2/);
+  assert.match(stripTags(overflow[0]), /^╭─ ● ⧉ worker-1/);
+  assert.match(stripTags(overflow[8]), /^╭─ ● ⧉ worker-2/);
   // Last row indicates overflow (+2 more in background)
   assert.match(stripTags(overflow[14]), /\(\+2 more in background\)/);
 

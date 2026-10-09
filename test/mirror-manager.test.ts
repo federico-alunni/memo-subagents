@@ -68,7 +68,7 @@ test("single shared column viewer is launched once for multiple slots; all slots
   assert.equal(spec.placement, "auto");
   assert.equal(spec.viewer.script, "/pkg/runtime/mirror-viewer.ts");
   assert.match(spec.viewer.env.PI_MEMO_MIRROR_VIEW_FILE, /column-4242\.view\.json$/);
-  assert.match(spec.display.label, /w1 │ w2/);
+  assert.match(spec.display.label, /subagents/);
 
   // Both slots point to the same pane
   assert.equal(f.manager.paneFor("s1"), "mirror-pane-1");

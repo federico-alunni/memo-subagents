@@ -116,7 +116,7 @@ export class MirrorManager {
     const recordFile = join(this.dir, `${own}.json`);
     await publish(viewFile, multiView, false);
 
-    const label = `⧉ ${slots.map((s) => s.view.name).join(" │ ")}`;
+    const label = "⧉ subagents";
     let handle: AgentHandle;
     try {
       handle = await this.options.runtime.launch({

@@ -27,6 +27,8 @@ export interface MirrorView {
   name: string;
   /** Agent definition (or name) of the active agent. */
   agent?: string;
+  model?: string;
+  thinking?: string;
   branch?: string;
   /** Start of the active agent (header duration). */
   startedAt: number;
@@ -170,10 +172,13 @@ function statusSymbol(status: MirrorStatus, theme: MirrorTheme): string {
 export function mirrorHeader(view: MirrorView, width: number, theme: MirrorTheme, now = Date.now()): string {
   const right = ` ${theme.fg("muted", formatDuration(now - view.startedAt))} ${theme.fg("accent", "─╮")}`;
   const hint = view.attention ? ` ${theme.bold(theme.fg("warning", "[rispondi qui]"))}` : "";
-  const name = `${theme.bold(theme.fg("text", view.name))}${hint}`;
+  const name = `${theme.fg("accent", "⧉")} ${theme.bold(theme.fg("text", view.name))}${hint}`;
   const sep = ` ${theme.fg("muted", "│")} `;
+  const modelId = view.model ? (view.model.includes("/") ? view.model.slice(view.model.indexOf("/") + 1) : view.model) : undefined;
+  const modelTag = modelId ? (view.thinking && view.thinking !== "off" ? `${modelId}|${view.thinking}` : modelId) : undefined;
   const variants = [
-    [name, ...(view.agent ? [theme.italic(view.agent)] : []), ...(view.branch ? [`${theme.fg("accent", "⎇")} ${view.branch}`] : [])],
+    [name, ...(view.agent ? [theme.italic(view.agent)] : []), ...(modelTag ? [theme.fg("muted", modelTag)] : []), ...(view.branch ? [`${theme.fg("accent", "⎇")} ${view.branch}`] : [])],
+    [name, ...(view.agent ? [theme.italic(view.agent)] : []), ...(modelTag ? [theme.fg("muted", modelTag)] : [])],
     [name, ...(view.agent ? [theme.italic(view.agent)] : [])],
     [name],
   ];

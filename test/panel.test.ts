@@ -22,7 +22,7 @@ const STAGED = {
     { key: "simplify", header: "S", legend: "simplify" },
     { key: "review", header: "R", legend: "review" },
     { key: "correction", header: "C", legend: "correction", width: 2 },
-    { key: "checkpoint", header: "☑", legend: "checkpoint", glyphs: { done: "☑", pending: "☐" } },
+    { key: "checkpoint", header: "✓", legend: "checkpoint", glyphs: { done: "☑", pending: "☐" } },
   ],
   legend: [{ mark: "●", color: "error" as const, label: "stallo" }],
 } satisfies Partial<PanelData>;
@@ -104,7 +104,7 @@ test("theme tokens: border, progress, column glyphs and flag colors", () => {
   assert.ok(lines[0].includes(C.muted + "▱"));
   assert.ok(lines[3].includes(C.success + "☑"));
   assert.ok(lines[3].includes(C.muted + "☐"));
-  assert.ok(lines[4].includes(C.error + "⚠12m"));
+  assert.ok(lines[5].includes(C.error + "⚠12m"));
 });
 
 test("selection marker ▸ sits in the free cell before the dot and keeps alignment", () => {
