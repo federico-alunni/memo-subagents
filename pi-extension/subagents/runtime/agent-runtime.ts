@@ -895,6 +895,28 @@ export class AgentRuntime {
           await evidence("worktree-opened", { returned: opened });
           // A fresh space's root pane is ours; an already-open space gets its own tab.
           if (space.fresh) created = opened;
+        } else {
+          // Herdr refused worktree open (e.g. repository outside the caller's workspace):
+          // Open a dedicated workspace for the child so it never lands as tabs in the caller workspace.
+          try {
+            const wsCreated = await this.herdr(
+              [
+                "workspace",
+                "create",
+                "--cwd",
+                cwd,
+                "--label",
+                label,
+                "--no-focus",
+              ],
+              cwd,
+            );
+            if (wsCreated?.workspace?.workspace_id) {
+              space = { workspaceId: wsCreated.workspace.workspace_id, fresh: true };
+              created = wsCreated;
+              await evidence("worktree-workspace-created", { returned: wsCreated });
+            }
+          } catch {}
         }
       }
       if (!created) {
@@ -1851,6 +1873,10 @@ export class AgentRuntime {
       // A user-driven child (userInput "allowed") may also end because the user quit pi:
       // its exact exit is enough. Workflow children need the orderly acknowledgement.
       const userMayQuit = await this.userDriven(h);
+      const exitDeadline = Date.now() + 1500;
+      while ((await this.process(h.pid)) !== undefined && Date.now() < exitDeadline) {
+        await delay(50);
+      }
       if (
         (!validTask(ack, h, "shutdown-ack") && !userMayQuit) ||
         (await this.process(h.pid)) !== undefined
@@ -1881,6 +1907,10 @@ export class AgentRuntime {
           "Pane has a different occupant",
         );
       await this.herdr(["pane", "close", h.paneId]);
+      // If the child lived in its own dedicated tab (not a split beside the caller), close the tab too
+      if (h.tabId && h.placement !== "split-right" && h.placement !== "split-down") {
+        await this.herdr(["tab", "close", h.tabId]).catch(() => {});
+      }
       // Do not infer closure merely from command acknowledgement.
       try {
         await this.pane(h);

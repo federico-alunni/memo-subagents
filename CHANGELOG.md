@@ -19,6 +19,8 @@
 
 ### Fixed
 
+- Worktree placement: when `herdr worktree open` is refused (e.g. repository outside the caller workspace), a dedicated workspace is created instead of falling back to creating tabs in the caller workspace.
+- Tab cleanup: closing a completed subagent in a dedicated tab closes the Herdr tab, and waits up to 1.5s for process exit so cleanups are not prematurely blocked.
 - Supplied panel: the presence row of a live subagent shown by the panel no longer adds a second box.
 - Panel renderer in narrow panes: every line keeps the exact width (the top bar sheds progress glyphs, then the phase, then cuts the title; long rows are cut with `…`), and an active group's label never runs into the column headers.
 - The `pi-subagent` bin is self-contained JavaScript: installed from npm it imported `client.ts`, which Node refuses to type-strip under `node_modules`.
