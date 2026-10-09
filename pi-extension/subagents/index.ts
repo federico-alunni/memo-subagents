@@ -1332,7 +1332,21 @@ function processIdentitySync(pid: number): string | undefined {
 
 /** One Herdr CLI call (JSON in, `result` out); throws on a Herdr error. */
 function herdrCli(args: string[]): unknown {
-  const response = JSON.parse(execFileSync(process.env.HERDR_BIN_PATH || "herdr", args, { encoding: "utf8", timeout: 10000 }));
+  let output: string;
+  try {
+    output = execFileSync(process.env.HERDR_BIN_PATH || "herdr", args, { encoding: "utf8", timeout: 10000, stdio: ["pipe", "pipe", "pipe"] });
+  } catch (err: any) {
+    if (err.stderr) {
+      try {
+        const parsed = JSON.parse(err.stderr);
+        if (parsed.error) throw Object.assign(new Error(parsed.error.message ?? "Herdr request failed"), { herdrCode: parsed.error.code });
+      } catch (e: any) {
+        if (e.herdrCode) throw e;
+      }
+    }
+    throw err;
+  }
+  const response = JSON.parse(output);
   if (response.error) throw new Error(response.error.message ?? "Herdr request failed");
   return response.result;
 }

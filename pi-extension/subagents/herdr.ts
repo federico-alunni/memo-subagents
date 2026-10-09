@@ -49,12 +49,22 @@ function parseHerdrJson(value: string): unknown {
 }
 
 function herdrExec(args: string[]): string {
-  return execFileSync("herdr", args, { encoding: "utf8" });
+  try {
+    return execFileSync("herdr", args, { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] });
+  } catch (err: any) {
+    if (err.stderr) return err.stderr;
+    throw err;
+  }
 }
 
 async function herdrExecAsync(args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("herdr", args, { encoding: "utf8" });
-  return stdout;
+  try {
+    const { stdout } = await execFileAsync("herdr", args, { encoding: "utf8" });
+    return stdout;
+  } catch (err: any) {
+    if (err.stderr) return err.stderr;
+    throw err;
+  }
 }
 
 type PaneInspectionResult =
