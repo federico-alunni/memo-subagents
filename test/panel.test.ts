@@ -178,17 +178,17 @@ describe("widget surfaces and supplied panels", () => {
       hasWorked: true,
     },
   };
-  const withSurface = async (mode: string | undefined, fn: (api: any) => void) => {
+  const withSurface = async (mode: string | undefined, fn: (api: any) => void | Promise<void>) => {
     const { __test__ } = await import("../pi-extension/subagents/index.ts");
     const prev = process.env.PI_SUBAGENT_SURFACE;
     if (mode === undefined) delete process.env.PI_SUBAGENT_SURFACE;
     else process.env.PI_SUBAGENT_SURFACE = mode;
     try {
-      fn(__test__);
+      await fn(__test__);
     } finally {
       if (prev !== undefined) process.env.PI_SUBAGENT_SURFACE = prev;
       else delete process.env.PI_SUBAGENT_SURFACE;
-      __test__.receivePanel({ source: "test", data: null });
+      for (const source of ["test", "claim", "lin"]) __test__.receivePanel({ source, data: null });
     }
   };
 
@@ -234,6 +234,24 @@ describe("widget surfaces and supplied panels", () => {
       assert.equal(api.renderWidgetLines([], [], 96, theme).length, 0); // no agents
       const runWorker = { ...worker, group: "test-run" };
       assert.ok(api.renderWidgetLines([runWorker], [], 96, theme).length > 0); // matched by group
+      // An agent of another group never matches by name.
+      api.receivePanel({ source: "claim", data: { ...SCENARIO_3, group: "test-run", items: [{ ...SCENARIO_3.items![0], subagent: "worker-1" }] } });
+      const other = api.renderWidgetLines([{ ...worker, group: "elsewhere" }], [], 96, theme).map(stripAnsi);
+      assert.ok(!other.some((line: string) => /Pipeline/.test(line)), "the panel stays hidden");
+      assert.ok(other.some((line: string) => /Subagents/.test(line)), "the agent keeps its own row");
+    });
+  });
+
+  it("supplied panel linger: visible for linger ms after its last live subagent", async () => {
+    await withSurface(undefined, async (api) => {
+      const runWorker = { ...worker, group: "run" };
+      api.receivePanel({ source: "lin", data: { ...SCENARIO_3, group: "run", linger: 60_000 } });
+      assert.ok(api.renderWidgetLines([runWorker], [], 96, theme).length > 0);
+      assert.ok(api.renderWidgetLines([], [], 96, theme).length > 0, "still within the linger");
+      api.receivePanel({ source: "lin", data: { ...SCENARIO_3, group: "run", linger: 5 } });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(api.renderWidgetLines([], [], 96, theme).length, 0, "linger over");
+      api.receivePanel({ source: "lin", data: null });
     });
   });
 

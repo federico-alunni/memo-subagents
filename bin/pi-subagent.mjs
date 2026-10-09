@@ -1,8 +1,50 @@
 #!/usr/bin/env node
 
-// CLI wrapper around the pi-memo-subagents session socket.
+// CLI wrapper around the pi-memo-subagents session socket (see docs/socket.md).
+// Plain JavaScript on purpose: Node does not strip TypeScript types under node_modules, so an installed
+// package cannot import client.ts from here.
 
-import { SubagentClient } from "../pi-extension/subagents/client.ts";
+import { createConnection } from "node:net";
+
+class SubagentClient {
+  constructor() {
+    this.socketPath = process.env.PI_SUBAGENT_SOCKET ?? "";
+    this.token = process.env.PI_SUBAGENT_SOCKET_TOKEN ?? "";
+    this.callerId = process.env.PI_SUBAGENT_ID;
+    if (!this.socketPath) throw new Error("No subagent socket available (PI_SUBAGENT_SOCKET is not set)");
+  }
+
+  request(method, params = {}) {
+    const id = `req-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const payload = `${JSON.stringify({ id, token: this.token, callerId: this.callerId, method, params })}\n`;
+    return new Promise((resolve, reject) => {
+      const socket = createConnection(this.socketPath);
+      let buffer = "";
+      socket.setEncoding("utf8");
+      socket.on("connect", () => socket.write(payload));
+      socket.on("data", (chunk) => {
+        buffer += chunk;
+        const newline = buffer.indexOf("\n");
+        if (newline === -1) return;
+        const line = buffer.slice(0, newline).trim();
+        socket.end();
+        try {
+          const response = JSON.parse(line);
+          if (response.ok) resolve(response.result);
+          else reject(new Error(response.error ?? "Subagent socket request failed"));
+        } catch {
+          reject(new Error(`Invalid response from subagent socket: ${line}`));
+        }
+      });
+      socket.on("error", reject);
+    });
+  }
+
+  spawn(params) { return this.request("spawn", params); }
+  list() { return this.request("list"); }
+  send(id, prompt) { return this.request("send", { id, prompt }); }
+  interrupt(target) { return this.request("interrupt", target); }
+}
 
 function usage() {
   console.error(`Usage: pi-subagent <command> [args]

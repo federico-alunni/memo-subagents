@@ -14,16 +14,16 @@ describe("session socket & SubagentClient", () => {
         calls.push({ method: "spawn", args: { callerId, params } });
         return { id: "sub-123", name: params.name };
       },
-      async list() {
-        calls.push({ method: "list", args: {} });
+      async list(callerId) {
+        calls.push({ method: "list", args: { callerId } });
         return [{ id: "sub-123", name: "test-agent" }];
       },
-      async send(id, prompt, options) {
-        calls.push({ method: "send", args: { id, prompt, options } });
+      async send(callerId, id, prompt, options) {
+        calls.push({ method: "send", args: { callerId, id, prompt, options } });
         return { ok: true, taskId: "task-1" };
       },
-      async interrupt(target) {
-        calls.push({ method: "interrupt", args: { target } });
+      async interrupt(callerId, target) {
+        calls.push({ method: "interrupt", args: { callerId, target } });
         return { ok: true, id: target.id };
       },
     });
@@ -54,7 +54,7 @@ describe("session socket & SubagentClient", () => {
       assert.equal(calls[3].method, "interrupt");
       assert.equal(calls[3].args.target.id, "sub-123");
 
-      // 5. callerId passed from worker env
+      // 5. the session token may name a caller
       const childClient = new SubagentClient({
         socketPath: server.socketPath,
         token: server.token,
@@ -63,7 +63,18 @@ describe("session socket & SubagentClient", () => {
       await childClient.spawn({ name: "child-worker", task: "research" });
       assert.equal(calls[4].args.callerId, "worker-parent-99");
 
-      // 6. Invalid token rejection
+      // 6. an agent token makes the caller that agent, whatever callerId it sends
+      const agentClient = new SubagentClient({ socketPath: server.socketPath, token: server.agentToken("agent-7") });
+      await agentClient.spawn({ name: "grandchild", task: "x" });
+      assert.equal(calls[5].args.callerId, "agent-7");
+      await agentClient.send("sub-123", "hi");
+      assert.equal(calls[6].args.callerId, "agent-7");
+      const spoofing = new SubagentClient({ socketPath: server.socketPath, token: server.agentToken("agent-7"), callerId: "other" });
+      await assert.rejects(() => spoofing.list(), /caller_mismatch/);
+      const forged = new SubagentClient({ socketPath: server.socketPath, token: "agent-7.deadbeef" });
+      await assert.rejects(() => forged.list(), /invalid_token/);
+
+      // 7. Invalid token rejection
       const badClient = new SubagentClient({
         socketPath: server.socketPath,
         token: "wrong-token",

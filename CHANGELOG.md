@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 0.4.0-beta.4 — 2026-10-09
+
+### Changed
+
+- **Supplied panels follow the life of their subagents.** A panel that names subagents (`group`, or `subagent` on items/rows) is shown only while one of them is alive, while it sets `attention`, or for `linger` ms after its last live subagent. A panel that names none is shown as long as its provider keeps it. A provider can no longer leave a stale box above the editor.
+- **One box.** Live subagents that no panel item stands for are folded into the last supplied panel (rows, compact items, or a trailing group), instead of a second box. Items standing for a live subagent take its live dot and flag (`?40s` waiting, `⚠12m` stalled).
+- **Socket tokens identify the caller.** Each subagent process gets its own token (`<id>.<mac>`); requests made with it act as that subagent whatever `callerId` they send (`caller_mismatch` otherwise), so a subagent can no longer obtain session rights by omitting `callerId`. A subagent may `send` to / `interrupt` only itself and the agents it started. The session token keeps full rights.
+- Widget and status refresh timers are `unref`'d (they no longer keep a headless process alive).
+
+### Added
+
+- `group` for agents started by scripts (socket `spawn`): inherited by agents they start; reported by `list` and the lifecycle events. `subagents:ready` carries a snapshot `{ agents: { id, name, agent, group }[] }`.
+- [docs/socket.md](docs/socket.md): the session socket, its tokens and methods.
+
+### Fixed
+
+- The `pi-subagent` bin is self-contained JavaScript: installed from npm it imported `client.ts`, which Node refuses to type-strip under `node_modules`.
+
 ## 0.4.0-beta.3 — 2026-10-09
 
 ### Added

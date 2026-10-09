@@ -2249,8 +2249,13 @@ function subagentEnv(options: {
   return {
     PI_SUBAGENT_NAME: options.name,
     PI_SUBAGENT_ID: options.id,
-    ...(process.env.PI_SUBAGENT_SOCKET ? { PI_SUBAGENT_SOCKET: process.env.PI_SUBAGENT_SOCKET } : {}),
-    ...(process.env.PI_SUBAGENT_SOCKET_TOKEN ? { PI_SUBAGENT_SOCKET_TOKEN: process.env.PI_SUBAGENT_SOCKET_TOKEN } : {}),
+    // The socket with the agent's own token: its requests act as this agent, never as the session.
+    ...(runtime.sessionSocket
+      ? {
+          PI_SUBAGENT_SOCKET: runtime.sessionSocket.socketPath,
+          PI_SUBAGENT_SOCKET_TOKEN: runtime.sessionSocket.agentToken(options.id),
+        }
+      : {}),
     ...(options.worktreeSpace ? { PI_SUBAGENT_WORKTREE_SPACE: "1" } : {}),
     ...(options.spawning ? { PI_SUBAGENT_SPAWNING: "1", PI_SUBAGENT_SPAWNING_DEPTH: String(options.spawning.depth) } : {}),
     ...(options.agent ? { PI_SUBAGENT_AGENT: options.agent } : {}),
@@ -3062,6 +3067,12 @@ function startSupervision(running: RunningSubagent, pi: ExtensionAPI): void {
 
 }
 
+/** A subagent may send to or interrupt only itself and the agents it started. */
+function assertSocketTarget(callerId: string | undefined, target: RunningSubagent): void {
+  if (!callerId || target.id === callerId || target.spawnedBy?.parentId === callerId) return;
+  throw new Error(`subagent "${callerId}" may not act on "${target.name}"`);
+}
+
 export default function subagentsExtension(pi: ExtensionAPI) {
   runtime.pi = pi;
 
@@ -3073,11 +3084,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           const parent = runningSubagents.get(callerId);
           if (!parent) throw new Error(`caller subagent "${callerId}" not found`);
           const mode = (params.handoff as SpawnMode) ?? "delegate";
-          const result = await launchRequested(parent, { mode, spawn: params });
-          if (mode === "replace") {
-            parent.replacedBy = String(params.name ?? "successor");
-          }
-          return result;
+          return await launchRequested(parent, { mode, spawn: params });
         }
         let worktreePlan: WorktreePlan | undefined;
         if (params.worktree === true) {
@@ -3123,17 +3130,19 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           status: a.lifecycle?.turn?.kind ?? a.statusState?.activityLabel ?? "running",
         }));
       },
-      async send(id, prompt, options) {
+      async send(callerId, id, prompt, options) {
         const agent = runningSubagents.get(id) ?? Array.from(runningSubagents.values()).find((a) => a.name === id);
         if (!agent) throw new Error(`subagent "${id}" not found`);
+        assertSocketTarget(callerId, agent);
         if (!agent.handle) throw new Error(`subagent "${id}" has no active handle`);
         const taskId = options?.taskId ?? `send-${randomBytes(4).toString("hex")}`;
         await subagentRuntime().dispatch(agent.handle, { taskId, prompt });
         return { ok: true, taskId };
       },
-      async interrupt(target) {
+      async interrupt(callerId, target) {
         const resolved = resolveInterruptTarget(target);
         if ("error" in resolved) throw new Error(resolved.error);
+        assertSocketTarget(callerId, resolved.running);
         if (resolved.running.handle) {
           await subagentRuntime().interrupt(resolved.running.handle);
         }

@@ -43,7 +43,7 @@ For a profile launched with `pi -ne` (packages disabled), load it explicitly wit
 
 ## Herdr UX
 
-The default surface is `selector` (`PI_SUBAGENT_SURFACE`): the first child opens a half-width split on the right, further children run in background tabs of the same workspace. `/subagent` without arguments picks which open child is shown on the right without restarting anything; `Ctrl+Alt+X` cycles to the next one. `PI_SUBAGENT_SURFACE=split`, `tab`, or `panel` (status panel above the editor) restore or enable other surface layouts. Other extensions can supply their own status panel through `pi.events` ([docs/panel.md](docs/panel.md)). Details: [docs/pane-selector.md](docs/pane-selector.md).
+The default surface is `selector` (`PI_SUBAGENT_SURFACE`): the first child opens a half-width split on the right, further children run in background tabs of the same workspace. `/subagent` without arguments picks which open child is shown on the right without restarting anything; `Ctrl+Alt+X` cycles to the next one. `PI_SUBAGENT_SURFACE=split`, `tab`, or `panel` (status panel above the editor) restore or enable other surface layouts. Other extensions can supply their own status panel through `pi.events` ([docs/panel.md](docs/panel.md)); scripts drive subagents through the session socket ([docs/socket.md](docs/socket.md)). Details: [docs/pane-selector.md](docs/pane-selector.md).
 
 ## Tools and commands
 
