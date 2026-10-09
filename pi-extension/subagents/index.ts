@@ -3236,7 +3236,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           const parent = runningSubagents.get(callerId);
           if (!parent) throw new Error(`caller subagent "${callerId}" not found`);
           const mode = (params.handoff as SpawnMode) ?? "delegate";
-          return await launchRequested(parent, { mode, spawn: params });
+          return await launchRequested(parent, { mode, spawn: params }, pi);
         }
         let worktreePlan: WorktreePlan | undefined;
         if (params.worktree === true) {

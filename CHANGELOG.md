@@ -25,9 +25,11 @@
 ### Fixed
 
 - A subagent keeps the session socket inherited from its parent instead of starting its own. Its scripts (e.g. a CLI asking for a `replace` handoff) therefore act as this agent in the session that owns it: the successor is supervised and closed there, and the slot's final result reaches the main session. Before, the successor belonged to the agent it replaced, which then ended: nobody supervised or closed it.
+- A spawn requested over the session socket by a subagent (e.g. a CLI handoff) no longer fails with `Cannot read properties of undefined (reading 'getThinkingLevel')`.
 
 ### Added
 
+- Panel rows may give `waitingText`, shown while their subagent waits for the user.
 - Frontmatter `spawning: true` (with optional `spawning-depth`) grants delegated spawning by default; an explicit `spawning` parameter wins.
 
 ## 0.4.1 — 2026-10-09
