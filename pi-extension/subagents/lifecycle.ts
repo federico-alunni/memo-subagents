@@ -33,7 +33,7 @@ export type TurnState =
   | { kind: "unknown" }
   | { kind: "starting"; observedAt: number }
   | { kind: "active"; startedAt: number; source: "activity" | "herdr" | "fallback"; activity?: ActivityDetail }
-  | { kind: "blocked"; startedAt: number; reason: BlockedReason; label?: string }
+  | { kind: "blocked"; startedAt: number; reason: BlockedReason; label?: string; target?: "parent" | "user" }
   | { kind: "waiting"; startedAt: number }
   | { kind: "interrupted"; requestedAt: number; previousActivitySequence: number | null };
 
@@ -73,6 +73,8 @@ export interface LifecycleProjection {
   label?: string;
   /** Only for `blocked`. */
   reason?: BlockedReason;
+  /** Only for `blocked` by ask-parent: waiting for the parent agent or a user. */
+  target?: "parent" | "user";
   runtimeEndedAt?: number;
   stateDurationSince?: number;
 }
@@ -161,6 +163,7 @@ function applyAttention(lifecycle: SubagentLifecycle, observedAt: number): Subag
         startedAt: turn.kind === "blocked" && turn.reason === reason ? turn.startedAt : attention.since,
         reason,
         ...(attention.label ? { label: attention.label } : {}),
+        ...(attention.target ? { target: attention.target } : {}),
       },
     };
   }
@@ -495,6 +498,7 @@ export function projectLifecycle(lifecycle: SubagentLifecycle, now: number): Lif
         kind: "blocked",
         reason: turn.reason,
         ...(turn.label ? { label: turn.label } : {}),
+        ...(turn.target ? { target: turn.target } : {}),
         stateDurationSince: turn.startedAt,
       };
     case "waiting":

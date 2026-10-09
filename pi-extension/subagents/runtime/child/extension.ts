@@ -16,7 +16,10 @@ import type { Boot, ChildPolicy } from "../protocol.ts";
 import { ChildRuntime } from "./runtime.ts";
 import type { QuestionEvent } from "pi-memo-question/events";
 import { bashDecision, createBashApprovals, readonlyBlockReason } from "./bash-policy.ts";
-import type { BashAskContext, HerdrBlockedEvent } from "./bash-policy.ts";
+import type { BashAskContext, BashParentRoute, HerdrBlockedEvent, ParentApproval } from "./bash-policy.ts";
+import { registerAskParentQuestion } from "./question-tool.ts";
+import { setAskUpstream } from "../ask-parent.ts";
+import type { AskTarget } from "../ask-parent.ts";
 import { CHILD_ENV } from "./env.ts";
 import { createSubagentActivityRecorder } from "../../activity.ts";
 import type { SubagentAttention, SubagentAttentionKind } from "../../activity.ts";
@@ -42,7 +45,7 @@ export function createAttentionTracker(
   let open = 0;
   let current: SubagentAttention | null = null;
   return (event: unknown): void => {
-    const e = event as { active?: unknown; label?: unknown; kind?: unknown } | undefined;
+    const e = event as { active?: unknown; label?: unknown; kind?: unknown; target?: unknown } | undefined;
     if (e?.active) {
       open += 1;
       const kind: SubagentAttentionKind =
@@ -50,6 +53,8 @@ export function createAttentionTracker(
       current = {
         kind,
         ...(typeof e.label === "string" && e.label ? { label: e.label } : {}),
+        // Ask-parent: who the child waits for (the parent agent or a user).
+        ...(e.target === "parent" || e.target === "user" ? { target: e.target as AskTarget } : {}),
         since: current?.since ?? now(),
       };
     } else {
@@ -104,20 +109,23 @@ export function childToolCall(
 
 /**
  * The child's `tool_call` guard: `childToolCall`, plus the bash question for policies with `bashAsk`
- * (user-driven read-only children). "Always" answers are remembered by this guard, i.e. per child process.
+ * (user-driven read-only children), routed to the parent agent first with `route` (ask-parent).
+ * "Always" answers are remembered by this guard, i.e. per child process. `audit` receives the transcript
+ * line of an approval given upstream (or in this pane as ask-parent fallback).
  */
-export function createChildToolGuard(emitBlocked?: (event: HerdrBlockedEvent) => void) {
-  const approvals = createBashApprovals(emitBlocked);
+export function createChildToolGuard(emitBlocked?: (event: HerdrBlockedEvent) => void, route?: BashParentRoute) {
+  const approvals = createBashApprovals(emitBlocked, route);
   return async (
     policy: ChildPolicy | undefined,
     toolName: string,
     input: unknown,
     ctx: BashAskContext,
+    audit?: (line: string) => void,
   ): Promise<{ block: true; reason: string } | undefined> => {
     const blocked = childToolCall(policy, toolName, input, approvals.prefixes());
     if (!blocked || !policy || toolName !== "bash" || !policy.bashAsk || !toolAllowed(policy, toolName))
       return blocked;
-    return approvals.check(policy, (input as { command?: unknown } | undefined)?.command, ctx);
+    return approvals.check(policy, (input as { command?: unknown } | undefined)?.command, ctx, audit);
   };
 }
 
@@ -228,7 +236,32 @@ export default function childExtension(pi: ExtensionAPI): void {
     activityFile: protocolDir ? join(protocolDir, "activity.json") : undefined,
   });
   const delivery = createTaskDelivery((text, options) => pi.sendUserMessage(text, options));
-  const toolGuard = createChildToolGuard((event) => pi.events.emit(HERDR_BLOCKED_EVENT, event));
+  const emitBlocked = (event: HerdrBlockedEvent) => pi.events.emit(HERDR_BLOCKED_EVENT, event);
+  // Ask-parent: questions and approvals go to the parent agent first (see docs/runtime.md).
+  const askEnabled = () => !!runtime && boot?.policy.askParent === true;
+  const bashRoute: BashParentRoute = {
+    enabled: askEnabled,
+    async ask(command, prefix, signal, onTarget): Promise<ParentApproval> {
+      const outcome = await runtime!.ask({ kind: "approval", text: command, command, prefix }, { signal, onTarget });
+      if (outcome.kind !== "answered") return outcome;
+      return {
+        kind: "decision",
+        decision: outcome.result.decision ?? "cancel",
+        by: outcome.result.by,
+        ...(outcome.result.note ? { note: outcome.result.note } : {}),
+      };
+    },
+  };
+  const toolGuard = createChildToolGuard(emitBlocked, bashRoute);
+  // Transcript lines of approvals given upstream, appended to the bash result.
+  const approvalAudit = new Map<string, string>();
+  if (declared?.askParent && (declared.question || declaredBoot?.isolation === "profile"))
+    registerAskParentQuestion(pi, {
+      enabled: askEnabled,
+      ask: (question, options, signal, onTarget) =>
+        runtime!.ask({ kind: "question", text: question, options }, { signal, onTarget }),
+      emitBlocked,
+    });
   // Isolated children (-ne) lack Herdr's pi integration: report the pane's agent state directly.
   const herdr = declared ? createHerdrReporter({ isolation: declaredBoot?.isolation }) : undefined;
   pi.events.on(
@@ -349,13 +382,24 @@ export default function childExtension(pi: ExtensionAPI): void {
         pi.getActiveTools().filter((tool) => !boot!.policy.denyTools.includes(tool)),
     );
     await runtime.start();
+    // A nested agent's parent extension forwards escalated requests through this child, one level up.
+    if (boot.policy.askParent) {
+      const owned = runtime;
+      setAskUpstream({
+        name: boot.display?.label ?? boot.agentId,
+        forward: (request, options) => owned.ask(request, options),
+      });
+    }
     herdr?.agentActive(!ctx.isIdle());
     widget?.show(ctx);
   });
   pi.on("tool_call", (event, ctx) => {
     recorder.toolCall(event.toolCallId, event.toolName);
-    return toolGuard(boot?.policy, event.toolName, event.input, ctx);
+    return toolGuard(boot?.policy, event.toolName, event.input, ctx, (line) =>
+      approvalAudit.set(event.toolCallId, line),
+    );
   });
+
   // With userInput "allowed" the user drives the child; otherwise any manual control is a takeover.
   const takeover = async () => {
     if (boot?.policy.userInput === "takeover") await runtime?.takeover();
@@ -394,7 +438,13 @@ export default function childExtension(pi: ExtensionAPI): void {
   pi.on("tool_execution_update", (event) =>
     recorder.toolExecutionUpdate(event.toolCallId, event.toolName),
   );
-  pi.on("tool_result", (event) => recorder.toolResult(event.toolCallId, event.toolName));
+  pi.on("tool_result", (event) => {
+    recorder.toolResult(event.toolCallId, event.toolName);
+    const line = approvalAudit.get(event.toolCallId);
+    if (line === undefined) return;
+    approvalAudit.delete(event.toolCallId);
+    return { content: [...event.content, { type: "text" as const, text: `\n(${line})` }] };
+  });
   pi.on("tool_execution_end", (event) =>
     recorder.toolExecutionEnd(event.toolCallId, event.toolName),
   );
@@ -410,6 +460,7 @@ export default function childExtension(pi: ExtensionAPI): void {
     recorder.sessionShutdown((event as any).reason);
     runtime?.dispose();
     runtime = undefined;
+    if (boot?.policy.askParent) setAskUpstream(undefined);
     // Bounded: the release is best effort and must not hold the child's exit.
     if ((event as any).reason === "quit" && herdr)
       await Promise.race([herdr.release(), new Promise((resolve) => setTimeout(resolve, 1500).unref?.())]);

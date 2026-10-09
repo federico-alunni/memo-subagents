@@ -101,6 +101,11 @@ export interface ChildPolicy {
   delegatedTools: DelegatedToolSpec[];
   userInput: UserInputPolicy;
   exit: ExitPolicy;
+  /**
+   * User-driven children only: `question` calls and `bashAsk` approvals go to the parent agent first
+   * (correlated request/response records), escalating to the user only when the parent cannot answer.
+   */
+  askParent: boolean;
 }
 /**
  * One `bashAllow` entry: a non-empty sequence of plain words (no shell grammar, quotes, globs, `$`, comments),
@@ -127,6 +132,7 @@ export function normalizePolicy(raw: unknown): ChildPolicy | undefined {
     delegatedTools: p.delegatedTools as DelegatedToolSpec[],
     userInput: p.userInput ?? "takeover",
     exit: p.exit ?? "parent",
+    askParent: p.askParent ?? false,
   };
 }
 export interface DisplaySpec {
@@ -175,7 +181,10 @@ export interface ChildRecord extends TaskIdentity {
     | "question"
     | "answer"
     /** The child ended itself (exit policy auto/tool): done, help request (ping) or failed run. */
-    | "exit";
+    | "exit"
+    /** Ask-parent: the parent picked the request up / moved it to the user or to its own parent. */
+    | "received"
+    | "escalated";
   at: string;
   reason?: "done" | "ping" | "error";
   message?: string;
@@ -226,7 +235,7 @@ export function taskFile(dir: string, taskId: string, kind: string): string {
 export function requestFile(
   dir: string,
   requestId: string,
-  kind: "request" | "response",
+  kind: "request" | "response" | "received" | "escalated",
 ): string {
   return join(dir, `${taskKey(requestId)}.${kind}.json`);
 }
@@ -235,6 +244,10 @@ export function onceRequestId(taskToken: string, tool: string): string {
   return `${taskToken}-${tool}`;
 }
 export const questionFile = "question.json";
+/** Tool name of ask-parent request records (never a delegated tool). */
+export const ASK_PARENT_TOOL = "ask_parent";
+/** Liveness record the parent writes into the child's protocol directory (ask-parent). */
+export const parentFile = "parent.json";
 export async function json<T>(path: string): Promise<T | undefined> {
   try {
     return JSON.parse(await readFile(path, "utf8")) as T;
@@ -350,8 +363,9 @@ export function validPolicy(policy: ChildPolicy | undefined): policy is ChildPol
   const tools = policy.tools ?? [];
   const delegated = policy.delegatedTools.map((d) => d?.name);
   // Exit tools exist only through the exit policy; `question` in `tools` means a profile's own
-  // question tool and is ambiguous when the runtime provides one (policy flag).
-  const reserved = ["question", ...EXIT_TOOLS];
+  // question tool and is ambiguous when the runtime provides one (policy flag). `ask_parent` is the
+  // tool name of ask-parent request records.
+  const reserved = ["question", ASK_PARENT_TOOL, ...EXIT_TOOLS];
   return (
     tools.every((t) => typeof t === "string" && TOOL_NAME.test(t)) &&
     policy.denyTools.every((t) => typeof t === "string" && TOOL_NAME.test(t)) &&
@@ -375,6 +389,9 @@ export function validPolicy(policy: ChildPolicy | undefined): policy is ChildPol
     typeof policy.bashAsk === "boolean" &&
     (!policy.bashAsk || (policy.bash === "readonly" && policy.userInput === "allowed")) &&
     typeof policy.question === "boolean" &&
+    // Asking the parent first only makes sense for children whose questions reach a user.
+    typeof policy.askParent === "boolean" &&
+    (!policy.askParent || policy.userInput === "allowed") &&
     Array.isArray(policy.delegatedTools) &&
     policy.delegatedTools.every(
       (d) =>

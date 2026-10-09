@@ -13,6 +13,8 @@ import {
   taskKey,
   requestFile,
   questionFile,
+  ASK_PARENT_TOOL,
+  parentFile,
   sameAgent,
   sameTask,
   sameLabels,
@@ -54,9 +56,13 @@ import type { ActivityReadResult } from "../activity.ts";
 import type { PresenceAttention, PresenceState } from "./presence.ts";
 import { CHILD_ENV } from "./child/env.ts";
 import { resolveQuestionExtension } from "./question-extension.ts";
+import { validAskRequest, validAskResult } from "./ask-parent.ts";
+import type { AskEscalation, AskRequest, AskResult, ParentBeat } from "./ask-parent.ts";
 import {
   adoptPane,
   forgetPane,
+  notePlacedPane,
+  placedPane,
   releasePlacement,
   reservePlacement,
   selectorState,
@@ -119,6 +125,11 @@ export interface LaunchSpec {
    */
   bashAsk?: boolean;
   question?: boolean;
+  /**
+   * userInput "allowed" only: `question` calls and `bashAsk` approvals go to the parent agent first
+   * (`pendingAsks` / `answerAsk`), and to the user only when the parent cannot answer. Default false.
+   */
+  askParent?: boolean;
   delegatedTools?: DelegatedToolSpec[];
   /** "takeover" (default) or "allowed": whether the user may drive the child without blocking control. */
   userInput?: UserInputPolicy;
@@ -201,6 +212,15 @@ export interface Observation {
   question?: { id: string; text: string; pending: boolean };
   /** The child ended itself (exit policy auto/tool): reason done | ping | error, ping message. */
   exit?: ChildRecord;
+}
+/** An ask-parent request of the current task that has no response yet. */
+export interface PendingAsk {
+  requestId: string;
+  request: AskRequest;
+  at: string;
+  /** A parent already picked it up (`markAsk(..., "received")`). */
+  received: boolean;
+  escalated?: AskEscalation;
 }
 type RuntimeErrorCode =
   | "unsupported"
@@ -426,29 +446,57 @@ export class AgentRuntime {
     const control = this.selector.controls?.get(h.paneId);
     if (control && control.handle.protocolDir === h.protocolDir) control.handle = h;
   }
-  /** "auto"/"visible" placement on the caller's current layout; unknown layout never splits. */
+  /**
+   * "auto"/"visible" placement on the caller's current layout (a slot of the agent column or a tab);
+   * unknown layout never splits. A bottom slot reserved while the top slot's launch has not created its
+   * pane yet waits for that pane (bounded); if that launch ends without one, the decision is taken again.
+   */
   private async reservePlacement(
     parent: Pane,
     mode: PlacementMode,
     cwd: string,
   ): Promise<PlacementReservation> {
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      const reservation = await this.reserveOnce(parent, mode, cwd);
+      if (!reservation.after) return reservation;
+      const target = await placedPane(this.selector, reservation.after, {
+        timeoutMs: Math.max(0, deadline - Date.now()),
+      });
+      if (target) {
+        const { after: _after, ...rest } = reservation;
+        return { ...rest, targetPane: target };
+      }
+      releasePlacement(this.selector, reservation);
+      if (Date.now() >= deadline) return { token: reservation.token, placement: "tab" };
+    }
+  }
+  private async reserveOnce(
+    parent: Pane,
+    mode: PlacementMode,
+    cwd: string,
+  ): Promise<PlacementReservation> {
+    const state = this.selector;
+    // A pane the selector moves into the split while the layout is read makes the layout stale.
+    const epoch = state.layoutEpoch ?? 0;
     let layout: PaneLayout | undefined;
     try {
       layout = (await this.herdr(["pane", "layout", "--pane", parent.pane_id], cwd)).layout;
     } catch {
       layout = undefined;
     }
-    const state = this.selector;
-    const reservation = reservePlacement(state, parent, layout, mode);
+    const reservation = reservePlacement(state, parent, layout, mode, epoch);
     if (!reservation.park) return reservation;
-    // "visible": park our agent currently beside the caller, through the runtime that owns it.
-    const control = state.controls?.get(reservation.park);
+    // "visible" with both slots taken: park our top agent through the runtime that owns it; the bottom
+    // one takes the whole column and the new agent is split below it.
+    const park = reservation.park;
+    const control = state.controls?.get(park);
     try {
       if (!control) throw new Error("not a runtime agent");
       control.handle = await control.move(control.handle, {
-        newTab: { label: state.owned.get(reservation.park) ?? "agent" },
+        newTab: { label: state.owned.get(park) ?? "agent" },
       });
-      if (state.selected === reservation.park) state.selected = undefined;
+      state.slots = (state.slots ?? []).filter((id) => !!id && id !== park);
       return reservation;
     } catch {
       releasePlacement(state, reservation);
@@ -571,6 +619,23 @@ export class AgentRuntime {
     if (!current || !sameTask(h, current))
       throw new RuntimeError("cleanup_blocked", "Task identity changed");
   }
+  /** Whether `launch` ever allocated the exclusive directory of this attempt. `false` proves the
+   * attempt created nothing (no pane, no process): every launch effect comes after the `mkdir`.
+   * Read-only; the caller must make sure no launch of this attempt is still in flight. */
+  async attemptAllocated(
+    scope: string,
+    agentId: string,
+    attempt: number,
+  ): Promise<boolean> {
+    const dir = join(this.root, taskKey(`${scope}\0${agentId}\0${attempt}`));
+    try {
+      await stat(dir);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+  }
   async launch(input: LaunchSpec): Promise<AgentHandle> {
     if (
       typeof input.model !== "string" ||
@@ -605,6 +670,7 @@ export class AgentRuntime {
       delegatedTools: [...(input.delegatedTools ?? [])],
       userInput: input.userInput ?? "takeover",
       exit: input.exit ?? "parent",
+      askParent: (input.askParent ?? false) as boolean,
     };
     const skills = [...(input.skills ?? [])];
     if (!skills.every((skill) => typeof skill === "string" && /^[A-Za-z0-9_.:-]+$/.test(skill)))
@@ -729,8 +795,10 @@ export class AgentRuntime {
         "unsupported",
         "question: true requires the pi-memo-question package",
       );
+    // With askParent the child extension registers the one `question` tool itself (pi-memo-question's,
+    // wrapped to ask the parent first), so the package is not loaded a second time.
     const extraExtensions = [
-      ...(questionExtension && (policy.question || isolation === "profile")
+      ...(questionExtension && !policy.askParent && (policy.question || isolation === "profile")
         ? [questionExtension]
         : []),
       ...(this.config.hostExtensions ?? []),
@@ -832,16 +900,20 @@ export class AgentRuntime {
         placement = reservation.placement;
       }
       const split = placement === "split-right" || placement === "split-down";
-      // The pane a split is made from: the caller's, or an explicit target (e.g. the bottom of a column).
+      // The pane a split is made from: the caller's, an explicit target (the bottom of a requester's column)
+      // or the selector's slot target (the main pane for the first cell, the agent above for the next).
       let base: Pane = parent;
       if (split && input.splitTarget) {
         const target = (await this.herdr(["pane", "get", input.splitTarget], cwd)).pane as Pane | undefined;
         if (!target || target.pane_id !== input.splitTarget || !target.tab_id || !target.workspace_id)
           throw new Error("Split target pane identity mismatch");
         base = target;
-      }
+      } else if (split && reservation?.targetPane && reservation.targetPane !== parent.pane_id)
+        // The selector read this pane in the caller's tab (the agent above the bottom slot).
+        base = { ...parent, pane_id: reservation.targetPane };
       if (split && (!base.pane_id || !base.tab_id))
         throw new Error("Herdr current pane identity missing for split");
+      const splitRatio = input.splitRatio ?? reservation?.ratio;
       const label = input.display.label.replace(/[\r\n\t]+/g, " ").trim();
       phase = "create";
       await evidence("create-intent", {
@@ -929,7 +1001,7 @@ export class AgentRuntime {
               base.pane_id,
               "--direction",
               placement === "split-down" ? "down" : "right",
-              ...(input.splitRatio !== undefined ? ["--ratio", String(input.splitRatio)] : []),
+              ...(splitRatio !== undefined ? ["--ratio", String(splitRatio)] : []),
               "--cwd",
               cwd,
               "--no-focus",
@@ -956,9 +1028,11 @@ export class AgentRuntime {
         !p?.terminal_id ||
         !p.tab_id ||
         p.workspace_id !== (space?.workspaceId ?? (split ? base.workspace_id : parent.workspace_id)) ||
-        (split && (p.tab_id !== base.tab_id || paneId === base.pane_id))
+        (split && (p.tab_id !== base.tab_id || paneId === base.pane_id || paneId === parent.pane_id))
       )
         throw new Error("Herdr lacks exact pane/terminal identity");
+      // A bottom-slot launch waiting for this pane can split it now.
+      notePlacedPane(this.selector, reservation, paneId);
       // Cosmetic only; identity is the returned pane/terminal.
       if (split)
         await this.herdr(["pane", "rename", paneId, label], cwd).catch(() => {});
@@ -1399,6 +1473,7 @@ export class AgentRuntime {
         validTask(request, h, "request") &&
         typeof request.requestId === "string" &&
         typeof request.tool === "string" &&
+        request.tool !== ASK_PARENT_TOOL &&
         join(h.protocolDir, name) ===
           requestFile(h.protocolDir, request.requestId, "request")
       )
@@ -1422,6 +1497,108 @@ export class AgentRuntime {
         record(h, "response", { requestId, tool: request.tool, result }),
       );
     });
+  }
+  /**
+   * Ask-parent requests of the current task without a response, oldest first (child input: the params
+   * are validated, invalid records are skipped). Non-destructive.
+   */
+  async pendingAsks(h: AgentHandle): Promise<PendingAsk[]> {
+    this.checkHandle(h);
+    let names: string[];
+    try {
+      names = (await readdir(h.protocolDir)).filter((n) => n.endsWith(".request.json"));
+    } catch {
+      return [];
+    }
+    const pending: PendingAsk[] = [];
+    for (const name of names) {
+      const request = await json<ChildRecord>(join(h.protocolDir, name)).catch(() => undefined);
+      if (
+        !validTask(request, h, "request") ||
+        request.tool !== ASK_PARENT_TOOL ||
+        typeof request.requestId !== "string" ||
+        join(h.protocolDir, name) !== requestFile(h.protocolDir, request.requestId, "request")
+      )
+        continue;
+      const params = validAskRequest(request.params);
+      if (!params) continue;
+      const response = await json<ChildRecord>(requestFile(h.protocolDir, request.requestId, "response")).catch(
+        () => ({}) as ChildRecord,
+      );
+      if (response) continue;
+      const received = await json<ChildRecord>(requestFile(h.protocolDir, request.requestId, "received")).catch(
+        () => undefined,
+      );
+      const escalated = await json<ChildRecord>(requestFile(h.protocolDir, request.requestId, "escalated")).catch(
+        () => undefined,
+      );
+      pending.push({
+        requestId: request.requestId,
+        request: params,
+        at: request.at,
+        received: validTask(received, h, "received"),
+        ...(validTask(escalated, h, "escalated") ? { escalated: escalated.result as AskEscalation } : {}),
+      });
+    }
+    return pending.sort((a, b) => a.at.localeCompare(b.at));
+  }
+  /**
+   * Ask-parent progress marker: "received" (picked up, exclusive: false when already picked up) or
+   * "escalated" (the request now waits for the user or the parent's own parent; replaced on change).
+   */
+  async markAsk(
+    h: AgentHandle,
+    requestId: string,
+    mark: { kind: "received" } | { kind: "escalated"; escalation: AskEscalation },
+  ): Promise<boolean> {
+    this.checkHandle(h);
+    if (!(await this.pendingAsks(h)).some((p) => p.requestId === requestId))
+      throw new RuntimeError("busy", "Unknown, stale or answered ask-parent request");
+    const path = requestFile(h.protocolDir, requestId, mark.kind);
+    try {
+      await publish(
+        path,
+        record(h, mark.kind, { requestId, tool: ASK_PARENT_TOOL, ...(mark.kind === "escalated" ? { result: mark.escalation } : {}) }),
+        mark.kind === "received",
+      );
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw error;
+    }
+  }
+  /**
+   * Answer an ask-parent request: exclusive, never applied twice. Unknown/stale/already answered
+   * (including a request the child withdrew to ask the user in its own pane) → `busy`.
+   */
+  async answerAsk(h: AgentHandle, requestId: string, result: AskResult): Promise<void> {
+    this.checkHandle(h);
+    if (!validAskResult(result)) throw new RuntimeError("unsupported", "Invalid ask-parent answer");
+    if (!(await this.pendingAsks(h)).some((p) => p.requestId === requestId))
+      throw new RuntimeError("busy", "Unknown, stale or already answered ask-parent request");
+    try {
+      await publish(
+        requestFile(h.protocolDir, requestId, "response"),
+        record(h, "response", { requestId, tool: ASK_PARENT_TOOL, result }),
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST")
+        throw new RuntimeError("busy", "Ask-parent request already answered");
+      throw error;
+    }
+  }
+  /** Ask-parent liveness of this parent for the child (refresh periodically; `closed` on quit/reload). */
+  async askHeartbeat(h: AgentHandle, beat: { name: string; id: string; closed?: boolean }): Promise<void> {
+    this.checkHandle(h);
+    const alive: ParentBeat = {
+      version: 1,
+      pid: process.pid,
+      at: Date.now(),
+      name: beat.name,
+      id: beat.id,
+      ...(beat.closed ? { closed: true } : {}),
+    };
+    await publish(join(h.protocolDir, parentFile), alive, false);
   }
   /** Whether a response to this request was already published (acquire it, never overwrite). */
   async hasResponse(h: AgentHandle, requestId: string): Promise<boolean> {
@@ -1542,8 +1719,9 @@ export class AgentRuntime {
   }
   /** Display only: retire the agent row before close. */
   forget(h: AgentHandle): void {
-    presence().remove(h.protocolDir);
+    // Selector first: the menu order it records for a promotion still lists this agent.
     this.forgetPane(h);
+    presence().remove(h.protocolDir);
   }
   private forgetPane(h: AgentHandle): void {
     if (this.selector.controls?.get(h.paneId)?.handle.protocolDir === h.protocolDir)
@@ -1894,8 +2072,8 @@ export class AgentRuntime {
         await this.pane(h);
       } catch (error) {
         if (["pane_not_found", "not_found"].includes((error as any).herdrCode)) {
-          presence().remove(h.protocolDir);
           this.forgetPane(h);
+          presence().remove(h.protocolDir);
           return;
         }
         throw new RuntimeError("cleanup_blocked", String(error));
@@ -1919,8 +2097,8 @@ export class AgentRuntime {
           ["pane_not_found", "not_found"].includes((error as any).herdrCode)
         ) {
           observers.get(h.protocolDir)?.();
-          presence().remove(h.protocolDir);
           this.forgetPane(h);
+          presence().remove(h.protocolDir);
           return;
         }
         throw new RuntimeError("cleanup_uncertain", String(error));

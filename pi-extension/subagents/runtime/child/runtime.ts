@@ -1,7 +1,10 @@
 // Child-side evidence writer: no scheduler/state machine. Ported from pi-issue-round (same author, MIT).
 import { join } from "node:path";
 import { readdir } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import {
+  ASK_PARENT_TOOL,
+  parentFile,
   json,
   publish,
   taskFile,
@@ -22,6 +25,21 @@ import type {
   Ready,
   DelegatedToolSpec,
 } from "../protocol.ts";
+import {
+  ASK_PICKUP_MS,
+  isFallback,
+  parentState,
+  validAskResult,
+} from "../ask-parent.ts";
+import type {
+  AskEscalation,
+  AskOutcome,
+  AskRequest,
+  AskResult,
+  AskTarget,
+  AskWaitOptions,
+  ParentBeat,
+} from "../ask-parent.ts";
 
 export interface ChildHost {
   sessionId: string;
@@ -394,6 +412,99 @@ export class ChildRuntime {
       }),
       false,
     );
+  }
+  /**
+   * Ask-parent: publish a correlated request for the parent agent and wait. The child keeps running (no
+   * exit record). Returns the answer, `fallback` when the parent is unavailable (no liveness, quit/reload,
+   * not picked up within `pickupMs`) or answered with a fallback, `cancelled` when `signal` aborts. A
+   * fallback or cancel first claims the response slot (exclusive), so a late parent answer is refused.
+   */
+  async ask(
+    request: Omit<AskRequest, "childId" | "childName">,
+    options: AskWaitOptions & { pickupMs?: number; pollMs?: number; now?: () => number } = {},
+  ): Promise<AskOutcome> {
+    if (!this.boot.policy.askParent) return { kind: "fallback", reason: "ask-parent is off" };
+    const task = await this.current();
+    if (!task || this.closed) return { kind: "fallback", reason: "no current task" };
+    const now = options.now ?? Date.now;
+    const dir = this.boot.protocolDir;
+    const beat = () => json<ParentBeat>(join(dir, parentFile)).catch(() => undefined);
+    if (parentState(await beat(), now()) === "gone")
+      return { kind: "fallback", reason: "the parent agent is not available" };
+    const requestId = `${task.taskToken}-ask-${randomUUID()}`;
+    const params: AskRequest = {
+      ...request,
+      childId: this.boot.agentId,
+      childName: this.boot.display?.label ?? this.boot.agentId,
+    };
+    await publish(
+      requestFile(dir, requestId, "request"),
+      record(task, "request", { requestId, tool: ASK_PARENT_TOOL, params }),
+    );
+    let target: AskTarget = "parent";
+    options.onTarget?.(target);
+    const read = async (): Promise<AskResult | undefined> => {
+      const response = await json<ChildRecord>(requestFile(dir, requestId, "response")).catch(() => undefined);
+      if (!validTask(response, task, "response") || response.requestId !== requestId) return undefined;
+      return validAskResult(response.result) ?? { fallback: true, reason: "invalid parent response" };
+    };
+    const outcome = (result: AskResult): AskOutcome =>
+      isFallback(result)
+        ? { kind: "fallback", reason: result.reason, requestId }
+        : { kind: "answered", requestId, result };
+    // Withdraw: take the response slot ourselves; a parent answer published first wins.
+    const claim = async (reason: string, cancelled = false): Promise<AskOutcome> => {
+      try {
+        await publish(
+          requestFile(dir, requestId, "response"),
+          record(task, "response", {
+            requestId,
+            tool: ASK_PARENT_TOOL,
+            result: { fallback: true, reason, withdrawn: true },
+          }),
+        );
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const existing = await read();
+        if (existing && !isFallback(existing)) return outcome(existing);
+      }
+      return cancelled ? { kind: "cancelled", requestId } : { kind: "fallback", reason, requestId };
+    };
+    const started = now();
+    const pickupMs = options.pickupMs ?? ASK_PICKUP_MS;
+    let received = false;
+    let escalation: string | undefined;
+    for (;;) {
+      const result = await read();
+      if (result) return outcome(result);
+      if (this.closed || options.signal?.aborted) return claim("cancelled by the child", true);
+      if (!received)
+        received = validTask(
+          await json<ChildRecord>(requestFile(dir, requestId, "received")).catch(() => undefined),
+          task,
+          "received",
+        );
+      const escalated = await json<ChildRecord>(requestFile(dir, requestId, "escalated")).catch(() => undefined);
+      if (validTask(escalated, task, "escalated") && escalated.recordId !== escalation) {
+        escalation = escalated.recordId;
+        const next = (escalated.result as AskEscalation | undefined)?.target;
+        if ((next === "user" || next === "parent") && next !== target) {
+          target = next;
+          options.onTarget?.(next);
+        }
+      }
+      if (parentState(await beat(), now()) === "gone") return claim("the parent agent is not available");
+      if (!received && now() - started > pickupMs) return claim("the parent agent did not pick the request up");
+      await new Promise<void>((resolve) => {
+        const done = () => {
+          clearTimeout(timer);
+          options.signal?.removeEventListener("abort", done);
+          resolve();
+        };
+        const timer = setTimeout(done, options.pollMs ?? 100);
+        options.signal?.addEventListener("abort", done, { once: true });
+      });
+    }
   }
   dispose(): void {
     this.closed = true;

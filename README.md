@@ -10,7 +10,8 @@ pi-memo-subagents is a derivative of [pi-herdr-subagents](https://github.com/0xR
 
 - `subagent({ name, task, agent?, … })` returns immediately; the child runs in its own Herdr pane and its result is **steered back** into the main session when it finishes (`subagent_result`), or when it asks for help (`caller_ping` → `subagent_ping`).
 - No bundled agents and no `/plan` command: only global (`$PI_CODING_AGENT_DIR/agents`, default `~/.pi/agent/agents`) and project (`.pi/agents`) definitions are discovered. Project definitions override global ones with the same name.
-- Live widget above the editor with lifecycle state (`starting`, `active`, `waiting`, `stalled`, `interrupted`, …), model/thinking, the selected pane (`▶`) and the worktree branch (`⎇`). A child waiting for the user shows `❓ question` / `❓ approval` with its duration, is counted as `question` (not `active`) and its Herdr tab is `blocked`; the parent agent is not notified.
+- **Ask-parent** (on by default): a child's `question` calls and bash approvals go to **you, the parent agent**, first (steer message `subagent_request`, answered with `subagent_answer`), and reach the user only when you escalate, for "always" approvals, or after 60 s without an answer. The child keeps running and waits; it never exits like `caller_ping`. See [Ask-parent](#ask-parent).
+- Live widget above the editor with lifecycle state (`starting`, `active`, `waiting`, `stalled`, `interrupted`, …), model/thinking, the shown panes (`▶`) and the worktree branch (`⎇`). A child waiting for an answer shows `❓ question` / `❓ approval` with its duration — `❓ question → parent` / `❓ approval → user` when it tells who it waits for —, is counted as `question` (not `active`) and its Herdr tab is `blocked` (label `→ parent · …` / `→ user · …`). A child waiting for the user in its own pane does not notify the parent agent.
 - Every child is launched and supervised by the package's agent runtime (`pi-memo-subagents/runtime`): the child's pane, shell, process and session are identified exactly, its end is recorded by the child itself (`subagent_done`, automatic exit after a normal run, `caller_ping`, or the user quitting pi) and its pane is closed only when that end is proven. Stall detection, interrupt, resume and reload survival work as before, with these differences:
   - a child is never force-closed: when the parent session quits, settled idle children are stopped and closed, busy ones keep their pane;
   - a child that ends without an orderly exit (crash, kill) is reported as an error, not as a success;
@@ -43,7 +44,7 @@ For a profile launched with `pi -ne` (packages disabled), load it explicitly wit
 
 ## Herdr UX
 
-The default surface is `selector` (`PI_SUBAGENT_SURFACE`): the first child opens a half-width split on the right, further children run in background tabs of the same workspace. `/subagent` without arguments picks which open child is shown on the right without restarting anything; `Ctrl+Alt+X` cycles to the next one. `PI_SUBAGENT_SURFACE=split`, `tab`, or `panel` (status panel above the editor) restore or enable other surface layouts. Other extensions can supply their own status panel through `pi.events` ([docs/panel.md](docs/panel.md)); scripts drive subagents through the session socket ([docs/socket.md](docs/socket.md)). Details: [docs/pane-selector.md](docs/pane-selector.md).
+The default surface is `selector` (`PI_SUBAGENT_SURFACE`): agents are shown in a column right of the main pane (40% of the tab, `PI_SUBAGENT_COLUMN_RATIO`), one agent filling it or two stacked top/bottom; further children run in background tabs of the same workspace. When a shown child finishes, the next open agent in menu order takes its slot (same pane, no restart). `/subagent` without arguments picks an open child for the column (with both slots taken: the top one goes to a tab, the bottom one moves up, the chosen one goes below); `Ctrl+Alt+X` swaps the two shown agents, or rotates them through the open agents as a queue. `PI_SUBAGENT_SURFACE=split`, `tab` or `panel` (status panel above the editor) restore or enable other layouts. Other extensions can supply their own status panel through `pi.events` ([docs/panel.md](docs/panel.md)); scripts drive subagents through the session socket ([docs/socket.md](docs/socket.md)). Details: [docs/pane-selector.md](docs/pane-selector.md).
 
 ## Tools and commands
 
@@ -54,12 +55,13 @@ The default surface is `selector` (`PI_SUBAGENT_SURFACE`): the first child opens
 | `subagent_resume` | tool | Resume a child session in a new pane (async). |
 | `subagent_interrupt` | tool | Interrupt the current turn of a running child (correlated request; the child stays open). |
 | `subagent_worktrees` | tool | List/remove worktrees created with `worktree: true`. |
+| `subagent_answer` | tool | Answer a child's `subagent_request` (question or bash approval), or escalate it to the user. |
 | `/subagent [agent task]` | command | Pick the visible child, or spawn `agent` with `task`. |
 | `/iterate [task]` | command | Fork the session into an interactive child. |
 | `/subagent-worktrees` | command | Interactive list/remove of subagent worktrees. |
 | `Ctrl+Alt+X` | shortcut | Cycles the agent shown on the right (next open agent, wrapping around), no menu. |
 
-`spawning: false` in agent frontmatter denies all of `subagent`, `subagent_interrupt`, `subagents_list`, `subagent_resume` and `subagent_worktrees` to that child; `deny-tools` denies individual tools.
+`spawning: false` in agent frontmatter denies all of `subagent`, `subagent_interrupt`, `subagents_list`, `subagent_resume`, `subagent_worktrees` and `subagent_answer` to that child; `deny-tools` denies individual tools.
 
 ### `subagent` parameters
 
@@ -82,8 +84,9 @@ The default surface is `selector` (`PI_SUBAGENT_SURFACE`): the first child opens
 | `spawning` | boolean | Grant delegated spawning: this child can start sub-agents through the main session. They open in a column under it, the main session supervises them, and each result goes back to this child as a separate task. |
 | `spawningDepth` | number | With `spawning: true`: how many levels of sub-agents may exist below this one (1–4, default 2). Each delegated spawn with `spawning: true` consumes 1 level. |
 | `handoff` | `"wait"` \| `"replace"` | Start an agent in a new tab of your own worktree space (worktree-space children only). `wait`: wait for result; `replace`: hand off and exit. |
+| `askParent` | boolean | Questions and bash approvals of the child come to the parent agent first ([Ask-parent](#ask-parent)). Default `true`; overrides the agent's `ask-parent` frontmatter. `false`: the child asks the user in its own pane, as before. |
 
-Agent frontmatter supports `name`, `description`, `model`, `thinking`, `tools`, `skills`, `session-mode` (`standalone` / `lineage-only` / `fork`), `spawning`, `deny-tools`, `bash`, `bash-allow` (see below), `auto-exit`, `interactive`, `system-prompt` (`append` / `replace`), `cwd` and `disable-model-invocation`, as upstream ([reference](https://github.com/0xRichardH/pi-herdr-subagents/blob/v0.2.0/README.md#frontmatter-reference)). `worktree` is **not** read from frontmatter in this version.
+Agent frontmatter supports `name`, `description`, `model`, `thinking`, `tools`, `skills`, `session-mode` (`standalone` / `lineage-only` / `fork`), `spawning`, `deny-tools`, `bash`, `bash-allow` (see below), `auto-exit`, `ask-parent` (`false` opts out of [Ask-parent](#ask-parent); parsed like `auto-exit`), `interactive`, `system-prompt` (`append` / `replace`), `cwd` and `disable-model-invocation`, as upstream ([reference](https://github.com/0xRichardH/pi-herdr-subagents/blob/v0.2.0/README.md#frontmatter-reference)). `worktree` is **not** read from frontmatter in this version.
 
 Bash levels per agent:
 
@@ -94,7 +97,19 @@ Bash levels per agent:
 | `bash: none` | no bash (`bash` is added to the denied tools) |
 | `bash-allow: npm test, npm run check` | extra commands on top of `readonly`, matched as an exact word prefix of one plain command (no pipes, redirections, quotes, `$`, globs or comments). Without `bash` it implies `readonly`; with `bash: full` or `none` the launch fails |
 
-With `bash: readonly` (or `bash-allow`) a plain command outside the read-only list and `bash-allow` is **asked** in the subagent's pane: `Rifiuta` (first, the default), `Permetti una volta`, `Permetti sempre in questa sessione dell'agente`. "Always" covers commands starting with the same first two words (or the same single word) and lasts only for that subagent process; nothing is written to disk or to the agent definition. Without a UI, on cancel or abort, and for commands with shell grammar the command is blocked without asking. An unknown `bash` value or an invalid `bash-allow` fails the launch before any worktree or pane is created.
+With `bash: readonly` (or `bash-allow`) a plain command outside the read-only list and `bash-allow` is **asked** — to the parent agent first with ask-parent (below), otherwise (or as fallback) in the subagent's pane: `Rifiuta` (first, the default), `Permetti una volta`, `Permetti sempre in questa sessione dell'agente`. "Always" covers commands starting with the same first two words (or the same single word) and lasts only for that subagent process; nothing is written to disk or to the agent definition. Without a UI, on cancel or abort, and for commands with shell grammar the command is blocked without asking. An unknown `bash` value or an invalid `bash-allow` fails the launch before any worktree or pane is created.
+
+### Ask-parent
+
+With ask-parent on (default for every `subagent`/`subagent_resume` child; opt out with `ask-parent: false` in the agent definition or `askParent: false` on the spawn, the parameter wins):
+
+- a `question` call of the child and a bash command its policy would **ask** about are sent to the parent agent as a steer message (`subagent_request`: child id/name, kind, text and options or the command, `requestId`, how to answer). The child waits; its widget row reads `❓ question → parent`;
+- the parent agent answers with `subagent_answer({ id, requestId, answer })` for questions (an option label, its number, or a free answer), `decision: "once" | "deny"` for approvals, or `escalate: true`. **Only the user can allow a command "always"**: `decision: "always"` escalates to the user, never applies. Repeated or stale answers are refused;
+- the request goes to the user in the **parent session** when the parent escalates, asks for "always", or does not answer within 60 s (`PI_MEMO_SUBAGENTS_ASK_PARENT_TIMEOUT_MS`). Several pending requests (of one or more children) form one dialog: `←`/`→` browse them, each shows which child it comes from; questions use pi-memo-question's dialog, approvals `Rifiuta` / `Permetti una volta` / `Permetti sempre`;
+- the parent can never widen the child's policy: commands with shell grammar or outside the read-only policy are never sent (they stay blocked), and the child re-checks every decision before running the command;
+- when the parent is unavailable (quit, `/reload`, request not picked up within a few seconds, extension not loaded, no UI to ask the user) the child asks the user in its own pane with today's dialog, without waiting for the timeout;
+- nested subagents: a child that is itself a parent receives its children's requests the same way; when it escalates (or times out) the request goes one level up to **its** parent, never to the user; only the top-level agent asks the user;
+- the child transcript records who answered (the parent agent with its name/id, or the user, and whether it was escalated, timed out or asked in the child's pane), in the `question` result and in the bash result or block reason.
 
 pi-memo-subagents launches **only pi** children: the upstream drivers for other CLIs (Claude Code, Codex, OpenCode, Grok, generic `command` templates) and the Claude Code plugin hook were removed. A definition with `cli:` other than `pi` is rejected at spawn time.
 
@@ -126,7 +141,7 @@ Optional. Put it in **`~/.pi/agent/pi-memo-subagents.json`** (`$PI_CODING_AGENT_
 - `models`: default model per agent name (tool argument → frontmatter → `models.agents` → `models.default` → parent).
 - `worktrees` (optional, both keys optional): `root` puts worktrees under `<root>/<repoName>/`; `branchPrefix` changes the generated branch prefix. Unknown keys are rejected.
 
-Environment: `PI_SUBAGENT_SURFACE` (`selector` | `split` | `tab` | `panel`) and the host composition variables `PI_MEMO_SUBAGENTS_CHILD_EXTENSIONS` / `PI_MEMO_SUBAGENTS_CHILD_ENV` ([docs/child-host.md](docs/child-host.md)).
+Environment: `PI_SUBAGENT_SURFACE` (`selector` | `split` | `tab` | `panel`), `PI_SUBAGENT_COLUMN_RATIO` (width of the selector's agent column, a number strictly between 0 and 1, default `0.4`), `PI_MEMO_SUBAGENTS_ASK_PARENT_TIMEOUT_MS` (how long the parent agent has to answer a child's question or approval before the user is asked, positive integer milliseconds, default `60000`; invalid values fall back to the default) and the host composition variables `PI_MEMO_SUBAGENTS_CHILD_EXTENSIONS` / `PI_MEMO_SUBAGENTS_CHILD_ENV` ([docs/child-host.md](docs/child-host.md)).
 
 ## Development
 

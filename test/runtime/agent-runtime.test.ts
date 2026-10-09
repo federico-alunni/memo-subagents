@@ -45,6 +45,7 @@ import type {
 } from "../../pi-extension/subagents/runtime/protocol.ts";
 import { childToolCall } from "../../pi-extension/subagents/runtime/child/extension.ts";
 import { resolveQuestionExtension } from "../../pi-extension/subagents/runtime/question-extension.ts";
+import { AskParentHost, createEscalate } from "../../pi-extension/subagents/ask-parent-host.ts";
 import { PaneSelector } from "../../pi-extension/subagents/runtime/pane-selector.ts";
 import type { SelectorState } from "../../pi-extension/subagents/runtime/pane-selector.ts";
 
@@ -1313,6 +1314,8 @@ test("unsupported CLI fails before pane creation; readiness failure is launch_un
   f.fake.cliUnsupported = true;
   await assert.rejects(f.transport.launch(f.input), errorCode("unsupported"));
   assert.equal(f.fake.createCount, 0);
+  const { scope, agentId } = f.input;
+  assert.equal(await f.transport.attemptAllocated(scope, agentId, 1), false);
   f.fake.cliUnsupported = false;
   f.fake.readySuppressed = true;
   await assert.rejects(
@@ -1320,11 +1323,23 @@ test("unsupported CLI fails before pane creation; readiness failure is launch_un
     errorCode("launch_uncertain"),
   );
   assert.equal(f.fake.createCount, 1);
+  assert.equal(await f.transport.attemptAllocated(scope, agentId, 2), true);
   await assert.rejects(
     f.transport.launch({ ...f.input, attempt: 2 }),
     (e: any) => e.code === "EEXIST",
   );
   assert.equal(f.fake.createCount, 1);
+});
+
+test("attemptAllocated rethrows errors other than ENOENT: no proof, never a false 'not allocated'", async (t) => {
+  const f = await fixture(t);
+  // The runtime root is a regular file: stat of the attempt directory fails with ENOTDIR.
+  await mkdir(f.stateDir, { recursive: true });
+  await writeFile(join(f.stateDir, "runtime"), "not a directory");
+  await assert.rejects(
+    new AgentRuntime(f.config).attemptAllocated(f.input.scope, f.input.agentId, 1),
+    (e: any) => e.code === "ENOTDIR",
+  );
 });
 
 test("settled record without matching acceptance is not completion evidence", async (t) => {
@@ -2018,6 +2033,8 @@ test("boot records of 0.2.0 (without the new policy fields) keep their meaning",
     delegatedTools: [],
     userInput: "takeover",
     exit: "parent",
+    // Boot records written before ask-parent (and external clients) never ask the parent.
+    askParent: false,
   });
 });
 
@@ -2165,36 +2182,133 @@ const SCOUT = {
 };
 const BESIDE = { pane_id: "pane-a", tab_id: "tab-1", workspace_id: "workspace-1" };
 
-test("auto placement: the first agent beside the caller, the next ones in tabs; all selectable", async (t) => {
+const splitCall = (f: { fake: { calls: { argv: string[] }[] } }) =>
+  f.fake.calls.find((c) => c.argv[0] === "pane" && c.argv[1] === "split")?.argv;
+const flag = (argv: string[] | undefined, name: string) => argv?.[argv.indexOf(name) + 1];
+
+test("auto placement: the first agent fills the column, the second goes below it, the next ones in tabs", async (t) => {
+  const previous = process.env.PI_SUBAGENT_COLUMN_RATIO;
+  delete process.env.PI_SUBAGENT_COLUMN_RATIO;
+  t.after(() => {
+    if (previous !== undefined) process.env.PI_SUBAGENT_COLUMN_RATIO = previous;
+  });
   const { selector, a, b, ra, rb } = await twoClients(t);
   const ha = await ra.launch({ ...a.input, ...SCOUT, placement: "auto" });
-  assert.ok(a.fake.calls.some((c) => c.argv[1] === "split"));
+  const first = splitCall(a);
+  assert.equal(first?.[2], "master-pane");
+  assert.equal(flag(first, "--direction"), "right");
+  // Herdr's ratio is the main pane's share: the column gets 40%.
+  assert.equal(flag(first, "--ratio"), "0.6");
   assert.equal(ha.placement, "split-right");
-  assert.equal(selector.selected, "pane-a");
+  assert.deepEqual(selector.slots, ["pane-a"]);
   assert.equal(selector.owned.get("pane-a"), "scout");
   assert.equal(selector.controls?.get("pane-a")?.handle.protocolDir, ha.protocolDir);
-  // pane-a is beside the caller: another client's "auto" agent goes to a tab.
+  // pane-a fills the column: another client's "auto" agent is split below it.
   b.fake.layout = { panes: [...b.fake.layout.panes, BESIDE] };
   const hb = await rb.launch({ ...b.input, ...PLANNER, placement: "auto" });
-  assert.ok(b.fake.calls.some((c) => c.argv[0] === "tab" && c.argv[1] === "create"));
-  assert.equal(hb.placement, undefined);
-  assert.equal(selector.selected, "pane-a");
-  assert.deepEqual([...selector.owned.keys()], ["pane-a", "pane-b"]);
+  const second = splitCall(b);
+  assert.equal(second?.[2], "pane-a");
+  assert.equal(flag(second, "--direction"), "down");
+  assert.equal(flag(second, "--ratio"), "0.5");
+  assert.equal(hb.placement, "split-down");
+  assert.equal(hb.parentPaneId, "pane-a");
+  assert.deepEqual(selector.slots, ["pane-a", "pane-b"]);
+  // Both slots taken: a tab.
+  const c = await fixture(t);
+  c.config.selector = selector;
+  const rc = new AgentRuntime(c.config);
+  t.after(() => rc.dispose());
+  c.fake.paneId = "pane-c";
+  c.fake.layout = { panes: [...b.fake.layout.panes, { ...BESIDE, pane_id: "pane-b" }] };
+  const hc = await rc.launch({ ...c.input, ...SCOUT, placement: "auto" });
+  assert.ok(!splitCall(c));
+  assert.ok(c.fake.calls.some((call) => call.argv[0] === "tab" && call.argv[1] === "create"));
+  assert.equal(hc.placement, undefined);
+  assert.deepEqual(selector.slots, ["pane-a", "pane-b"]);
+  assert.deepEqual([...selector.owned.keys()], ["pane-a", "pane-b", "pane-c"]);
 });
 
-test("visible placement parks our agent shown beside the caller through its own runtime", async (t) => {
+test("the column ratio comes from PI_SUBAGENT_COLUMN_RATIO; invalid values fall back to 40%", async (t) => {
+  const previous = process.env.PI_SUBAGENT_COLUMN_RATIO;
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_SUBAGENT_COLUMN_RATIO;
+    else process.env.PI_SUBAGENT_COLUMN_RATIO = previous;
+  });
+  for (const [value, ratio] of [["0.3", "0.7"], ["1.2", "0.6"], ["wide", "0.6"]]) {
+    process.env.PI_SUBAGENT_COLUMN_RATIO = value;
+    const f = await fixture(t);
+    await f.transport.launch({ ...f.input, ...SCOUT, placement: "auto" });
+    assert.equal(flag(splitCall(f), "--ratio"), ratio, value);
+  }
+});
+
+test("concurrent auto launches with a free column: top and bottom slot, the bottom split below the top pane", async (t) => {
+  const { selector, a, b, ra, rb } = await twoClients(t);
+  const [ha, hb] = await Promise.all([
+    ra.launch({ ...a.input, ...SCOUT, placement: "auto" }),
+    rb.launch({ ...b.input, ...PLANNER, placement: "auto" }),
+  ]);
+  const handles = [ha, hb].sort((x, y) => (x.placement === "split-right" ? -1 : y.placement === "split-right" ? 1 : 0));
+  assert.deepEqual(handles.map((h) => h.placement), ["split-right", "split-down"]);
+  const [top, bottom] = handles;
+  const bottomSplit = [splitCall(a), splitCall(b)].find((argv) => flag(argv, "--direction") === "down");
+  assert.equal(bottomSplit?.[2], top.paneId);
+  assert.equal(bottom.parentPaneId, top.paneId);
+  assert.deepEqual(selector.slots, [top.paneId, bottom.paneId]);
+  assert.deepEqual((selector.reservedSlots ?? []).filter(Boolean), []);
+  assert.equal(selector.placed?.size ?? 0, 0);
+});
+
+test("auto placement takes the free column even with our agents open in background tabs", async (t) => {
+  const { selector, a, b, ra, rb } = await twoClients(t);
+  await ra.launch({ ...a.input, ...SCOUT, placement: "tab" });
+  assert.equal(selector.owned.size, 1);
+  const hb = await rb.launch({ ...b.input, ...PLANNER, placement: "auto" });
+  assert.ok(b.fake.calls.some((c) => c.argv[1] === "split"));
+  assert.equal(hb.placement, "split-right");
+  assert.deepEqual(selector.slots, ["pane-b"]);
+});
+
+test("auto placement on a layout read before the selector moved a pane into the column: a tab", async (t) => {
+  const { selector, b, rb } = await twoClients(t);
+  b.fake.onCall = (call) => {
+    // A promotion moves an agent into the column while this launch reads the layout.
+    if (call.argv[1] === "layout") selector.layoutEpoch = (selector.layoutEpoch ?? 0) + 1;
+  };
+  const hb = await rb.launch({ ...b.input, ...PLANNER, placement: "auto" });
+  assert.equal(hb.placement, undefined);
+  assert.ok(!b.fake.calls.some((c) => c.argv[1] === "split"));
+  assert.deepEqual((selector.reservedSlots ?? []).filter(Boolean), []);
+});
+
+test("visible placement with a free slot fills it; with both slots taken it parks the top agent through its own runtime", async (t) => {
   const { selector, a, b, ra, rb, movesA } = await twoClients(t);
   const ha = await ra.launch({ ...a.input, ...SCOUT, placement: "auto" });
-  b.fake.layout = { panes: [...b.fake.layout.panes, BESIDE] };
+  // pane-a (top) and another owned agent (bottom) fill the column.
+  selector.owned.set("pane-x", "other");
+  selector.slots = ["pane-a", "pane-x"];
+  b.fake.layout = { panes: [...b.fake.layout.panes, BESIDE, { ...BESIDE, pane_id: "pane-x" }] };
   const hb = await rb.launch({ ...b.input, ...PLANNER, placement: "visible" });
   assert.equal(movesA.length, 1);
   assert.ok(movesA[0].includes("--new-tab"));
-  assert.ok(b.fake.calls.some((c) => c.argv[1] === "split"));
-  assert.equal(hb.placement, "split-right");
-  assert.equal(selector.selected, "pane-b");
+  const split = splitCall(b);
+  assert.equal(split?.[2], "pane-x");
+  assert.equal(flag(split, "--direction"), "down");
+  assert.equal(hb.placement, "split-down");
+  // Queue rule: the bottom agent moved up, the new one is below it.
+  assert.deepEqual(selector.slots, ["pane-x", "pane-b"]);
   // The selector's control has the parked tab; the owner's older handle still works (recorded move).
   assert.equal(selector.controls?.get("pane-a")?.handle.tabId, "tab-parked");
   assert.equal((await ra.observe(ha)).kind, "active");
+
+  // A free slot: no park, the new agent goes below the shown one.
+  const g = await twoClients(t);
+  await g.ra.launch({ ...g.a.input, ...SCOUT, placement: "auto" });
+  g.b.fake.layout = { panes: [...g.b.fake.layout.panes, BESIDE] };
+  const hg = await g.rb.launch({ ...g.b.input, ...PLANNER, placement: "visible" });
+  assert.equal(g.movesA.length, 0);
+  assert.equal(hg.placement, "split-down");
+  assert.deepEqual(g.selector.slots, ["pane-a", "pane-b"]);
 });
 
 test("visible placement never splits a tab with another split or a zoomed caller", async (t) => {
@@ -2208,34 +2322,38 @@ test("visible placement never splits a tab with another split or a zoomed caller
     const h = await f.transport.launch({ ...f.input, ...PLANNER, placement: "visible" });
     assert.equal(h.placement, undefined);
     assert.ok(!f.fake.calls.some((c) => c.argv[1] === "split"));
-    assert.equal(f.config.selector!.reservedSplit, undefined);
-    assert.equal(f.config.selector!.selected, undefined);
+    assert.deepEqual((f.config.selector!.reservedSlots ?? []).filter(Boolean), []);
+    assert.deepEqual(f.config.selector!.slots ?? [], []);
   }
 });
 
 test("the pane selector shows another client's agent by moving it through that client's runtime", async (t) => {
   const { selector, a, ra } = await twoClients(t);
   const ha = await ra.launch({ ...a.input, ...SCOUT, placement: "tab" });
-  assert.equal(selector.selected, undefined);
+  assert.deepEqual(selector.slots ?? [], []);
   let tabA = "tab-x";
   a.fake.pane = () => ({ pane_id: "pane-a", tab_id: tabA, workspace_id: "workspace-1", terminal_id: a.fake.terminal });
+  const moves: string[][] = [];
   a.fake.onCall = (call) => {
     if (call.argv[1] !== "move") return;
+    moves.push(call.argv);
     tabA = "tab-1";
     return a.fake.result({ move_result: { changed: true } });
   };
   // The main process' selector reads the layout itself; the move goes through runtime A.
+  const master = { pane_id: "master-pane", tab_id: "tab-1", workspace_id: "workspace-1" };
   const view = new PaneSelector(selector, (args) => {
-    if (args[1] === "get" && args[2] === "master-pane")
-      return { pane: { pane_id: "master-pane", tab_id: "tab-1", workspace_id: "workspace-1" } };
+    if (args[1] === "get" && args[2] === "master-pane") return { pane: master };
     if (args[1] === "get") return { pane: { pane_id: args[2], tab_id: tabA, workspace_id: "workspace-1" } };
     if (args[1] === "layout")
-      return { layout: { panes: [{ pane_id: "master-pane", tab_id: "tab-1", workspace_id: "workspace-1" }] } };
+      return { layout: { panes: tabA === "tab-1" ? [master, { pane_id: "pane-a" }] : [master] } };
     throw new Error(`direct Herdr move not expected: ${args.join(" ")}`);
   }, () => "master-pane");
   assert.deepEqual(view.selectable(), ["pane-a"]);
   await view.select("pane-a");
-  assert.equal(selector.selected, "pane-a");
+  assert.deepEqual(selector.slots, ["pane-a"]);
+  assert.equal(flag(moves[0], "--split"), "right");
+  assert.equal(flag(moves[0], "--ratio"), String(Number((1 - Number(process.env.PI_SUBAGENT_COLUMN_RATIO ?? 0.4)).toFixed(4))));
   assert.equal(selector.controls?.get("pane-a")?.handle.tabId, "tab-1");
   assert.equal((await ra.observe(ha)).kind, "active");
 });
@@ -2268,7 +2386,7 @@ test("viewer: runs a node program under the child contract, no pi checks, no pre
   });
   assert.equal(h.pid, f.fake.pid);
   assert.equal(f.config.selector!.owned.get("pane-1"), "worker"); // display label
-  assert.equal(f.config.selector!.selected, "pane-1"); // the split was reserved by this launch
+  assert.deepEqual(f.config.selector!.slots, ["pane-1"]); // the top slot was reserved by this launch
   assert.equal(f.config.selector!.controls?.get("pane-1")?.handle.paneId, "pane-1");
   // The viewer program is executed with node, not pi: no help check, no isolation flags.
   const run = f.fake.calls.find((c) => c.argv[1] === "run");
@@ -2376,4 +2494,206 @@ test("split target and ratio are validated before anything is created", async (t
     (error: unknown) => error instanceof RuntimeError && (error.code === "launch_failed" || error.code === "launch_uncertain"),
   );
   assert.equal(f.fake.createCount, 0);
+});
+
+// ── Ask-parent: correlated requests from a user-driven child to its parent ──
+
+const until = async <T>(read: () => Promise<T | undefined>, ms = 3000): Promise<T> => {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const value = await read();
+    if (value !== undefined) return value;
+    if (Date.now() > deadline) throw new Error("condition not reached");
+    await new Promise((r) => setTimeout(r, 5));
+  }
+};
+
+test("ask-parent: launch policy, user-driven only, and the child extension owns the one question tool", async (t) => {
+  const f = await fixture(t);
+  await f.transport.launch({ ...f.input, ...GENERIC, askParent: true });
+  assert.equal(f.fake.boot!.policy.askParent, true);
+  const run = f.fake.calls.find((c) => c.argv[1] === "run")!.argv[3];
+  assert.doesNotMatch(run, /extensions\/question\.ts/);
+  // Opt-out: profile children keep loading pi-memo-question's extension as before.
+  const g = await fixture(t);
+  await g.transport.launch({ ...g.input, ...GENERIC });
+  assert.equal(g.fake.boot!.policy.askParent, false);
+  assert.match(g.fake.calls.find((c) => c.argv[1] === "run")!.argv[3], /extensions\/question\.ts/);
+  // Workflow (takeover) children never ask the parent; `ask_parent` is a reserved tool name.
+  const n = await fixture(t);
+  for (const [index, patch] of [
+    { askParent: true },
+    { askParent: "yes" as unknown as boolean, ...GENERIC },
+    { delegatedTools: [{ ...INTEGRATE, name: "ask_parent" }] },
+  ].entries())
+    await assert.rejects(
+      n.transport.launch({ ...n.input, agentId: `askp-${index}`, ...patch }),
+      errorCode("unsupported"),
+      JSON.stringify(patch),
+    );
+  assert.equal(n.fake.createCount, 0);
+});
+
+test("ask-parent: a question reaches the parent as a correlated request; the child waits for exactly that answer", async (t) => {
+  const f = await fixture(t);
+  const h = await f.transport.launch({ ...f.input, ...GENERIC, askParent: true });
+  await f.transport.askHeartbeat(h, { name: "main agent", id: "parent-session" });
+  const targets: string[] = [];
+  const asked = f.fake.runtime!.ask(
+    { kind: "question", text: "Quale base?", options: [{ label: "main (Recommended)" }, { label: "dev" }] },
+    { onTarget: (target) => targets.push(target), pollMs: 5 },
+  );
+  const [pending] = await until(async () => {
+    const list = await f.transport.pendingAsks(h);
+    return list.length ? list : undefined;
+  });
+  assert.equal(pending.request.kind, "question");
+  assert.equal(pending.request.childName, "scout");
+  assert.equal(pending.request.childId, h.agentId);
+  assert.deepEqual(pending.request.options, [{ label: "main (Recommended)" }, { label: "dev" }]);
+  assert.equal(pending.received, false);
+  // Not a delegated-tool request: other runtime clients never see it in observe/drainRequests.
+  assert.deepEqual(await f.transport.drainRequests(h), []);
+  assert.equal(await f.transport.markAsk(h, pending.requestId, { kind: "received" }), true);
+  assert.equal(await f.transport.markAsk(h, pending.requestId, { kind: "received" }), false);
+  await f.transport.markAsk(h, pending.requestId, { kind: "escalated", escalation: { target: "user", reason: "timeout" } });
+  await until(async () => (targets.includes("user") ? true : undefined));
+  await f.transport.answerAsk(h, pending.requestId, {
+    answer: "dev",
+    by: { who: "user", where: "parent-session", reason: "timeout", name: "main agent" },
+  });
+  const outcome = await asked;
+  assert.equal(outcome.kind, "answered");
+  assert.equal(outcome.kind === "answered" && outcome.result.answer, "dev");
+  assert.deepEqual(targets, ["parent", "user"]);
+  // Answered once: repeated or stale answers are refused.
+  await assert.rejects(
+    f.transport.answerAsk(h, pending.requestId, { answer: "main", by: { who: "parent" } }),
+    errorCode("busy"),
+  );
+  await assert.rejects(
+    f.transport.answerAsk(h, "unknown-request", { answer: "main", by: { who: "parent" } }),
+    errorCode("busy"),
+  );
+  assert.deepEqual(await f.transport.pendingAsks(h), []);
+  // The child keeps running: no exit record, nothing like caller_ping.
+  const o = await f.transport.observe(h);
+  assert.equal(o.exit, undefined);
+  assert.notEqual(o.kind, "stopped");
+});
+
+test("ask-parent: unavailable parent → fallback to the child's pane without the full timeout; late answers refused", async (t) => {
+  const f = await fixture(t);
+  const h = await f.transport.launch({ ...f.input, ...GENERIC, askParent: true });
+  const child = f.fake.runtime!;
+  const approval = { kind: "approval" as const, text: "npm run build", command: "npm run build", prefix: "npm run" };
+  // Parent extension not loaded: nobody picks the request up.
+  const unpicked = await child.ask(approval, { pickupMs: 30, pollMs: 5 });
+  assert.equal(unpicked.kind, "fallback");
+  assert.match(unpicked.kind === "fallback" ? unpicked.reason : "", /did not pick/);
+  assert.deepEqual(await f.transport.pendingAsks(h), []);
+  await assert.rejects(
+    f.transport.answerAsk(h, unpicked.requestId!, { decision: "once", by: { who: "parent" } }),
+    errorCode("busy"),
+  );
+  // Parent quit or reloaded (closed liveness record): no request at all.
+  await f.transport.askHeartbeat(h, { name: "main agent", id: "s", closed: true });
+  const started = Date.now();
+  const closed = await child.ask(approval, { pickupMs: 60_000 });
+  assert.equal(closed.kind, "fallback");
+  assert.ok(Date.now() - started < 1000);
+  // The parent goes away while the request waits.
+  await f.transport.askHeartbeat(h, { name: "main agent", id: "s" });
+  const waiting = child.ask(approval, { pickupMs: 60_000, pollMs: 5 });
+  const [pending] = await until(async () => {
+    const list = await f.transport.pendingAsks(h);
+    return list.length ? list : undefined;
+  });
+  await f.transport.markAsk(h, pending.requestId, { kind: "received" });
+  await f.transport.askHeartbeat(h, { name: "main agent", id: "s", closed: true });
+  const gone = await waiting;
+  assert.equal(gone.kind, "fallback");
+  assert.match(gone.kind === "fallback" ? gone.reason : "", /not available/);
+  // A fallback answer published by the parent (e.g. no UI to ask the user) also sends the child to its pane.
+  await f.transport.askHeartbeat(h, { name: "main agent", id: "s" });
+  const relayed = child.ask(approval, { pickupMs: 60_000, pollMs: 5 });
+  const [next] = await until(async () => {
+    const list = await f.transport.pendingAsks(h);
+    return list.length ? list : undefined;
+  });
+  await f.transport.answerAsk(h, next.requestId, { fallback: true, reason: "no UI in the parent session" });
+  assert.deepEqual(await relayed, { kind: "fallback", reason: "no UI in the parent session", requestId: next.requestId });
+  // Aborted turn: the child withdraws (claims the slot) and reports cancelled.
+  const controller = new AbortController();
+  const aborted = child.ask(approval, { pickupMs: 60_000, pollMs: 5, signal: controller.signal });
+  const [third] = await until(async () => {
+    const list = await f.transport.pendingAsks(h);
+    return list.length ? list : undefined;
+  });
+  controller.abort();
+  assert.equal((await aborted).kind, "cancelled");
+  await assert.rejects(
+    f.transport.answerAsk(h, third.requestId, { decision: "once", by: { who: "parent" } }),
+    errorCode("busy"),
+  );
+  // Opt-out children never publish requests.
+  const g = await fixture(t);
+  await g.transport.launch({ ...g.input, ...GENERIC });
+  assert.deepEqual(await g.fake.runtime!.ask(approval), { kind: "fallback", reason: "ask-parent is off" });
+});
+
+test("ask-parent nesting: an intermediate agent forwards an escalation one level up, never to its user", async (t) => {
+  // top (main agent) → mid (runtime child, itself a parent) → leaf.
+  const top = await fixture(t);
+  const midHandle = await top.transport.launch({ ...top.input, ...GENERIC, askParent: true, display: { label: "Mid" } });
+  await top.transport.askHeartbeat(midHandle, { name: "main agent", id: "s0" });
+  const mid = await fixture(t);
+  const leafHandle = await mid.transport.launch({ ...mid.input, ...GENERIC, askParent: true, display: { label: "Leaf" } });
+  await mid.transport.askHeartbeat(leafHandle, { name: "Mid", id: "mid-id" });
+  let userAsked = 0;
+  const midHost = new AskParentHost({
+    runtime: mid.transport,
+    children: () => [{ id: "leaf-id", name: "Leaf", handle: leafHandle }],
+    self: () => ({ name: "Mid", id: "mid-id" }),
+    notify: () => {},
+    escalationTarget: () => "parent",
+    escalate: createEscalate({
+      // What the child extension of "mid" registers as its upstream.
+      upstream: () => ({ name: "Mid", forward: (request, options) => top.fake.runtime!.ask(request, { ...options, pollMs: 5 }) }),
+      askUser: async () => {
+        userAsked++;
+        return undefined;
+      },
+      self: () => ({ name: "Mid", id: "mid-id" }),
+    }),
+    timeoutMs: 60_000,
+  });
+  const targets: string[] = [];
+  const leafAsk = mid.fake.runtime!.ask(
+    { kind: "approval", text: "make build", command: "make build", prefix: "make build" },
+    { pollMs: 5, onTarget: (target) => targets.push(target) },
+  );
+  const [pending] = await until(async () => {
+    await midHost.tick();
+    const list = midHost.pending();
+    return list.length ? list : undefined;
+  });
+  assert.equal((await midHost.answer({ id: "leaf-id", requestId: pending.requestId, escalate: true })).ok, true);
+  const [up] = await until(async () => {
+    const list = await top.transport.pendingAsks(midHandle);
+    return list.length ? list : undefined;
+  });
+  assert.equal(up.request.childName, "Mid");
+  assert.deepEqual(up.request.origin, ["Leaf"]);
+  assert.equal(up.request.command, "make build");
+  await top.transport.markAsk(midHandle, up.requestId, { kind: "received" });
+  await top.transport.answerAsk(midHandle, up.requestId, { decision: "once", by: { who: "parent", name: "main agent", id: "s0" } });
+  const outcome = await leafAsk;
+  assert.equal(outcome.kind, "answered");
+  assert.deepEqual(outcome.kind === "answered" && outcome.result, {
+    decision: "once",
+    by: { who: "parent", name: "main agent", id: "s0", forwardedBy: ["Mid"] },
+  });
+  assert.equal(userAsked, 0);
+  assert.deepEqual(targets, ["parent"]); // escalated one level up: still waiting for a parent, not the user
 });
