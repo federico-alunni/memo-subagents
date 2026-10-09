@@ -67,7 +67,7 @@ export interface ResolvedRuntimePlan {
   thinkingAdjustment?: {
     from: ThinkingLevel;
     to: ThinkingLevel;
-    reason: "non-reasoning" | "inherited-clamp";
+    reason: "non-reasoning" | "inherited-clamp" | "explicit-clamp";
   };
   observed?: {
     model?: string;
@@ -172,11 +172,6 @@ function asPiModel(model: RoutingModel): Model<any> {
   };
 }
 
-function formatSupported(model: RoutingModel): string {
-  const levels = getSupportedThinkingLevels(asPiModel(model));
-  return levels.length > 0 ? levels.join(", ") : "(none)";
-}
-
 function selectField(
   requestValue: string | undefined,
   agentValue: string | undefined,
@@ -241,11 +236,16 @@ export function resolveRuntimePlan(
         `model capability information is unavailable; cannot validate explicit thinking ${JSON.stringify(preferredThinking)}`,
       );
     }
+    // An explicit level the model lacks becomes the nearest supported one (e.g. minimal -> low):
+    // the caller's intent is kept and the spawn never fails on a level the caller cannot see.
     const supported = getSupportedThinkingLevels(asPiModel(selectedModel));
     if (!supported.includes(preferredThinking as ModelThinkingLevel)) {
-      throw new RuntimeResolutionError(
-        `thinking ${JSON.stringify(preferredThinking)} is not supported by ${JSON.stringify(`${provider}/${modelId}`)}; supported: ${formatSupported(selectedModel)}`,
-      );
+      thinking = clampThinkingLevel(asPiModel(selectedModel), preferredThinking) as ThinkingLevel;
+      thinkingAdjustment = {
+        from: preferredThinking,
+        to: thinking,
+        reason: selectedModel.reasoning ? "explicit-clamp" : "non-reasoning",
+      };
     }
   } else if (selectedModel) {
     const clamped = clampThinkingLevel(asPiModel(selectedModel), preferredThinking);

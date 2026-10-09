@@ -111,18 +111,29 @@ describe("runtime routing", () => {
     }
   });
 
-  it("rejects unsupported explicit thinking with supported alternatives", () => {
+  it("clamps unsupported explicit thinking to the nearest supported level", () => {
     const plain = model("other", "plain", { reasoning: false });
-    assert.throws(
-      () =>
-        resolveRuntimePlan(
-          { model: "other/plain", thinking: "high" },
-          {},
-          parent,
-          registry([model("fake", "parent"), plain]),
-        ),
-      /thinking "high" is not supported.*supported: off/,
+    const offOnly = resolveRuntimePlan(
+      { model: "other/plain", thinking: "high" },
+      {},
+      parent,
+      registry([model("fake", "parent"), plain]),
     );
+    assert.equal(offOnly.thinking, "off");
+    assert.deepEqual(offOnly.thinkingAdjustment, { from: "high", to: "off", reason: "non-reasoning" });
+
+    const sparse = model("other", "sparse", {
+      thinkingLevelMap: { off: "off", minimal: null, low: "low", medium: null, high: null },
+    });
+    const plan = resolveRuntimePlan(
+      { model: "other/sparse", thinking: "minimal" },
+      {},
+      parent,
+      registry([model("fake", "parent"), sparse]),
+    );
+    assert.equal(plan.thinking, "low");
+    assert.equal(plan.thinkingSource, "request");
+    assert.deepEqual(plan.thinkingAdjustment, { from: "minimal", to: "low", reason: "explicit-clamp" });
   });
 
   it("uses agent-default thinking when the request omits it", () => {

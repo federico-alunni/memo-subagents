@@ -3405,6 +3405,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
                 `Do NOT generate or assume any results — you have no idea what the sub-agent will do or produce. ` +
                 `The results will be delivered to you automatically as a steer message when the sub-agent finishes. ` +
                 `Until then, move on to other work or tell the user you're waiting.` +
+                (running.runtimePlan?.thinkingAdjustment
+                  ? `\n\nThinking ${running.runtimePlan.thinkingAdjustment.from} → ${running.runtimePlan.thinkingAdjustment.to} (nearest level supported by ${running.runtimePlan.model}).`
+                  : "") +
                 (running.worktree ? `\n\n${worktreeLines(running.worktree)}` : ""),
             },
           ],

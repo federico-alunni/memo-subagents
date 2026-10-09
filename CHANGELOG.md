@@ -6,6 +6,7 @@
 
 ### Changed
 
+- An explicit `thinking` level the selected model does not support is clamped to the nearest supported level (e.g. `minimal` → `low`) and reported in the launch result, instead of failing the spawn.
 - **Supplied panels follow the life of their subagents.** A panel that names subagents (`group`, or `subagent` on items/rows) is shown only while one of them is alive, while it sets `attention`, or for `linger` ms after its last live subagent. A panel that names none is shown as long as its provider keeps it. A provider can no longer leave a stale box above the editor.
 - **One box.** Live subagents that no panel item stands for are folded into the last supplied panel (rows, compact items, or a trailing group), instead of a second box. Items standing for a live subagent take its live dot and flag (`?40s` waiting, `⚠12m` stalled).
 - **Socket tokens identify the caller.** Each subagent process gets its own token (`<id>.<mac>`); requests made with it act as that subagent whatever `callerId` they send (`caller_mismatch` otherwise), so a subagent can no longer obtain session rights by omitting `callerId`. A subagent may `send` to / `interrupt` only itself and the agents it started. The session token keeps full rights.
