@@ -17,6 +17,10 @@
 - `group` for agents started by scripts (socket `spawn`): inherited by agents they start; reported by `list` and the lifecycle events. `subagents:ready` carries a snapshot `{ agents: { id, name, agent, group }[] }`.
 - [docs/socket.md](docs/socket.md): the session socket, its tokens and methods.
 
+### Changed
+
+- `worktree: true` opens the agent in its own Herdr sub-space by default (any caller, not only orchestrators). Opt out with `worktreeSpace: false`; `fork` and `handoff` never default to a sub-space.
+
 ### Fixed
 
 - Worktree placement: when `herdr worktree open` is refused (e.g. repository outside the caller workspace), a dedicated workspace is created instead of falling back to creating tabs in the caller workspace.

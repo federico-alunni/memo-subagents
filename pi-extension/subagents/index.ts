@@ -130,6 +130,7 @@ import { RuntimeError } from "./runtime/index.ts";
 import { validBashAllowEntry } from "./runtime/protocol.ts";
 import type { AgentHandle, ChildRecord, LaunchSpec, Observation } from "./runtime/index.ts";
 import {
+  setSubagentRuntime,
   subagentRuntime,
   subagentStateDir,
   superviseSubagent,
@@ -230,7 +231,7 @@ const SubagentParams = Type.Object({
   worktree: Type.Optional(
     Type.Boolean({
       description:
-        "Run the sub-agent in a fresh, isolated git worktree on a new branch, created from the repository of its working directory. The worktree is kept after completion; its path, branch and commit state are reported in the result. Nothing is merged automatically. Clean up with subagent_worktrees.",
+        "Run the sub-agent in a fresh, isolated git worktree on a new branch, created from the repository of its working directory. Inside Herdr it opens in its own sub-space (see worktreeSpace). The worktree is kept after completion; its path, branch and commit state are reported in the result. Nothing is merged automatically. Clean up with subagent_worktrees.",
     }),
   ),
   worktreeBranch: Type.Optional(
@@ -253,7 +254,7 @@ const SubagentParams = Type.Object({
   worktreeSpace: Type.Optional(
     Type.Boolean({
       description:
-        "With worktree: true, open the worktree as its own Herdr workspace. The main tab shows a read-only mirror of the sub-agent (promote it with /subagent or Ctrl+Alt+X). That sub-agent can start further agents in its own workspace with handoff.",
+        "Worktree sub-space. Default true with worktree: true inside Herdr: the worktree opens as its own Herdr workspace (sub-space), the main tab shows a read-only mirror of the sub-agent (promote it with /subagent or Ctrl+Alt+X), and that sub-agent can start further agents in its own space with handoff. Set false to keep a worktree agent as a plain pane beside you.",
     }),
   ),
   spawning: Type.Optional(
@@ -1705,6 +1706,19 @@ function validateWorktreeParams(params: {
   return undefined;
 }
 
+/** A worktree agent opens in its own sub-space unless the caller opts out (`worktreeSpace: false`), forks
+ * the session, hands off into its own space, or runs outside Herdr. */
+export function wantsWorktreeSpace(params: {
+  worktree?: boolean;
+  worktreeSpace?: boolean;
+  handoff?: unknown;
+  fork?: boolean;
+}): boolean {
+  if (params.worktree !== true || params.handoff != null) return false;
+  if (params.worktreeSpace !== undefined) return params.worktreeSpace === true;
+  return params.fork !== true && isTerminalAvailable();
+}
+
 /** `handoff` is a wait/replace mode, only available inside a worktree space (the caller passes that fact). */
 export const DEFAULT_SPAWNING_DEPTH = 2;
 
@@ -2889,7 +2903,7 @@ async function launchRequested(parent: RunningSubagent, request: SpawnRequest, p
   }
   // Delegated agents open in a column under the requester (a worktree space opens its own workspace).
   let column: LaunchOptions["column"];
-  if (mode === "delegate" && params.worktreeSpace !== true) {
+  if (mode === "delegate" && !wantsWorktreeSpace(params)) {
     const rootId = columnRootOf(parent);
     const panes = columnPanes(rootId);
     const layout = readLayout(parent.surface);
@@ -2898,7 +2912,7 @@ async function launchRequested(parent: RunningSubagent, request: SpawnRequest, p
     if (next) column = { rootId, ...next };
   }
   const running = await launchSubagent(params, ctx as unknown as LaunchContext, pi.getThinkingLevel() as ThinkingLevel, {
-    ...(worktreePlan ? { worktreePlan, ...(params.worktreeSpace === true ? { worktreeSpace: true } : {}) } : {}),
+    ...(worktreePlan ? { worktreePlan, ...(wantsWorktreeSpace(params as any) ? { worktreeSpace: true } : {}) } : {}),
     spawnedBy: { mode, parent },
     ...(authorized.childSpawning ? { spawning: authorized.childSpawning } : {}),
     ...(column ? { column } : {}),
@@ -3096,7 +3110,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           worktreePlan = planned.plan;
         }
         const launchOpts: LaunchOptions = {
-          ...(worktreePlan ? { worktreePlan, ...(params.worktreeSpace === true ? { worktreeSpace: true } : {}) } : {}),
+          ...(worktreePlan ? { worktreePlan, ...(wantsWorktreeSpace(params as any) ? { worktreeSpace: true } : {}) } : {}),
           ...(params.spawning === true ? { spawning: { depth: (params.spawningDepth as number) ?? DEFAULT_SPAWNING_DEPTH } } : {}),
           ...(typeof params.group === "string" && params.group ? { group: params.group } : {}),
         };
@@ -3359,7 +3373,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             ctx,
             parentThinking,
             {
-              ...(worktreePlan ? { worktreePlan, ...(params.worktreeSpace === true ? { worktreeSpace: true } : {}) } : {}),
+              ...(worktreePlan ? { worktreePlan, ...(wantsWorktreeSpace(params as any) ? { worktreeSpace: true } : {}) } : {}),
               ...(params.spawning === true ? { spawning: { depth: params.spawningDepth ?? DEFAULT_SPAWNING_DEPTH } } : {}),
             },
           );
