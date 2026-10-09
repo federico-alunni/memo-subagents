@@ -57,6 +57,8 @@ import { resolveQuestionExtension } from "./question-extension.ts";
 import {
   adoptPane,
   forgetPane,
+  notePlacedPane,
+  placedPane,
   releasePlacement,
   reservePlacement,
   selectorState,
@@ -415,8 +417,32 @@ export class AgentRuntime {
     const control = this.selector.controls?.get(h.paneId);
     if (control && control.handle.protocolDir === h.protocolDir) control.handle = h;
   }
-  /** "auto"/"visible" placement on the caller's current layout; unknown layout never splits. */
+  /**
+   * "auto"/"visible" placement on the caller's current layout (a slot of the agent column or a tab);
+   * unknown layout never splits. A bottom slot reserved while the top slot's launch has not created its
+   * pane yet waits for that pane (bounded); if that launch ends without one, the decision is taken again.
+   */
   private async reservePlacement(
+    parent: Pane,
+    mode: PlacementMode,
+    cwd: string,
+  ): Promise<PlacementReservation> {
+    const deadline = Date.now() + 15_000;
+    for (;;) {
+      const reservation = await this.reserveOnce(parent, mode, cwd);
+      if (!reservation.after) return reservation;
+      const target = await placedPane(this.selector, reservation.after, {
+        timeoutMs: Math.max(0, deadline - Date.now()),
+      });
+      if (target) {
+        const { after: _after, ...rest } = reservation;
+        return { ...rest, targetPane: target };
+      }
+      releasePlacement(this.selector, reservation);
+      if (Date.now() >= deadline) return { token: reservation.token, placement: "tab" };
+    }
+  }
+  private async reserveOnce(
     parent: Pane,
     mode: PlacementMode,
     cwd: string,
@@ -432,14 +458,16 @@ export class AgentRuntime {
     }
     const reservation = reservePlacement(state, parent, layout, mode, epoch);
     if (!reservation.park) return reservation;
-    // "visible": park our agent currently beside the caller, through the runtime that owns it.
-    const control = state.controls?.get(reservation.park);
+    // "visible" with both slots taken: park our top agent through the runtime that owns it; the bottom
+    // one takes the whole column and the new agent is split below it.
+    const park = reservation.park;
+    const control = state.controls?.get(park);
     try {
       if (!control) throw new Error("not a runtime agent");
       control.handle = await control.move(control.handle, {
-        newTab: { label: state.owned.get(reservation.park) ?? "agent" },
+        newTab: { label: state.owned.get(park) ?? "agent" },
       });
-      if (state.selected === reservation.park) state.selected = undefined;
+      state.slots = (state.slots ?? []).filter((id) => !!id && id !== park);
       return reservation;
     } catch {
       releasePlacement(state, reservation);
@@ -812,12 +840,14 @@ export class AgentRuntime {
       const split = placement === "split-right" || placement === "split-down";
       if (split && (!parent.pane_id || !parent.tab_id))
         throw new Error("Herdr current pane identity missing for split");
+      // Selector slots split the main pane (top) or the agent above (bottom), with the column's ratio.
+      const splitTarget = reservation?.targetPane ?? parent.pane_id;
       const label = input.display.label.replace(/[\r\n\t]+/g, " ").trim();
       phase = "create";
       await evidence("create-intent", {
         workspaceId: parent.workspace_id,
         placement,
-        ...(split ? { parentPaneId: parent.pane_id } : {}),
+        ...(split ? { parentPaneId: splitTarget } : {}),
       });
       // Existing checkout as a Herdr worktree space under the caller's space. A clean
       // Herdr refusal has no effect and falls back to a background tab; a lost response
@@ -872,9 +902,10 @@ export class AgentRuntime {
             ? [
               "pane",
               "split",
-              parent.pane_id,
+              splitTarget,
               "--direction",
               placement === "split-down" ? "down" : "right",
+              ...(reservation?.ratio ? ["--ratio", String(reservation.ratio)] : []),
               "--cwd",
               cwd,
               "--no-focus",
@@ -901,9 +932,11 @@ export class AgentRuntime {
         !p?.terminal_id ||
         !p.tab_id ||
         p.workspace_id !== (space?.workspaceId ?? parent.workspace_id) ||
-        (split && (p.tab_id !== parent.tab_id || paneId === parent.pane_id))
+        (split && (p.tab_id !== parent.tab_id || paneId === parent.pane_id || paneId === splitTarget))
       )
         throw new Error("Herdr lacks exact pane/terminal identity");
+      // A bottom-slot launch waiting for this pane can split it now.
+      notePlacedPane(this.selector, reservation, paneId);
       // Cosmetic only; identity is the returned pane/terminal.
       if (split)
         await this.herdr(["pane", "rename", paneId, label], cwd).catch(() => {});
@@ -1199,7 +1232,7 @@ export class AgentRuntime {
             // Display only: focus moves between caller and child, never identity.
             ...(split
               ? {
-                  parentPaneId: parent.pane_id,
+                  parentPaneId: splitTarget,
                   placement: placement as "split-right" | "split-down",
                 }
               : {}),

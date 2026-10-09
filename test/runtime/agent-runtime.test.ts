@@ -2177,58 +2177,133 @@ const SCOUT = {
 };
 const BESIDE = { pane_id: "pane-a", tab_id: "tab-1", workspace_id: "workspace-1" };
 
-test("auto placement: the first agent beside the caller, the next ones in tabs; all selectable", async (t) => {
+const splitCall = (f: { fake: { calls: { argv: string[] }[] } }) =>
+  f.fake.calls.find((c) => c.argv[0] === "pane" && c.argv[1] === "split")?.argv;
+const flag = (argv: string[] | undefined, name: string) => argv?.[argv.indexOf(name) + 1];
+
+test("auto placement: the first agent fills the column, the second goes below it, the next ones in tabs", async (t) => {
+  const previous = process.env.PI_SUBAGENT_COLUMN_RATIO;
+  delete process.env.PI_SUBAGENT_COLUMN_RATIO;
+  t.after(() => {
+    if (previous !== undefined) process.env.PI_SUBAGENT_COLUMN_RATIO = previous;
+  });
   const { selector, a, b, ra, rb } = await twoClients(t);
   const ha = await ra.launch({ ...a.input, ...SCOUT, placement: "auto" });
-  assert.ok(a.fake.calls.some((c) => c.argv[1] === "split"));
+  const first = splitCall(a);
+  assert.equal(first?.[2], "master-pane");
+  assert.equal(flag(first, "--direction"), "right");
+  // Herdr's ratio is the main pane's share: the column gets 40%.
+  assert.equal(flag(first, "--ratio"), "0.6");
   assert.equal(ha.placement, "split-right");
-  assert.equal(selector.selected, "pane-a");
+  assert.deepEqual(selector.slots, ["pane-a"]);
   assert.equal(selector.owned.get("pane-a"), "scout");
   assert.equal(selector.controls?.get("pane-a")?.handle.protocolDir, ha.protocolDir);
-  // pane-a is beside the caller: another client's "auto" agent goes to a tab.
+  // pane-a fills the column: another client's "auto" agent is split below it.
   b.fake.layout = { panes: [...b.fake.layout.panes, BESIDE] };
   const hb = await rb.launch({ ...b.input, ...PLANNER, placement: "auto" });
-  assert.ok(b.fake.calls.some((c) => c.argv[0] === "tab" && c.argv[1] === "create"));
-  assert.equal(hb.placement, undefined);
-  assert.equal(selector.selected, "pane-a");
-  assert.deepEqual([...selector.owned.keys()], ["pane-a", "pane-b"]);
+  const second = splitCall(b);
+  assert.equal(second?.[2], "pane-a");
+  assert.equal(flag(second, "--direction"), "down");
+  assert.equal(flag(second, "--ratio"), "0.5");
+  assert.equal(hb.placement, "split-down");
+  assert.equal(hb.parentPaneId, "pane-a");
+  assert.deepEqual(selector.slots, ["pane-a", "pane-b"]);
+  // Both slots taken: a tab.
+  const c = await fixture(t);
+  c.config.selector = selector;
+  const rc = new AgentRuntime(c.config);
+  t.after(() => rc.dispose());
+  c.fake.paneId = "pane-c";
+  c.fake.layout = { panes: [...b.fake.layout.panes, { ...BESIDE, pane_id: "pane-b" }] };
+  const hc = await rc.launch({ ...c.input, ...SCOUT, placement: "auto" });
+  assert.ok(!splitCall(c));
+  assert.ok(c.fake.calls.some((call) => call.argv[0] === "tab" && call.argv[1] === "create"));
+  assert.equal(hc.placement, undefined);
+  assert.deepEqual(selector.slots, ["pane-a", "pane-b"]);
+  assert.deepEqual([...selector.owned.keys()], ["pane-a", "pane-b", "pane-c"]);
 });
 
-test("auto placement takes the free split even with our agents open in background tabs", async (t) => {
+test("the column ratio comes from PI_SUBAGENT_COLUMN_RATIO; invalid values fall back to 40%", async (t) => {
+  const previous = process.env.PI_SUBAGENT_COLUMN_RATIO;
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_SUBAGENT_COLUMN_RATIO;
+    else process.env.PI_SUBAGENT_COLUMN_RATIO = previous;
+  });
+  for (const [value, ratio] of [["0.3", "0.7"], ["1.2", "0.6"], ["wide", "0.6"]]) {
+    process.env.PI_SUBAGENT_COLUMN_RATIO = value;
+    const f = await fixture(t);
+    await f.transport.launch({ ...f.input, ...SCOUT, placement: "auto" });
+    assert.equal(flag(splitCall(f), "--ratio"), ratio, value);
+  }
+});
+
+test("concurrent auto launches with a free column: top and bottom slot, the bottom split below the top pane", async (t) => {
+  const { selector, a, b, ra, rb } = await twoClients(t);
+  const [ha, hb] = await Promise.all([
+    ra.launch({ ...a.input, ...SCOUT, placement: "auto" }),
+    rb.launch({ ...b.input, ...PLANNER, placement: "auto" }),
+  ]);
+  const handles = [ha, hb].sort((x, y) => (x.placement === "split-right" ? -1 : y.placement === "split-right" ? 1 : 0));
+  assert.deepEqual(handles.map((h) => h.placement), ["split-right", "split-down"]);
+  const [top, bottom] = handles;
+  const bottomSplit = [splitCall(a), splitCall(b)].find((argv) => flag(argv, "--direction") === "down");
+  assert.equal(bottomSplit?.[2], top.paneId);
+  assert.equal(bottom.parentPaneId, top.paneId);
+  assert.deepEqual(selector.slots, [top.paneId, bottom.paneId]);
+  assert.deepEqual((selector.reservedSlots ?? []).filter(Boolean), []);
+  assert.equal(selector.placed?.size ?? 0, 0);
+});
+
+test("auto placement takes the free column even with our agents open in background tabs", async (t) => {
   const { selector, a, b, ra, rb } = await twoClients(t);
   await ra.launch({ ...a.input, ...SCOUT, placement: "tab" });
   assert.equal(selector.owned.size, 1);
   const hb = await rb.launch({ ...b.input, ...PLANNER, placement: "auto" });
   assert.ok(b.fake.calls.some((c) => c.argv[1] === "split"));
   assert.equal(hb.placement, "split-right");
-  assert.equal(selector.selected, "pane-b");
+  assert.deepEqual(selector.slots, ["pane-b"]);
 });
 
-test("auto placement on a layout read before the selector moved a pane into the split: a tab", async (t) => {
+test("auto placement on a layout read before the selector moved a pane into the column: a tab", async (t) => {
   const { selector, b, rb } = await twoClients(t);
   b.fake.onCall = (call) => {
-    // A promotion takes the split while this launch reads the layout.
+    // A promotion moves an agent into the column while this launch reads the layout.
     if (call.argv[1] === "layout") selector.layoutEpoch = (selector.layoutEpoch ?? 0) + 1;
   };
   const hb = await rb.launch({ ...b.input, ...PLANNER, placement: "auto" });
   assert.equal(hb.placement, undefined);
   assert.ok(!b.fake.calls.some((c) => c.argv[1] === "split"));
-  assert.equal(selector.reservedSplit, undefined);
+  assert.deepEqual((selector.reservedSlots ?? []).filter(Boolean), []);
 });
 
-test("visible placement parks our agent shown beside the caller through its own runtime", async (t) => {
+test("visible placement with a free slot fills it; with both slots taken it parks the top agent through its own runtime", async (t) => {
   const { selector, a, b, ra, rb, movesA } = await twoClients(t);
   const ha = await ra.launch({ ...a.input, ...SCOUT, placement: "auto" });
-  b.fake.layout = { panes: [...b.fake.layout.panes, BESIDE] };
+  // pane-a (top) and another owned agent (bottom) fill the column.
+  selector.owned.set("pane-x", "other");
+  selector.slots = ["pane-a", "pane-x"];
+  b.fake.layout = { panes: [...b.fake.layout.panes, BESIDE, { ...BESIDE, pane_id: "pane-x" }] };
   const hb = await rb.launch({ ...b.input, ...PLANNER, placement: "visible" });
   assert.equal(movesA.length, 1);
   assert.ok(movesA[0].includes("--new-tab"));
-  assert.ok(b.fake.calls.some((c) => c.argv[1] === "split"));
-  assert.equal(hb.placement, "split-right");
-  assert.equal(selector.selected, "pane-b");
+  const split = splitCall(b);
+  assert.equal(split?.[2], "pane-x");
+  assert.equal(flag(split, "--direction"), "down");
+  assert.equal(hb.placement, "split-down");
+  // Queue rule: the bottom agent moved up, the new one is below it.
+  assert.deepEqual(selector.slots, ["pane-x", "pane-b"]);
   // The selector's control has the parked tab; the owner's older handle still works (recorded move).
   assert.equal(selector.controls?.get("pane-a")?.handle.tabId, "tab-parked");
   assert.equal((await ra.observe(ha)).kind, "active");
+
+  // A free slot: no park, the new agent goes below the shown one.
+  const g = await twoClients(t);
+  await g.ra.launch({ ...g.a.input, ...SCOUT, placement: "auto" });
+  g.b.fake.layout = { panes: [...g.b.fake.layout.panes, BESIDE] };
+  const hg = await g.rb.launch({ ...g.b.input, ...PLANNER, placement: "visible" });
+  assert.equal(g.movesA.length, 0);
+  assert.equal(hg.placement, "split-down");
+  assert.deepEqual(g.selector.slots, ["pane-a", "pane-b"]);
 });
 
 test("visible placement never splits a tab with another split or a zoomed caller", async (t) => {
@@ -2242,34 +2317,38 @@ test("visible placement never splits a tab with another split or a zoomed caller
     const h = await f.transport.launch({ ...f.input, ...PLANNER, placement: "visible" });
     assert.equal(h.placement, undefined);
     assert.ok(!f.fake.calls.some((c) => c.argv[1] === "split"));
-    assert.equal(f.config.selector!.reservedSplit, undefined);
-    assert.equal(f.config.selector!.selected, undefined);
+    assert.deepEqual((f.config.selector!.reservedSlots ?? []).filter(Boolean), []);
+    assert.deepEqual(f.config.selector!.slots ?? [], []);
   }
 });
 
 test("the pane selector shows another client's agent by moving it through that client's runtime", async (t) => {
   const { selector, a, ra } = await twoClients(t);
   const ha = await ra.launch({ ...a.input, ...SCOUT, placement: "tab" });
-  assert.equal(selector.selected, undefined);
+  assert.deepEqual(selector.slots ?? [], []);
   let tabA = "tab-x";
   a.fake.pane = () => ({ pane_id: "pane-a", tab_id: tabA, workspace_id: "workspace-1", terminal_id: a.fake.terminal });
+  const moves: string[][] = [];
   a.fake.onCall = (call) => {
     if (call.argv[1] !== "move") return;
+    moves.push(call.argv);
     tabA = "tab-1";
     return a.fake.result({ move_result: { changed: true } });
   };
   // The main process' selector reads the layout itself; the move goes through runtime A.
+  const master = { pane_id: "master-pane", tab_id: "tab-1", workspace_id: "workspace-1" };
   const view = new PaneSelector(selector, (args) => {
-    if (args[1] === "get" && args[2] === "master-pane")
-      return { pane: { pane_id: "master-pane", tab_id: "tab-1", workspace_id: "workspace-1" } };
+    if (args[1] === "get" && args[2] === "master-pane") return { pane: master };
     if (args[1] === "get") return { pane: { pane_id: args[2], tab_id: tabA, workspace_id: "workspace-1" } };
     if (args[1] === "layout")
-      return { layout: { panes: [{ pane_id: "master-pane", tab_id: "tab-1", workspace_id: "workspace-1" }] } };
+      return { layout: { panes: tabA === "tab-1" ? [master, { pane_id: "pane-a" }] : [master] } };
     throw new Error(`direct Herdr move not expected: ${args.join(" ")}`);
   }, () => "master-pane");
   assert.deepEqual(view.selectable(), ["pane-a"]);
   await view.select("pane-a");
-  assert.equal(selector.selected, "pane-a");
+  assert.deepEqual(selector.slots, ["pane-a"]);
+  assert.equal(flag(moves[0], "--split"), "right");
+  assert.equal(flag(moves[0], "--ratio"), String(Number((1 - Number(process.env.PI_SUBAGENT_COLUMN_RATIO ?? 0.4)).toFixed(4))));
   assert.equal(selector.controls?.get("pane-a")?.handle.tabId, "tab-1");
   assert.equal((await ra.observe(ha)).kind, "active");
 });

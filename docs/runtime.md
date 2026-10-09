@@ -325,7 +325,7 @@ shows it instead of the status and is never active (`presenceActive` is false). 
 attention color when a row waits, else blue when one is active, else amber.
 After a cold restart, observing a persisted handle of a live agent rebuilds its row from `boot.json`; a superseded
 handle (before `dispatch`) never repaints the row, and a closed agent is not resurrected.
-Rows are grouped by `display.group`; the agent shown beside the caller is marked `▶`.
+Rows are grouped by `display.group`; the agents shown in the column beside the caller are marked `▶`.
 
 ## Pane selector
 
@@ -336,15 +336,19 @@ One process-wide selector state (`selectorState()`, `Symbol.for("pi-subagents/pa
   handle and the `move` of the runtime that launched it. Observing a live agent registers it again (cold restart,
   `/reload`) and replaces the control's handle with a newer task's; `stopped`/`missing`/`changed`, `close` and
   `forget` remove it;
-- `placement: "auto"`: beside the caller (`split-right`) only for the first agent of a single-pane, unzoomed caller
-  tab with no other owned agent of that workspace; otherwise a tab;
-- `placement: "visible"`: beside the caller; an owned agent shown there is first parked in a new tab through its own
-  runtime; a caller tab with another (foreign) split, a zoomed caller or a split already reserved by a concurrent
-  launch gives a tab. The decision is a synchronous check-and-set on the layout read just before, so concurrent
-  launches never get two splits. The handle carries the effective placement (`split-right`, or none for a tab);
+- `placement: "auto"`: a free slot of the agent column right of the caller — the empty column (`split-right` of the
+  caller, `--ratio 1 − PI_SUBAGENT_COLUMN_RATIO`, default column 40%) or the bottom slot (`split-down` below the agent
+  shown alone, `--ratio 0.5`) — when the caller tab holds only the caller and at most one owned agent and is not
+  zoomed; otherwise a tab. Agents in background tabs do not matter;
+- `placement: "visible"`: like `auto`; with both slots taken by owned agents the top one is first parked in a new tab
+  through its own runtime and the new agent is split below the other one. A caller tab with another (foreign) split,
+  a zoomed caller or reserved slots give a tab. Each slot is a synchronous check-and-set on the layout read just
+  before (`reservedSlots`), so concurrent launches never create more than two agent panes: a bottom slot reserved
+  while the top slot's launch has not created its pane waits for it (`placedPane`, bounded) and splits it. The handle
+  carries the effective placement (`split-right`/`split-down` with `parentPaneId` the split pane, or none for a tab);
 - the pi-memo-subagents `/subagent` menu and Ctrl+Alt+X list this session's subagents and every other owned agent of the
-  caller's workspace, and move them through their controls (`PaneSelector.select`). Agents in other workspaces
-  (e.g. Herdr worktree spaces) are never moved.
+  caller's workspace, and move them through their controls (`PaneSelector.select`, `PaneSelector.cycle`, promotions);
+  `slots` holds the shown agents, top first. Agents in other workspaces (e.g. Herdr worktree spaces) are never moved.
 
 `RuntimeConfig.selector` replaces the shared state (tests).
 

@@ -35,7 +35,7 @@ test('/subagent without arguments selects a live child, not a model turn or sepa
   const oldVisible = paneSelector.visible;
   const oldSelect = paneSelector.select;
   let selected;
-  paneSelector.visible = () => 'test-pane';
+  paneSelector.visible = () => ['test-pane'];
   paneSelector.select = (id) => { selected = id; };
   const child = { id: 'selector-command-test', name: 'Worker test', surface: 'test-pane', startTime: Date.now(), lifecycle: createLifecycle(Date.now()) };
   __test__.runningSubagents.set(child.id, child);
@@ -70,7 +70,7 @@ test('an agent completing while the menu is open is not moved or relaunched', as
   const child = { id: 'completion-race-test', name: 'Finishing', surface: 'finished-pane', startTime: Date.now(), lifecycle: createLifecycle(Date.now()) };
   let moved = false;
   const notices = [];
-  paneSelector.visible = () => undefined;
+  paneSelector.visible = () => [];
   paneSelector.select = () => { moved = true; };
   __test__.runningSubagents.set(child.id, child);
   try {
@@ -85,29 +85,32 @@ test('an agent completing while the menu is open is not moved or relaunched', as
   }
 });
 
-test('Ctrl+Alt+X cycles to the next open agent without a menu', async () => {
+test('Ctrl+Alt+X rotates the column over the open agents in menu order, without a menu', async () => {
   const f = fixture();
-  const oldVisible = paneSelector.visible;
-  const oldSelect = paneSelector.select;
+  const oldCycle = paneSelector.cycle;
   const a = { id: 'cycle-test-a', name: 'Cycle A', surface: 'cycle-pane-a', startTime: Date.now(), lifecycle: createLifecycle(Date.now()) };
   const b = { id: 'cycle-test-b', name: 'Cycle B', surface: 'cycle-pane-b', startTime: Date.now(), lifecycle: createLifecycle(Date.now()) };
-  let visible;
-  const selected = [];
-  paneSelector.visible = () => visible;
-  paneSelector.select = (id) => { selected.push(id); visible = id; };
+  const orders = [];
+  const notices = [];
+  let result = 'swapped';
+  paneSelector.cycle = async (order) => { orders.push(order); return result; };
   __test__.runningSubagents.set(a.id, a);
   __test__.runningSubagents.set(b.id, b);
-  const ctx = { mode: 'tui', ui: { select: async () => { throw new Error('no menu expected'); }, notify(message) { throw new Error(message); } } };
+  const ctx = { mode: 'tui', ui: { select: async () => { throw new Error('no menu expected'); }, notify(message) { notices.push(message); } } };
   try {
     const cycle = f.shortcuts.get('ctrl+alt+x').handler;
     await cycle(ctx);
+    assert.deepEqual(orders, [[a.surface, b.surface]]);
+    assert.ok(paneSelector.state.owned.has(a.surface) && paneSelector.state.owned.has(b.surface));
+    assert.deepEqual(notices, []);
+    __test__.runningSubagents.delete(b.id);
+    result = 'only';
     await cycle(ctx);
-    await cycle(ctx);
-    assert.deepEqual(selected, [a.surface, b.surface, a.surface]);
+    assert.deepEqual(orders[1], [a.surface]);
+    assert.match(notices[0], /Cycle A .* is the only open agent/);
     assert.equal(f.sent.length, 0);
   } finally {
-    paneSelector.visible = oldVisible;
-    paneSelector.select = oldSelect;
+    paneSelector.cycle = oldCycle;
     __test__.runningSubagents.delete(a.id);
     __test__.runningSubagents.delete(b.id);
     paneSelector.forget(a.surface);
@@ -115,7 +118,31 @@ test('Ctrl+Alt+X cycles to the next open agent without a menu', async () => {
   }
 });
 
-test('visible subagent finishes: the next one in menu order is promoted, selected and its handle synced', async () => {
+test('the /subagent menu marks both shown agents with ▶', async () => {
+  const f = fixture();
+  const oldVisible = paneSelector.visible;
+  const oldSelect = paneSelector.select;
+  const agents = ['a', 'b', 'c'].map((key) => ({ id: `menu-test-${key}`, name: `Menu ${key}`, surface: `menu-pane-${key}`, startTime: Date.now(), lifecycle: createLifecycle(Date.now()) }));
+  paneSelector.visible = () => [agents[0].surface, agents[1].surface];
+  let selected;
+  paneSelector.select = (id) => { selected = id; };
+  for (const agent of agents) __test__.runningSubagents.set(agent.id, agent);
+  try {
+    let shown;
+    await f.commands.get('subagent').handler('', { mode: 'tui', ui: { select: async (_, labels) => { shown = labels; return labels[2]; }, notify() {} } });
+    assert.deepEqual(shown.map((label) => label.startsWith('▶ ')), [true, true, false]);
+    assert.equal(selected, agents[2].surface);
+  } finally {
+    paneSelector.visible = oldVisible;
+    paneSelector.select = oldSelect;
+    for (const agent of agents) {
+      __test__.runningSubagents.delete(agent.id);
+      paneSelector.forget(agent.surface);
+    }
+  }
+});
+
+test('shown subagent finishes: the next one in menu order is promoted into its slot and its handle synced', async () => {
   fixture();
   const state = paneSelector.state;
   const a = { id: 'promote-test-a', name: 'Promote A', surface: 'promote-pane-a', startTime: Date.now(), lifecycle: createLifecycle(Date.now()), handle: { paneId: 'promote-pane-a', protocolDir: '/tmp/pa', taskToken: 'ta', tabId: 'main', workspaceId: 'w1' } };
@@ -140,13 +167,13 @@ test('visible subagent finishes: the next one in menu order is promoted, selecte
       move: async (h, to) => { panes.get(h.paneId).tab_id = to.split.tab; return { ...h, tabId: to.split.tab }; },
     });
   }
-  state.selected = a.surface;
+  state.slots = [a.surface];
   try {
     // The runtime forgets the finished agent (still listed in the menu), then closes its pane.
     paneSelector.forget(a.surface);
     panes.delete(a.surface);
     await view.promoteVacated();
-    assert.equal(state.selected, b.surface);
+    assert.deepEqual(state.slots, [b.surface]);
     assert.equal(panes.get(b.surface).tab_id, 'main');
     assert.equal(panes.get(c.surface).tab_id, 'bg2');
     assert.equal(b.handle.tabId, 'main'); // syncSelectorHandles ran after the promotion.
@@ -157,6 +184,6 @@ test('visible subagent finishes: the next one in menu order is promoted, selecte
       state.owned.delete(agent.surface);
       state.controls.delete(agent.surface);
     }
-    state.selected = undefined;
+    state.slots = [];
   }
 });
