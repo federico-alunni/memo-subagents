@@ -18,9 +18,9 @@ test("the package installed by pi wins over the dependency copy, so pi loads the
   assert.equal(resolveQuestionExtension({ PI_CODING_AGENT_DIR: agent }), expected);
 });
 
-test("without an installed package the dependency is used", () => {
+test("without an installed package there is no question tool to load", () => {
   const agent = mkdtempSync(join(tmpdir(), "memo-question-empty-"));
-  const found = resolveQuestionExtension({ PI_CODING_AGENT_DIR: agent });
-  // Either the developer's own installed package or the node_modules dependency: always the real question.ts.
-  assert.ok(found?.endsWith(join("extensions", "question.ts")), String(found));
+  // Nothing is bundled: the user who did not install pi-memo-question gets no question extension.
+  assert.equal(installedQuestionExtension({ PI_CODING_AGENT_DIR: agent, HOME: agent }), undefined);
+  assert.equal(resolveQuestionExtension({ PI_CODING_AGENT_DIR: agent, HOME: agent }), undefined);
 });

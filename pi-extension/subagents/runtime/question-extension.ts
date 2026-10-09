@@ -19,7 +19,8 @@ function real(path: string): string | undefined {
 }
 
 function agentDirs(env: NodeJS.ProcessEnv): string[] {
-  return [...new Set([env.PI_CODING_AGENT_DIR, join(homedir(), ".pi", "agent")].filter((d): d is string => !!d))];
+  const home = env.HOME ?? homedir();
+  return [...new Set([env.PI_CODING_AGENT_DIR, join(home, ".pi", "agent")].filter((d): d is string => !!d))];
 }
 
 /** Package sources of `<agentDir>/settings.json` (strings or `{ source }` entries). */
