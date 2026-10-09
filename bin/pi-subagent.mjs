@@ -4,7 +4,7 @@
 
 import { SubagentClient } from "../pi-extension/subagents/client.ts";
 
-function usage(): never {
+function usage() {
   console.error(`Usage: pi-subagent <command> [args]
 Commands:
   spawn --json '<params-json>'
@@ -20,7 +20,7 @@ async function main() {
   const cmd = args[0];
   if (!cmd || cmd === "--help" || cmd === "-h") usage();
 
-  let client: SubagentClient;
+  let client;
   try {
     client = new SubagentClient();
   } catch (err) {
