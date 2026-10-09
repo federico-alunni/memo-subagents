@@ -66,6 +66,7 @@ export function parseGrid(value: unknown): GridShape | undefined {
 }
 
 export function gridCapacity(grid: GridShape): number {
+  if (grid.cols === 2 && grid.rows === 2) return 3;
   return grid.cols * grid.rows;
 }
 
@@ -107,6 +108,11 @@ export function slotSplit(
   parent: PaneRecord,
 ): { direction: "right" | "down"; from: number | "main"; ratio: number } {
   if (index === 0) return { direction: "right", from: "main", ratio: columnSplitRatio() };
+  // 2×2: slot 0 (lead/planner) stays full-width across the top half; slots 1 & 2 share the bottom half (half-width each)
+  if (grid.cols === 2 && grid.rows === 2) {
+    if (index === 1) return { direction: "down", from: 0, ratio: 0.5 };
+    if (index === 2) return { direction: "right", from: 1, ratio: 0.5 };
+  }
   const row = Math.floor(index / grid.cols);
   const col = index % grid.cols;
   if (row === 0) return { direction: "right", from: index - 1, ratio: Number((1 / (grid.cols - col + 1)).toFixed(4)) };
@@ -509,11 +515,9 @@ export function planColumn(
     }
     return steps;
   }
-  const prefix = (a: string[], b: string[]) => a.every((id, index) => b[index] === id);
-  if (!prefix(from, desired)) {
-    const keep = prefix(desired, from) ? desired.length : 0;
-    for (const id of [...from].reverse()) if (from.indexOf(id) >= keep) park(id);
-  }
+  let common = 0;
+  while (common < from.length && common < desired.length && from[common] === desired[common]) common++;
+  for (const id of [...from].slice(common).reverse()) park(id);
   while (column.length < desired.length) {
     const paneId = desired[column.length];
     const to = slotTarget(parent, grid, column, column.length);
@@ -685,7 +689,7 @@ export class PaneSelector {
    * with both slots taken the top agent is parked in a tab, the bottom one moves up and `paneId` takes the
    * bottom slot. `move` overrides every move (tests); otherwise each pane moves through its runtime control.
    */
-  async select(paneId: string, move?: PaneMover): Promise<void> {
+  async select(paneId: string, move?: PaneMover, targetSlot?: number): Promise<void> {
     if (!this.state.owned.has(paneId)) throw new Error("Only this session's agent panes can be selected");
     const parent = this.parent();
     const target: PaneRecord = this.run(["pane", "get", paneId]).pane;
@@ -695,8 +699,20 @@ export class PaneSelector {
       this.state.slots = shown;
       return;
     }
-    const capacity = gridCapacity(selectorGrid(this.state));
-    const desired = shown.length < capacity ? [...shown, paneId] : [...shown.slice(1), paneId];
+    const grid = selectorGrid(this.state);
+    const capacity = gridCapacity(grid);
+    let desired: string[];
+    if (targetSlot !== undefined && targetSlot < capacity && targetSlot > 0) {
+      desired = [...shown];
+      desired[targetSlot] = paneId;
+    } else if (shown.length < capacity) {
+      desired = [...shown, paneId];
+    } else if (grid.cols === 2 && grid.rows === 2 && shown.length >= 2) {
+      // 2×2: keep lead in slot 0; replace the oldest helper slot
+      desired = [shown[0], ...shown.slice(2), paneId];
+    } else {
+      desired = [...shown.slice(1), paneId];
+    }
     await this.rearrange(parent, shown, desired, this.mover(move));
   }
 
@@ -712,7 +728,8 @@ export class PaneSelector {
       (anchor === undefined ? order : after(order, anchor)).find(
         (id) => !exclude.includes(id) && this.eligible(id, parent),
       );
-    const capacity = gridCapacity(selectorGrid(this.state));
+    const grid = selectorGrid(this.state);
+    const capacity = gridCapacity(grid);
     let desired: string[];
     let result: CycleResult;
     if (shown.length < capacity) {
@@ -725,9 +742,26 @@ export class PaneSelector {
       }
       if (desired.length === shown.length) return shown.length === 0 ? "none" : "only";
       result = "filled";
+    } else if (grid.cols === 2 && grid.rows === 2 && shown.length >= 1) {
+      // 2×2: slot 0 (lead) is pinned. Cycle rotates only the helper slots (lanes).
+      const helpers = order.filter((id) => id !== shown[0] && this.eligible(id, parent));
+      if (helpers.length <= 1) return "only";
+      const currentHelpers = shown.slice(1);
+      const nextHelper = (anchor: string | undefined, exclude: string[]) =>
+        (anchor === undefined ? helpers : after(helpers, anchor)).find((id) => !exclude.includes(id));
+      if (helpers.length <= currentHelpers.length) {
+        // Swap helper slots (e.g. [cA, cB] -> [cB, cA])
+        desired = [shown[0], ...[...currentHelpers].reverse()];
+        result = "swapped";
+      } else {
+        // Rotate queue through helpers (e.g. [cA, cB] -> [cB, rA] -> [rA, rB] -> [rB, cA])
+        const incoming = nextHelper(currentHelpers.at(-1), currentHelpers);
+        const rotated = incoming ? [...currentHelpers.slice(1), incoming] : [...currentHelpers.slice(1), currentHelpers[0]];
+        desired = [shown[0], ...rotated];
+        result = incoming ? "rotated" : "swapped";
+      }
     } else {
-      // Full: the first agent leaves (to a tab, or to the end when no other agent is open), the others move up
-      // and the next agent in menu order after the last one comes in.
+      // Full: the first agent leaves, others move up, next in menu order comes in.
       const incoming = next(shown.at(-1), shown);
       desired = incoming ? [...shown.slice(1), incoming] : [...shown.slice(1), shown[0]];
       result = incoming ? "rotated" : "swapped";

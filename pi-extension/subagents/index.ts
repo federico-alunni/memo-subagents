@@ -3040,6 +3040,13 @@ async function launchRequested(parent: RunningSubagent, request: SpawnRequest, p
     if (column.rootId === parent.id) parent.column ??= { rootId: parent.id };
     rebalanceColumn(column.rootId);
   }
+  // A helper in a grid slot that delegates work yields its slot to its child while waiting.
+  if (parent.surface && !wantsWorktreeSpace(params as any)) {
+    const parentSlot = paneSelector.state.slots?.indexOf(parent.surface) ?? -1;
+    if (parentSlot > 0) {
+      void paneSelector.select(running.surface, undefined, parentSlot).catch(() => {});
+    }
+  }
   startSupervision(running, pi);
   void syncMirrors();
   return { id: running.id };

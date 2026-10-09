@@ -736,19 +736,19 @@ test('grid: "CxR" with sides 1..4; PI_SUBAGENT_GRID, else 1×2; a live agent can
   assert.equal(gridCapacity({ cols: 3, rows: 2 }), 6);
 });
 
-test('grid: slots fill row by row; the first row splits right, the next rows split the slot above down', () => {
+test('grid: 2×2 lead stays top (full width); slots 1 and 2 take bottom half side by side', () => {
   const parent = { pane_id: 'main', tab_id: 't', workspace_id: 'w' };
   const g = { cols: 2, rows: 2 };
+  assert.equal(gridCapacity(g), 3);
   assert.deepEqual(slotSplit(0, g, parent), { direction: 'right', from: 'main', ratio: 0.6 });
-  assert.deepEqual(slotSplit(1, g, parent), { direction: 'right', from: 0, ratio: 0.5 });
-  assert.deepEqual(slotSplit(2, g, parent), { direction: 'down', from: 0, ratio: 0.5 });
-  assert.deepEqual(slotSplit(3, g, parent), { direction: 'down', from: 1, ratio: 0.5 });
+  assert.deepEqual(slotSplit(1, g, parent), { direction: 'down', from: 0, ratio: 0.5 });
+  assert.deepEqual(slotSplit(2, g, parent), { direction: 'right', from: 1, ratio: 0.5 });
   const three = { cols: 1, rows: 3 };
   assert.deepEqual(slotSplit(1, three, parent), { direction: 'down', from: 0, ratio: 0.3333 });
   assert.deepEqual(slotSplit(2, three, parent), { direction: 'down', from: 1, ratio: 0.5 });
 });
 
-test('grid: 2×2 launches take the four cells, the fifth goes to a tab; concurrent ones wait for the cell they split', () => {
+test('grid: 2×2 launches take the three cells, the fourth goes to a tab; concurrent ones wait for the cell they split', () => {
   const parent = { pane_id: 'main', tab_id: 't', workspace_id: 'w' };
   const state = { owned: new Map(), gridHint: () => ({ cols: 2, rows: 2 }) };
   const shown = [];
@@ -765,28 +765,30 @@ test('grid: 2×2 launches take the four cells, the fifth goes to a tab; concurre
     return ['tab'];
   };
   assert.deepEqual(launch('a'), ['split-right', 'main']);
-  assert.deepEqual(launch('b'), ['split-right', 'a']);
-  assert.deepEqual(launch('c'), ['split-down', 'a']);
-  assert.deepEqual(launch('d'), ['split-down', 'b']);
-  assert.deepEqual(launch('e'), ['tab']);
-  // Concurrent: the second cell splits the first one, which its launch has not created yet.
+  assert.deepEqual(launch('b'), ['split-down', 'a']);
+  assert.deepEqual(launch('c'), ['split-right', 'b']);
+  assert.deepEqual(launch('d'), ['tab']);
+  // Concurrent: cell b splits a down, cell c splits b right.
   const fresh = { owned: new Map(), gridHint: () => ({ cols: 2, rows: 2 }) };
   const empty = { panes: [{ pane_id: 'main' }] };
   const first = reservePlacement(fresh, parent, empty, 'auto');
   const second = reservePlacement(fresh, parent, empty, 'auto');
+  const third = reservePlacement(fresh, parent, empty, 'auto');
   assert.deepEqual([first.slot, first.targetPane], [0, 'main']);
-  assert.deepEqual([second.slot, second.after, second.placement], [1, first.token, 'split-right']);
+  assert.deepEqual([second.slot, second.after, second.placement], [1, first.token, 'split-down']);
+  assert.deepEqual([third.slot, third.after, third.placement], [2, second.token, 'split-right']);
 });
 
-test('grid: rearranging a wider grid appends, trims from the end, or rebuilds row by row', () => {
+test('grid: rearranging a wider grid appends, trims from the end, or rebuilds with common prefix', () => {
   const parent = { pane_id: 'main', tab_id: 't', workspace_id: 'w' };
   const g = { cols: 2, rows: 2 };
   const label = (id) => id;
   const summary = (steps) => steps.map((s) => `${s.paneId}:${'newTab' in s.to ? 'tab' : `${s.to.split.direction}@${s.to.split.targetPane}`}`);
-  assert.deepEqual(summary(planColumn(parent, ['a', 'b'], ['a', 'b', 'c'], label, g)), ['c:down@a']);
+  assert.deepEqual(summary(planColumn(parent, ['a', 'b'], ['a', 'b', 'c'], label, g)), ['c:right@b']);
   assert.deepEqual(summary(planColumn(parent, ['a', 'b', 'c'], ['a', 'b'], label, g)), ['c:tab']);
-  assert.deepEqual(summary(planColumn(parent, ['a', 'b', 'c', 'd'], ['b', 'c', 'd', 'e'], label, g)), [
-    'd:tab', 'c:tab', 'b:tab', 'a:tab', 'b:right@main', 'c:right@b', 'd:down@b', 'e:down@c',
+  // Lead 'a' is preserved: only helper slots are parked and rebuilt
+  assert.deepEqual(summary(planColumn(parent, ['a', 'b', 'c'], ['a', 'd', 'e'], label, g)), [
+    'c:tab', 'b:tab', 'd:down@a', 'e:right@d',
   ]);
   // One column of three: the agents in order stay, a new one is inserted below its predecessor.
   const col = { cols: 1, rows: 3 };
@@ -802,7 +804,79 @@ test('grid: a cell below waits for the previous cell of the row above (creation 
   const b = reservePlacement(state, parent, empty, 'auto');
   const c = reservePlacement(state, parent, empty, 'auto');
   assert.equal(b.after, a.token);
-  assert.equal(b.waitFor, undefined); // it splits the previous cell: `after` already orders it
-  assert.equal(c.after, a.token); // c splits a down...
-  assert.equal(c.waitFor, b.token); // ...but only once b completed the first row
+  assert.equal(b.waitFor, undefined); // it splits a down: `after` already orders it
+  assert.equal(c.after, b.token); // c splits b right
+  assert.equal(c.waitFor, undefined);
+});
+
+test('grid: 2×2 cycle keeps lead in slot 0 and rotates the helper slots', async () => {
+  const parent = { pane_id: 'main', tab_id: 't', workspace_id: 'w' };
+  const state = {
+    owned: new Map([['lead', 'Lead'], ['cA', 'Challenger A'], ['cB', 'Challenger B'], ['rA', 'Researcher A'], ['rB', 'Researcher B']]),
+    slots: ['lead', 'cA', 'cB'],
+    gridHint: () => ({ cols: 2, rows: 2 }),
+  };
+  let visible = ['lead', 'cA', 'cB'];
+  const selector = new PaneSelector(state, (args) => {
+    if (args[0] === 'pane' && args[1] === 'get') return { pane: { pane_id: args[2], workspace_id: 'w' } };
+    if (args[0] === 'pane' && args[1] === 'layout') return { layout: { panes: [{ pane_id: 'main' }, ...visible.map(id => ({ pane_id: id }))] } };
+    return {};
+  }, () => 'main');
+  const mover = async (paneId, to) => {
+    if ('newTab' in to) visible = visible.filter(id => id !== paneId);
+    else visible = [...visible.filter(id => id !== paneId), paneId];
+  };
+
+  const order = ['lead', 'cA', 'cB', 'rA', 'rB'];
+  // Cycle 1: [cA, cB] -> [cB, rA]
+  const res1 = await selector.cycle(order, mover);
+  assert.equal(res1, 'rotated');
+  assert.deepEqual(state.slots, ['lead', 'cB', 'rA']);
+
+  // Cycle 2: [cB, rA] -> [rA, rB] (both researchers!)
+  const res2 = await selector.cycle(order, mover);
+  assert.equal(res2, 'rotated');
+  assert.deepEqual(state.slots, ['lead', 'rA', 'rB']);
+
+  // Lead is ALWAYS at index 0
+  assert.equal(state.slots[0], 'lead');
+});
+
+test('grid: selecting a delegated child into its parent helper slot swaps lane; finishing promotes parent back', async () => {
+  const parent = { pane_id: 'main', tab_id: 't', workspace_id: 'w' };
+  const state = {
+    owned: new Map([['lead', 'Lead'], ['cA', 'Challenger A'], ['cB', 'Challenger B'], ['rA', 'Researcher A']]),
+    slots: ['lead', 'cA', 'cB'],
+    gridHint: () => ({ cols: 2, rows: 2 }),
+  };
+  let visible = ['lead', 'cA', 'cB'];
+  const alive = new Set(['main', 'lead', 'cA', 'cB', 'rA']);
+  const selector = new PaneSelector(state, (args) => {
+    if (args[0] === 'pane' && args[1] === 'get') {
+      if (!alive.has(args[2])) throw { herdrCode: 'pane_not_found', message: 'not found' };
+      return { pane: { pane_id: args[2], workspace_id: 'w' } };
+    }
+    if (args[0] === 'pane' && args[1] === 'layout') return { layout: { panes: [{ pane_id: 'main' }, ...visible.map(id => ({ pane_id: id }))] } };
+    return {};
+  }, () => 'main', { pollMs: 5, timeoutMs: 50 });
+  const mover = async (paneId, to) => {
+    if ('newTab' in to) visible = visible.filter(id => id !== paneId);
+    else visible = [...visible.filter(id => id !== paneId), paneId];
+  };
+
+  // rA is selected into slot 1 (Lane 1, where cA was)
+  await selector.select('rA', mover, 1);
+  assert.deepEqual(state.slots, ['lead', 'rA', 'cB']);
+
+  // rA finishes: closed in Herdr, removed from alive, forgotten from selector
+  alive.delete('rA');
+  visible = visible.filter(id => id !== 'rA');
+  selector.forget('rA');
+  assert.equal(state.vacated.length, 1);
+  assert.equal(state.vacated[0].slot, 1);
+
+  // promote restores cA back into slot 1
+  const promoted = await selector.promote(state.vacated[0], mover);
+  assert.equal(promoted, 'cA');
+  assert.deepEqual(state.slots, ['lead', 'cA', 'cB']);
 });
