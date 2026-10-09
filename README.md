@@ -10,7 +10,7 @@ pi-memo-subagents is a derivative of [pi-herdr-subagents](https://github.com/0xR
 
 - `subagent({ name, task, agent?, … })` returns immediately; the child runs in its own Herdr pane and its result is **steered back** into the main session when it finishes (`subagent_result`), or when it asks for help (`caller_ping` → `subagent_ping`).
 - No bundled agents and no `/plan` command: only global (`$PI_CODING_AGENT_DIR/agents`, default `~/.pi/agent/agents`) and project (`.pi/agents`) definitions are discovered. Project definitions override global ones with the same name.
-- Live widget above the editor with lifecycle state (`starting`, `active`, `waiting`, `stalled`, `interrupted`, …), model/thinking, the selected pane (`▶`) and the worktree branch (`⎇`). A child waiting for the user shows `❓ question` / `❓ approval` with its duration, is counted as `question` (not `active`) and its Herdr tab is `blocked`; the parent agent is not notified.
+- Live widget above the editor with lifecycle state (`starting`, `active`, `waiting`, `stalled`, `interrupted`, …), model/thinking, the shown panes (`▶`) and the worktree branch (`⎇`). A child waiting for the user shows `❓ question` / `❓ approval` with its duration, is counted as `question` (not `active`) and its Herdr tab is `blocked`; the parent agent is not notified.
 - Every child is launched and supervised by the package's agent runtime (`pi-memo-subagents/runtime`): the child's pane, shell, process and session are identified exactly, its end is recorded by the child itself (`subagent_done`, automatic exit after a normal run, `caller_ping`, or the user quitting pi) and its pane is closed only when that end is proven. Stall detection, interrupt, resume and reload survival work as before, with these differences:
   - a child is never force-closed: when the parent session quits, settled idle children are stopped and closed, busy ones keep their pane;
   - a child that ends without an orderly exit (crash, kill) is reported as an error, not as a success;
@@ -43,7 +43,7 @@ For a profile launched with `pi -ne` (packages disabled), load it explicitly wit
 
 ## Herdr UX
 
-The default surface is `selector` (`PI_SUBAGENT_SURFACE`): a child opens a half-width split on the right whenever it is free, further children run in background tabs of the same workspace; when the visible child finishes, the next open agent in menu order is moved into the split (same pane, no restart). `/subagent` without arguments picks which open child is shown on the right without restarting anything; `Ctrl+Alt+X` cycles to the next one. `PI_SUBAGENT_SURFACE=split` or `tab` restore the upstream behaviours. Details: [docs/pane-selector.md](docs/pane-selector.md).
+The default surface is `selector` (`PI_SUBAGENT_SURFACE`): agents are shown in a column right of the main pane (40% of the tab, `PI_SUBAGENT_COLUMN_RATIO`), one agent filling it or two stacked top/bottom; further children run in background tabs of the same workspace. When a shown child finishes, the next open agent in menu order takes its slot (same pane, no restart). `/subagent` without arguments picks an open child for the column (with both slots taken: the top one goes to a tab, the bottom one moves up, the chosen one goes below); `Ctrl+Alt+X` swaps the two shown agents, or rotates them through the open agents as a queue. `PI_SUBAGENT_SURFACE=split` or `tab` restore the upstream behaviours. Details: [docs/pane-selector.md](docs/pane-selector.md).
 
 ## Tools and commands
 
@@ -121,7 +121,7 @@ Optional. Put it in **`~/.pi/agent/pi-memo-subagents.json`** (`$PI_CODING_AGENT_
 - `models`: default model per agent name (tool argument → frontmatter → `models.agents` → `models.default` → parent).
 - `worktrees` (optional, both keys optional): `root` puts worktrees under `<root>/<repoName>/`; `branchPrefix` changes the generated branch prefix. Unknown keys are rejected.
 
-Environment: `PI_SUBAGENT_SURFACE` (`selector` | `split` | `tab`) and the host composition variables `PI_MEMO_SUBAGENTS_CHILD_EXTENSIONS` / `PI_MEMO_SUBAGENTS_CHILD_ENV` ([docs/child-host.md](docs/child-host.md)).
+Environment: `PI_SUBAGENT_SURFACE` (`selector` | `split` | `tab`), `PI_SUBAGENT_COLUMN_RATIO` (width of the selector's agent column, a number strictly between 0 and 1, default `0.4`) and the host composition variables `PI_MEMO_SUBAGENTS_CHILD_EXTENSIONS` / `PI_MEMO_SUBAGENTS_CHILD_ENV` ([docs/child-host.md](docs/child-host.md)).
 
 ## Development
 

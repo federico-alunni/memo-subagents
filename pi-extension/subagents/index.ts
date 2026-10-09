@@ -20,7 +20,7 @@ import {
   setPaneTask,
 } from "./terminal.ts";
 import type { CompletionResult } from "./completion.ts";
-import { paneSelector } from "./pane-selector.ts";
+import { isShown, paneSelector } from "./pane-selector.ts";
 import { randomBytes, randomUUID } from "node:crypto";
 import {
   buildAuthenticatedModelCatalog,
@@ -889,7 +889,7 @@ function widgetHeader(counts: RowCount[]): { info: string; accent: string } {
 /** One runtime agent row: elapsed, label, model|thinking · status. */
 function presenceRowLine(entry: PresenceEntry, width: number, accent: string, now: number): string {
   const elapsed = formatElapsedMMSS(entry.startedAt, now);
-  const selected = entry.paneId && paneSelector.state.selected === entry.paneId ? "▶" : " ";
+  const selected = isShown(paneSelector.state, entry.paneId) ? "▶" : " ";
   const left = ` ${selected} ${elapsed}  ${entry.label} `;
   const modelId = entry.model.includes("/") ? entry.model.slice(entry.model.indexOf("/") + 1) : entry.model;
   return borderLine(left, ` ${modelId}|${entry.thinking} · ${presenceStatus(entry, now)} `, width, accent);
@@ -951,7 +951,7 @@ function renderSubagentWidgetLines(
     const elapsed = formatElapsedMMSS(agent.startTime, projection.runtimeEndedAt ?? now);
     const agentTag = agent.agent ? ` (${agent.agent})` : "";
     const worktreeTag = agent.worktree ? ` ⎇ ${agent.worktree.branch}` : "";
-    const selected = paneSelector.state.selected === agent.surface ? "▶" : " ";
+    const selected = isShown(paneSelector.state, agent.surface) ? "▶" : " ";
     const left = ` ${selected} ${elapsed}  ${agent.name}${agentTag}${worktreeTag} `;
     const runtimeTag = agent.runtimePlan
       ? `${agent.runtimePlan.modelId}|${agent.runtimePlan.thinking} · `
@@ -2964,7 +2964,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
   // User-only layout selector: no model turn and no changes to child lifecycle. Lists this session's
   // subagents and the other runtime agents of this process beside the main pane (e.g. Issue Round).
-  // `cycle`: no menu, show the agent after the visible one (wrapping around; the first when none is visible).
+  // Up to two agents are shown, stacked in the column right of the main pane.
+  // `cycle`: no menu; a free slot takes the next open agent, two shown agents swap when no other is open,
+  // otherwise they rotate as a queue (top → tab, bottom → top, next in menu order → bottom).
   const selectSubagentView = async (args: string, ctx: ExtensionContext, cycle = false) => {
     if (ctx.mode !== "tui" || !isTerminalAvailable()) {
       ctx.ui.notify("Subagent view requires Pi running interactively inside Herdr", "warning");
@@ -2976,6 +2978,18 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       return;
     }
     try {
+      if (cycle && !args.trim()) {
+        // This session's open subagents are ours to show (also after a reload).
+        for (const choice of choices)
+          if (choice.running && runningSubagents.get(choice.running.id) === choice.running)
+            paneSelector.state.owned.set(choice.paneId, choice.name);
+        const result = await paneSelector.cycle(choices.map((choice) => choice.paneId));
+        if (result === "only") ctx.ui.notify(`${choices[0].label} is the only open agent`, "info");
+        else if (result === "none") ctx.ui.notify("No open agent can be shown beside the main pane", "info");
+        syncSelectorHandles();
+        updateWidget();
+        return;
+      }
       const visible = paneSelector.visible();
       let chosen: SelectorChoice | undefined;
       const query = args.trim();
@@ -2986,16 +3000,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           return;
         }
         chosen = matches[0];
-      } else if (cycle) {
-        const current = choices.findIndex((choice) => choice.paneId === visible);
-        if (current !== -1 && choices.length === 1) {
-          ctx.ui.notify(`${choices[0].label} is the only open agent`, "info");
-          return;
-        }
-        chosen = choices[(current + 1) % choices.length];
       } else {
-        const labels = choices.map((choice) => `${choice.paneId === visible ? "▶ " : "  "}${choice.label}`);
-        const selected = await ctx.ui.select("Subagents — choose the terminal shown on the right", labels);
+        const labels = choices.map((choice) => `${visible.includes(choice.paneId) ? "▶ " : "  "}${choice.label}`);
+        const selected = await ctx.ui.select("Subagents — choose a terminal for the right column", labels);
         if (!selected) return;
         chosen = choices[labels.indexOf(selected)];
       }
@@ -3015,7 +3022,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     }
   };
   pi.registerShortcut("ctrl+alt+x", {
-    description: "Cycle the visible subagent terminal",
+    description: "Rotate the subagent terminals shown in the right column",
     handler: (ctx) => selectSubagentView("", ctx, true),
   });
 
