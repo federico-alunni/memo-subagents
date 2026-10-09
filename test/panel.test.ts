@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it, test } from "node:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { buildSlotPanelData, isPanelData, markSelected, renderPanel } from "../pi-extension/subagents/runtime/panel.ts";
+import { buildSlotPanelData, enrichPanel, isPanelData, markSelected, renderPanel } from "../pi-extension/subagents/runtime/panel.ts";
 import type { PanelData } from "../pi-extension/subagents/runtime/panel.ts";
 import { paletteTheme, stripAnsi, visibleWidth } from "../pi-extension/subagents/runtime/mirror-view.ts";
 import type { MirrorTheme } from "../pi-extension/subagents/runtime/mirror-view.ts";
@@ -290,4 +290,16 @@ describe("widget surfaces and supplied panels", () => {
       assert.equal(api.PANEL_EVENT, "subagents:panel");
     });
   });
+});
+
+test("a row of a subagent waiting for the user shows `?` and its waiting text", () => {
+  const data: PanelData = {
+    rows: [{ icon: "◐", iconColor: "accent", label: "planner", text: "scrive il piano", waitingText: "aspetta una tua risposta", subagent: "plan-x" }],
+  };
+  const waiting = enrichPanel(data, [{ name: "plan-x", lifecycle: { turn: { kind: "blocked", stateDurationSince: 0 } } }], 1000);
+  assert.equal(waiting.rows![0].icon, "?");
+  assert.equal(waiting.rows![0].text, "aspetta una tua risposta");
+  const working = enrichPanel(data, [{ name: "plan-x", lifecycle: { turn: { kind: "active" } } }], 1000);
+  assert.equal(working.rows![0].icon, "◐");
+  assert.equal(working.rows![0].text, "scrive il piano");
 });

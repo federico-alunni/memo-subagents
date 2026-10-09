@@ -40,7 +40,8 @@ interface PanelData {
   detail?: { branch?: string; status?: string }; // row under the grid
   hint?: string;                   // right-aligned on the detail row
 }
-interface PanelRow { icon: string; iconColor: Color; label: string; text: string; extra?: string; subagent?: string }
+interface PanelRow { icon: string; iconColor: Color; label: string; text: string; extra?: string; subagent?: string;
+  waitingText?: string } // shown instead of text while that subagent waits for the user
 interface PanelColumn {
   key: string; header: string;     // header glyph, e.g. "B"
   legend?: string;                 // e.g. "build"; columns without it stay out of the legend

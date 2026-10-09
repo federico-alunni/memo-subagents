@@ -62,6 +62,8 @@ export interface PanelRow {
   extra?: string;
   /** Name of the subagent this row stands for (its own row is then left out). */
   subagent?: string;
+  /** Text shown instead of `text` while that subagent waits for the user (e.g. `aspetta una tua risposta`). */
+  waitingText?: string;
 }
 
 export interface PanelLegendEntry {
@@ -436,7 +438,8 @@ export function enrichPanel(data: PanelData, agents: PanelAgent[], now = Date.no
     if (!agent) return entry;
     const state = agentState(agent, now);
     const icon = state.dot === "warning" ? "?" : state.dot === "error" ? "⚠" : state.dot === "success" ? "✓" : "◐";
-    return { ...entry, icon, iconColor: state.dot === "muted" ? "muted" : state.dot };
+    const text = icon === "?" && entry.waitingText ? entry.waitingText : entry.text;
+    return { ...entry, icon, iconColor: state.dot === "muted" ? "muted" : state.dot, text };
   };
   return {
     ...data,
