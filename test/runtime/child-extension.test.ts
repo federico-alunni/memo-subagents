@@ -131,20 +131,18 @@ test("child refuses to start when its private identity or policy does not match 
   await assert.rejects(pi.handlers.get("session_start")!({}, {}), /private identity/);
 });
 
-test("skills and prompt are one run: follow-ups are queued only after the run started", async () => {
+test("skills and prompt are delivered in a single turn without fragmented follow-ups", async () => {
   const { createTaskDelivery } = await import("../../pi-extension/subagents/runtime/child/extension.ts");
   const sent: [string, object][] = [];
   const delivery = createTaskDelivery((text, options) => sent.push([text, options]));
+  // Multiple skills: delivered together with the prompt in a single turn
   delivery.send("Do the task", ["pdf-tools", "review"]);
-  assert.deepEqual(sent, [["/skill:pdf-tools", { expandPromptTemplates: true }]]);
-  delivery.agentStarted();
-  assert.deepEqual(sent.slice(1), [
-    ["/skill:review", { expandPromptTemplates: true, deliverAs: "followUp" }],
-    ["Do the task", { expandPromptTemplates: false, deliverAs: "followUp" }],
-  ]);
-  // Later runs (user turns) send nothing more.
-  delivery.agentStarted();
-  assert.equal(sent.length, 3);
+  assert.deepEqual(sent, [['Apply skill "pdf-tools". Apply skill "review".\n\nDo the task', { expandPromptTemplates: false }]]);
+  // Single skill: uses Pi's /skill:<name> <prompt> expansion in a single turn
+  const singleSkill: [string, object][] = [];
+  const singleDelivery = createTaskDelivery((text, options) => singleSkill.push([text, options]));
+  singleDelivery.send("Do the task", ["pdf-tools"]);
+  assert.deepEqual(singleSkill, [['/skill:pdf-tools Do the task', { expandPromptTemplates: true }]]);
   // Without skills the prompt is the only message, never expanded.
   const plain: [string, object][] = [];
   const single = createTaskDelivery((text, options) => plain.push([text, options]));

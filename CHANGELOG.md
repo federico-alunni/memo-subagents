@@ -30,6 +30,7 @@
 
 ### Fixed
 
+- Task delivery: multiple skills and prompt are delivered in a single user message instead of queuing fragmented turns via follow-ups (which caused models to run turns on slash commands without the task prompt). Single skills expand via `/skill:<name> <prompt>`.
 - Merged `main` (pane selector, ask-parent) cleanly into `beta`.
 - Ordered slot creation across grid rows (`waitFor` previous slot) so lower rows don't split prematurely during concurrent launches.
 - Rebalance grid resizes after adopt.

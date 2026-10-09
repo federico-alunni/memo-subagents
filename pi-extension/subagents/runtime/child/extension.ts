@@ -141,22 +141,21 @@ type SendUserMessage = (
  * start a competing prompt ("Agent is already processing").
  */
 export function createTaskDelivery(sendUserMessage: SendUserMessage) {
-  let pending: { text: string; expand: boolean }[] = [];
   return {
     send(prompt: string, skills: string[] = []): void {
-      const [first, ...rest] = [
-        ...skills.map((skill) => ({ text: `/skill:${skill}`, expand: true })),
-        { text: prompt, expand: false },
-      ];
-      pending = rest;
-      sendUserMessage(first.text, { expandPromptTemplates: first.expand });
+      if (skills.length === 0) {
+        sendUserMessage(prompt, { expandPromptTemplates: false });
+      } else if (skills.length === 1) {
+        const text = prompt ? `/skill:${skills[0]} ${prompt}` : `/skill:${skills[0]}`;
+        sendUserMessage(text, { expandPromptTemplates: true });
+      } else {
+        const skillDirective = skills.map((s) => `Apply skill "${s}".`).join(" ");
+        sendUserMessage(prompt ? `${skillDirective}
+
+${prompt}` : skillDirective, { expandPromptTemplates: false });
+      }
     },
-    agentStarted(): void {
-      const queued = pending;
-      pending = [];
-      for (const message of queued)
-        sendUserMessage(message.text, { expandPromptTemplates: message.expand, deliverAs: "followUp" });
-    },
+    agentStarted(): void {},
   };
 }
 
