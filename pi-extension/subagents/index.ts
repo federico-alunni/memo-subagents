@@ -1366,7 +1366,11 @@ function updateWidget() {
     visiblePanels([]).length === 0 &&
     presence().list().every((entry) => own.has(entry.key))
   ) {
-    latestCtx.ui.setWidget("subagent-status", undefined);
+    try {
+      latestCtx.ui.setWidget("subagent-status", undefined);
+    } catch {
+      delete runtime.latestCtx;
+    }
     if (widgetInterval) {
       clearInterval(widgetInterval);
       widgetInterval = null;
@@ -1377,18 +1381,24 @@ function updateWidget() {
     return;
   }
 
-  latestCtx.ui.setWidget(
-    "subagent-status",
-    (_tui: any, theme: any) => {
-      return {
-        invalidate() {},
-        render(width: number) {
-          return renderWidgetLines(Array.from(runningSubagents.values()), presence().list(), width, theme);
-        },
-      };
-    },
-    { placement: "aboveEditor" },
-  );
+  try {
+    latestCtx.ui.setWidget(
+      "subagent-status",
+      (_tui: any, theme: any) => {
+        return {
+          invalidate() {},
+          render(width: number) {
+            return renderWidgetLines(Array.from(runningSubagents.values()), presence().list(), width, theme);
+          },
+        };
+      },
+      { placement: "aboveEditor" },
+    );
+  } catch (err: any) {
+    if (String(err?.message ?? err).includes("stale")) {
+      delete runtime.latestCtx;
+    }
+  }
 }
 
 /**
@@ -3435,6 +3445,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
   // Clean up on session shutdown
   pi.on("session_shutdown", async (event, _ctx) => {
+    delete runtime.latestCtx;
     // Ask-parent: this instance answers nothing more; waiting children ask the user in their own pane.
     stopAskHost();
     escalations.clear();
