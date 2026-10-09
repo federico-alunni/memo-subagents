@@ -64,6 +64,9 @@ export interface PanelRow {
   subagent?: string;
   /** Text shown instead of `text` while that subagent waits for the user (e.g. `aspetta una tua risposta`). */
   waitingText?: string;
+  elapsed?: string;
+  selected?: boolean;
+  rightText?: string;
 }
 
 export interface PanelLegendEntry {
@@ -147,32 +150,58 @@ export function renderPanel(data: PanelData, width: number, theme: MirrorTheme):
   let prog = "";
   for (let i = 0; i < total; i++) prog += i < done ? theme.fg("success", "▰") : theme.fg("muted", "▱");
   const count = theme.bold(theme.fg("text", `${done}/${total}`));
-  const close = theme.fg("accent", "─╮");
+  const waitingRows = data.rows?.filter((r) => r.icon === "?").length ?? 0;
+  const activeRows = data.rows?.filter((r) => r.icon === "◐").length ?? 0;
+  const borderAccent: MirrorColor = (data.attention || waitingRows > 0) ? "warning" : "accent";
+  const close = theme.fg(borderAccent, "─╮");
   const left = (withPhase: boolean) =>
-    `${theme.fg("accent", "╭─")} ${[...segments, ...(withPhase && phaseSegment ? [phaseSegment] : [])].join(" ")} `;
+    `${theme.fg(borderAccent, "╭─")} ${[...segments, ...(withPhase && phaseSegment ? [phaseSegment] : [])].join(" ")} `;
   let barLeft = left(true);
-  let barRight = total > 0 ? ` ${prog} ${count} ${close}` : close;
+  let barRight = close;
+  if (total > 0) {
+    barRight = ` ${prog} ${count} ${close}`;
+  } else if (data.rows && data.rows.length > 0 && (data.title || data.phase || data.attention)) {
+    const info = waitingRows > 0
+      ? theme.bold(theme.fg("warning", `? ${waitingRows} in attesa`))
+      : theme.fg("muted", `${activeRows} active`);
+    barRight = ` ${info} ${close}`;
+  }
   const fits = () => visibleWidth(barLeft) + visibleWidth(barRight) + 1 <= width;
   if (!fits() && total > 0) barRight = ` ${count} ${close}`;
   if (!fits()) barLeft = left(false);
   if (!fits()) barLeft = `${truncateAnsi(barLeft, Math.max(0, width - visibleWidth(barRight) - 3))}… `;
   const barFill = Math.max(1, width - visibleWidth(barLeft) - visibleWidth(barRight));
-  lines.push(barLeft + theme.fg("accent", "─".repeat(barFill)) + barRight);
+  lines.push(barLeft + theme.fg(borderAccent, "─".repeat(barFill)) + barRight);
 
   // A row never exceeds the box: longer content (e.g. the legend in a narrow pane) is cut with `…`.
   const fit = (content: string, max: number): string =>
     visibleWidth(content) <= max ? content : `${truncateAnsi(content, Math.max(0, max - 1))}…`;
   const row = (content = ""): string =>
-    `${theme.fg("accent", "│")} ${pad(fit(content, width - 4), width - 4)} ${theme.fg("accent", "│")}`;
+    `${theme.fg(borderAccent, "│")} ${pad(fit(content, width - 4), width - 4)} ${theme.fg(borderAccent, "│")}`;
 
   // Free rows.
   if (data.rows && data.rows.length > 0) {
+    const hasSelection = data.rows.some((r) => r.selected);
+    const hasElapsed = data.rows.some((r) => r.elapsed);
     for (const item of data.rows) {
       const waiting = item.icon === "?";
       const icon = waiting ? theme.bold(theme.fg(item.iconColor, item.icon)) : theme.fg(item.iconColor, item.icon);
+      const sel = hasSelection ? (item.selected ? theme.fg("accent", "▶ ") : "  ") : "";
+      const elapsed = hasElapsed ? (item.elapsed ? theme.fg("muted", `${pad(item.elapsed, 6)} `) : "       ") : "";
       const extra = item.extra ? ` ${theme.fg("muted", `· ${item.extra}`)}` : "";
       const text = waiting ? theme.bold(theme.fg("text", item.text)) : theme.italic(item.text);
-      lines.push(row(`${icon} ${pad(theme.bold(item.label), 11)}  ${text}${extra}`));
+      const leftPart = `${sel}${icon} ${elapsed}${pad(theme.bold(item.label), 11)}  ${text}${extra}`;
+      const rightPart = item.rightText ? theme.fg("muted", item.rightText) : "";
+      const innerW = width - 4;
+      if (rightPart && visibleWidth(leftPart) + visibleWidth(rightPart) + 2 <= innerW) {
+        const fill = innerW - visibleWidth(leftPart) - visibleWidth(rightPart);
+        lines.push(row(`${leftPart}${" ".repeat(fill)}${rightPart}`));
+      } else {
+        lines.push(row(leftPart));
+      }
+    }
+    if (data.hint) {
+      lines.push(row(theme.fg("muted", data.hint)));
     }
     return lines;
   }
@@ -293,10 +322,13 @@ export function markSelected(data: PanelData, subagent: string | undefined): Pan
   if (!subagent) return data;
   const mark = (item: PanelItem): PanelItem =>
     item.subagent === undefined ? item : { ...item, selected: item.subagent === subagent };
+  const markRow = (row: PanelRow): PanelRow =>
+    row.subagent === undefined ? row : { ...row, selected: row.subagent === subagent };
   return {
     ...data,
     ...(data.items ? { items: data.items.map(mark) } : {}),
     ...(data.groups ? { groups: data.groups.map((group) => ({ ...group, items: group.items.map(mark) })) } : {}),
+    ...(data.rows ? { rows: data.rows.map(markRow) } : {}),
   };
 }
 
@@ -311,6 +343,13 @@ export function isPanelData(value: unknown): value is PanelData {
 function formatDuration(ms: number): string {
   const sec = Math.max(0, Math.floor(ms / 1000));
   return sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m`;
+}
+
+function formatMMSS(ms: number): string {
+  const sec = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
 /**
@@ -439,7 +478,32 @@ export function enrichPanel(data: PanelData, agents: PanelAgent[], now = Date.no
     const state = agentState(agent, now);
     const icon = state.dot === "warning" ? "?" : state.dot === "error" ? "⚠" : state.dot === "success" ? "✓" : "◐";
     const text = icon === "?" && entry.waitingText ? entry.waitingText : entry.text;
-    return { ...entry, icon, iconColor: state.dot === "muted" ? "muted" : state.dot, text };
+    const elapsed = agent.startTime
+      ? (state.dot === "success" ? `(${formatDuration(now - agent.startTime)})` : formatMMSS(now - agent.startTime))
+      : undefined;
+    const plan = (agent as any).runtimePlan;
+    const model = plan?.model ?? (agent as any).model;
+    const thinking = plan?.thinking ?? (agent as any).thinking;
+    const modelId = typeof model === "string" ? (model.includes("/") ? model.slice(model.indexOf("/") + 1) : model) : undefined;
+    const modelTag = modelId ? (thinking ? `${modelId}|${thinking}` : modelId) : undefined;
+    const turn = (agent as any).lifecycle?.turn;
+    const act = state.dot === "warning"
+      ? (state.flag ? `question ${state.flag.replace(/^\?/, "")}` : "question")
+      : state.dot === "success"
+        ? "done"
+        : turn?.toolName
+          ? `${turn.toolName}${turn.toolStartedAt ? ` ${formatDuration(now - turn.toolStartedAt)}` : ""}`
+          : turn?.kind ?? undefined;
+    const rightParts = [modelTag, act].filter(Boolean);
+    const rightText = rightParts.length > 0 ? rightParts.join(" · ") : undefined;
+    return {
+      ...entry,
+      icon,
+      iconColor: state.dot === "muted" ? "muted" : state.dot,
+      text,
+      ...(elapsed ? { elapsed } : {}),
+      ...(rightText ? { rightText } : {}),
+    };
   };
   return {
     ...data,

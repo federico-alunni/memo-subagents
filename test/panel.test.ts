@@ -303,3 +303,26 @@ test("a row of a subagent waiting for the user shows `?` and its waiting text", 
   assert.equal(working.rows![0].icon, "◐");
   assert.equal(working.rows![0].text, "scrive il piano");
 });
+
+test("free rows render elapsed, selected, right-aligned activity, and ? in top bar when waiting", () => {
+  const data: PanelData = {
+    icon: "⛟",
+    label: "Convoy",
+    title: "plan-test",
+    phase: "pianificazione",
+    rows: [
+      { icon: "?", iconColor: "warning", label: "planner", text: "aspetta una tua risposta", elapsed: "04:12", selected: true, rightText: "profile-high|high · question 15s" },
+      { icon: "✓", iconColor: "success", label: "research", text: "ricerca completata", elapsed: "(18s)", rightText: "economy|high · done" },
+    ],
+    hint: "/subagent · Ctrl+Alt+X",
+  };
+  const lines = renderPanel(data, 96, theme);
+  const plain = lines.map(stripAnsi);
+  assert.ok(plain[0].includes("? 1 in attesa"), "top bar shows waiting count");
+  assert.ok(plain[1].includes("▶ ?"), "marks selected and waiting icon");
+  assert.ok(plain[1].includes("04:12"), "shows elapsed time");
+  assert.ok(plain[1].includes("planner"), "shows role");
+  assert.ok(plain[1].includes("aspetta una tua risposta"), "shows text");
+  assert.ok(plain[1].includes("profile-high|high · question 15s"), "shows rightText");
+  assert.ok(plain[3].includes("/subagent · Ctrl+Alt+X"), "shows bottom hint");
+});
