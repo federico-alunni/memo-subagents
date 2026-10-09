@@ -5,7 +5,20 @@ export {
   nextSubagentIndex,
   subagentPanelName,
 } from "./agent-runtime.ts";
-export type { RuntimeConfig, LaunchSpec, Observation } from "./agent-runtime.ts";
+export type { RuntimeConfig, LaunchSpec, Observation, PendingAsk } from "./agent-runtime.ts";
+export {
+  askParentTimeoutMs,
+  answeredByText,
+  DEFAULT_ASK_PARENT_TIMEOUT_MS,
+  ASK_PARENT_TIMEOUT_ENV,
+} from "./ask-parent.ts";
+export type {
+  AskRequest,
+  AskResult,
+  AnsweredBy,
+  AskEscalation,
+  ApprovalDecision,
+} from "./ask-parent.ts";
 export {
   nodeRunner,
   readProcessTerminal,

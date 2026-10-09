@@ -13,6 +13,8 @@ import {
   taskKey,
   requestFile,
   questionFile,
+  ASK_PARENT_TOOL,
+  parentFile,
   sameAgent,
   sameTask,
   sameLabels,
@@ -54,6 +56,8 @@ import type { ActivityReadResult } from "../activity.ts";
 import type { PresenceAttention, PresenceState } from "./presence.ts";
 import { CHILD_ENV } from "./child/env.ts";
 import { resolveQuestionExtension } from "./question-extension.ts";
+import { validAskRequest, validAskResult } from "./ask-parent.ts";
+import type { AskEscalation, AskRequest, AskResult, ParentBeat } from "./ask-parent.ts";
 import {
   adoptPane,
   forgetPane,
@@ -121,6 +125,11 @@ export interface LaunchSpec {
    */
   bashAsk?: boolean;
   question?: boolean;
+  /**
+   * userInput "allowed" only: `question` calls and `bashAsk` approvals go to the parent agent first
+   * (`pendingAsks` / `answerAsk`), and to the user only when the parent cannot answer. Default false.
+   */
+  askParent?: boolean;
   delegatedTools?: DelegatedToolSpec[];
   /** "takeover" (default) or "allowed": whether the user may drive the child without blocking control. */
   userInput?: UserInputPolicy;
@@ -192,6 +201,15 @@ export interface Observation {
   question?: { id: string; text: string; pending: boolean };
   /** The child ended itself (exit policy auto/tool): reason done | ping | error, ping message. */
   exit?: ChildRecord;
+}
+/** An ask-parent request of the current task that has no response yet. */
+export interface PendingAsk {
+  requestId: string;
+  request: AskRequest;
+  at: string;
+  /** A parent already picked it up (`markAsk(..., "received")`). */
+  received: boolean;
+  escalated?: AskEscalation;
 }
 type RuntimeErrorCode =
   | "unsupported"
@@ -641,6 +659,7 @@ export class AgentRuntime {
       delegatedTools: [...(input.delegatedTools ?? [])],
       userInput: input.userInput ?? "takeover",
       exit: input.exit ?? "parent",
+      askParent: (input.askParent ?? false) as boolean,
     };
     const skills = [...(input.skills ?? [])];
     if (!skills.every((skill) => typeof skill === "string" && /^[A-Za-z0-9_.:-]+$/.test(skill)))
@@ -739,8 +758,10 @@ export class AgentRuntime {
         "unsupported",
         "question: true requires the pi-memo-question package",
       );
+    // With askParent the child extension registers the one `question` tool itself (pi-memo-question's,
+    // wrapped to ask the parent first), so the package is not loaded a second time.
     const extraExtensions = [
-      ...(questionExtension && (policy.question || isolation === "profile")
+      ...(questionExtension && !policy.askParent && (policy.question || isolation === "profile")
         ? [questionExtension]
         : []),
       ...(this.config.hostExtensions ?? []),
@@ -1373,6 +1394,7 @@ export class AgentRuntime {
         validTask(request, h, "request") &&
         typeof request.requestId === "string" &&
         typeof request.tool === "string" &&
+        request.tool !== ASK_PARENT_TOOL &&
         join(h.protocolDir, name) ===
           requestFile(h.protocolDir, request.requestId, "request")
       )
@@ -1396,6 +1418,108 @@ export class AgentRuntime {
         record(h, "response", { requestId, tool: request.tool, result }),
       );
     });
+  }
+  /**
+   * Ask-parent requests of the current task without a response, oldest first (child input: the params
+   * are validated, invalid records are skipped). Non-destructive.
+   */
+  async pendingAsks(h: AgentHandle): Promise<PendingAsk[]> {
+    this.checkHandle(h);
+    let names: string[];
+    try {
+      names = (await readdir(h.protocolDir)).filter((n) => n.endsWith(".request.json"));
+    } catch {
+      return [];
+    }
+    const pending: PendingAsk[] = [];
+    for (const name of names) {
+      const request = await json<ChildRecord>(join(h.protocolDir, name)).catch(() => undefined);
+      if (
+        !validTask(request, h, "request") ||
+        request.tool !== ASK_PARENT_TOOL ||
+        typeof request.requestId !== "string" ||
+        join(h.protocolDir, name) !== requestFile(h.protocolDir, request.requestId, "request")
+      )
+        continue;
+      const params = validAskRequest(request.params);
+      if (!params) continue;
+      const response = await json<ChildRecord>(requestFile(h.protocolDir, request.requestId, "response")).catch(
+        () => ({}) as ChildRecord,
+      );
+      if (response) continue;
+      const received = await json<ChildRecord>(requestFile(h.protocolDir, request.requestId, "received")).catch(
+        () => undefined,
+      );
+      const escalated = await json<ChildRecord>(requestFile(h.protocolDir, request.requestId, "escalated")).catch(
+        () => undefined,
+      );
+      pending.push({
+        requestId: request.requestId,
+        request: params,
+        at: request.at,
+        received: validTask(received, h, "received"),
+        ...(validTask(escalated, h, "escalated") ? { escalated: escalated.result as AskEscalation } : {}),
+      });
+    }
+    return pending.sort((a, b) => a.at.localeCompare(b.at));
+  }
+  /**
+   * Ask-parent progress marker: "received" (picked up, exclusive: false when already picked up) or
+   * "escalated" (the request now waits for the user or the parent's own parent; replaced on change).
+   */
+  async markAsk(
+    h: AgentHandle,
+    requestId: string,
+    mark: { kind: "received" } | { kind: "escalated"; escalation: AskEscalation },
+  ): Promise<boolean> {
+    this.checkHandle(h);
+    if (!(await this.pendingAsks(h)).some((p) => p.requestId === requestId))
+      throw new RuntimeError("busy", "Unknown, stale or answered ask-parent request");
+    const path = requestFile(h.protocolDir, requestId, mark.kind);
+    try {
+      await publish(
+        path,
+        record(h, mark.kind, { requestId, tool: ASK_PARENT_TOOL, ...(mark.kind === "escalated" ? { result: mark.escalation } : {}) }),
+        mark.kind === "received",
+      );
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw error;
+    }
+  }
+  /**
+   * Answer an ask-parent request: exclusive, never applied twice. Unknown/stale/already answered
+   * (including a request the child withdrew to ask the user in its own pane) → `busy`.
+   */
+  async answerAsk(h: AgentHandle, requestId: string, result: AskResult): Promise<void> {
+    this.checkHandle(h);
+    if (!validAskResult(result)) throw new RuntimeError("unsupported", "Invalid ask-parent answer");
+    if (!(await this.pendingAsks(h)).some((p) => p.requestId === requestId))
+      throw new RuntimeError("busy", "Unknown, stale or already answered ask-parent request");
+    try {
+      await publish(
+        requestFile(h.protocolDir, requestId, "response"),
+        record(h, "response", { requestId, tool: ASK_PARENT_TOOL, result }),
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST")
+        throw new RuntimeError("busy", "Ask-parent request already answered");
+      throw error;
+    }
+  }
+  /** Ask-parent liveness of this parent for the child (refresh periodically; `closed` on quit/reload). */
+  async askHeartbeat(h: AgentHandle, beat: { name: string; id: string; closed?: boolean }): Promise<void> {
+    this.checkHandle(h);
+    const alive: ParentBeat = {
+      version: 1,
+      pid: process.pid,
+      at: Date.now(),
+      name: beat.name,
+      id: beat.id,
+      ...(beat.closed ? { closed: true } : {}),
+    };
+    await publish(join(h.protocolDir, parentFile), alive, false);
   }
   /** Whether a response to this request was already published (acquire it, never overwrite). */
   async hasResponse(h: AgentHandle, requestId: string): Promise<boolean> {

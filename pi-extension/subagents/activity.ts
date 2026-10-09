@@ -30,6 +30,8 @@ export type SubagentAttentionKind = "question" | "approval" | "blocked";
 export interface SubagentAttention {
   kind: SubagentAttentionKind;
   label?: string;
+  /** Ask-parent: the request waits for the parent agent or for a user (absent: the user, as before). */
+  target?: "parent" | "user";
   since: number;
 }
 
@@ -121,6 +123,8 @@ function validateOptionalAttention(object: Record<string, unknown>): string | nu
   if (!attention) return "attention must be an object when present";
   if (typeof attention.kind !== "string" || !KNOWN_ATTENTION.has(attention.kind as SubagentAttentionKind))
     return "unknown attention kind";
+  if (attention.target !== undefined && attention.target !== "parent" && attention.target !== "user")
+    return "unknown attention target";
   return validateFiniteNumber(attention, "since") ?? validateOptionalActivityString(attention, "label");
 }
 
@@ -549,7 +553,12 @@ export function createSubagentActivityRecorder(params: {
           return;
         }
         const label = attentionLabel(attention.label);
-        current.attention = { kind: attention.kind, ...(label ? { label } : {}), since: attention.since };
+        current.attention = {
+          kind: attention.kind,
+          ...(label ? { label } : {}),
+          ...(attention.target === "parent" || attention.target === "user" ? { target: attention.target } : {}),
+          since: attention.since,
+        };
       }, "immediate");
     },
   };

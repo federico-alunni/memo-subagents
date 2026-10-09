@@ -44,6 +44,8 @@ import type {
   DelegatedToolSpec,
 } from "../../pi-extension/subagents/runtime/protocol.ts";
 import { childToolCall } from "../../pi-extension/subagents/runtime/child/extension.ts";
+import { resolveQuestionExtension } from "../../pi-extension/subagents/runtime/question-extension.ts";
+import { AskParentHost, createEscalate } from "../../pi-extension/subagents/ask-parent-host.ts";
 import { PaneSelector } from "../../pi-extension/subagents/runtime/pane-selector.ts";
 import type { SelectorState } from "../../pi-extension/subagents/runtime/pane-selector.ts";
 
@@ -1456,9 +1458,12 @@ test("invalid tool policies are refused before any pane is created", async (t) =
   assert.equal(f.fake.createCount, 0);
 });
 
-const QUESTION_EXTENSION = realpathSync(
-  fileURLToPath(new URL("../../node_modules/pi-memo-question/extensions/question.ts", import.meta.url)),
-);
+// The extension the runtime loads: the package installed by pi when present, else the dependency copy.
+const QUESTION_EXTENSION =
+  resolveQuestionExtension() ??
+  realpathSync(
+    fileURLToPath(new URL("../../node_modules/pi-memo-question/extensions/question.ts", import.meta.url)),
+  );
 
 test("question is pi-memo-question's tool: loaded with question: true, observed for any child with a task", async (t) => {
   assert.equal(childToolCall(WORKER_POLICY, "question", {})?.block, true);
@@ -2030,6 +2035,8 @@ test("boot records of 0.2.0 (without the new policy fields) keep their meaning",
     delegatedTools: [],
     userInput: "takeover",
     exit: "parent",
+    // Boot records written before ask-parent (and external clients) never ask the parent.
+    askParent: false,
   });
 });
 
@@ -2365,4 +2372,206 @@ test("agents are registered again when observed in a new process and forgotten w
   restarted.forget(h);
   assert.equal(fresh.owned.size, 0);
   assert.equal(f.config.selector!.owned.size, 1);
+});
+
+// ── Ask-parent: correlated requests from a user-driven child to its parent ──
+
+const until = async <T>(read: () => Promise<T | undefined>, ms = 3000): Promise<T> => {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const value = await read();
+    if (value !== undefined) return value;
+    if (Date.now() > deadline) throw new Error("condition not reached");
+    await new Promise((r) => setTimeout(r, 5));
+  }
+};
+
+test("ask-parent: launch policy, user-driven only, and the child extension owns the one question tool", async (t) => {
+  const f = await fixture(t);
+  await f.transport.launch({ ...f.input, ...GENERIC, askParent: true });
+  assert.equal(f.fake.boot!.policy.askParent, true);
+  const run = f.fake.calls.find((c) => c.argv[1] === "run")!.argv[3];
+  assert.doesNotMatch(run, /extensions\/question\.ts/);
+  // Opt-out: profile children keep loading pi-memo-question's extension as before.
+  const g = await fixture(t);
+  await g.transport.launch({ ...g.input, ...GENERIC });
+  assert.equal(g.fake.boot!.policy.askParent, false);
+  assert.match(g.fake.calls.find((c) => c.argv[1] === "run")!.argv[3], /extensions\/question\.ts/);
+  // Workflow (takeover) children never ask the parent; `ask_parent` is a reserved tool name.
+  const n = await fixture(t);
+  for (const [index, patch] of [
+    { askParent: true },
+    { askParent: "yes" as unknown as boolean, ...GENERIC },
+    { delegatedTools: [{ ...INTEGRATE, name: "ask_parent" }] },
+  ].entries())
+    await assert.rejects(
+      n.transport.launch({ ...n.input, agentId: `askp-${index}`, ...patch }),
+      errorCode("unsupported"),
+      JSON.stringify(patch),
+    );
+  assert.equal(n.fake.createCount, 0);
+});
+
+test("ask-parent: a question reaches the parent as a correlated request; the child waits for exactly that answer", async (t) => {
+  const f = await fixture(t);
+  const h = await f.transport.launch({ ...f.input, ...GENERIC, askParent: true });
+  await f.transport.askHeartbeat(h, { name: "main agent", id: "parent-session" });
+  const targets: string[] = [];
+  const asked = f.fake.runtime!.ask(
+    { kind: "question", text: "Quale base?", options: [{ label: "main (Recommended)" }, { label: "dev" }] },
+    { onTarget: (target) => targets.push(target), pollMs: 5 },
+  );
+  const [pending] = await until(async () => {
+    const list = await f.transport.pendingAsks(h);
+    return list.length ? list : undefined;
+  });
+  assert.equal(pending.request.kind, "question");
+  assert.equal(pending.request.childName, "scout");
+  assert.equal(pending.request.childId, h.agentId);
+  assert.deepEqual(pending.request.options, [{ label: "main (Recommended)" }, { label: "dev" }]);
+  assert.equal(pending.received, false);
+  // Not a delegated-tool request: other runtime clients never see it in observe/drainRequests.
+  assert.deepEqual(await f.transport.drainRequests(h), []);
+  assert.equal(await f.transport.markAsk(h, pending.requestId, { kind: "received" }), true);
+  assert.equal(await f.transport.markAsk(h, pending.requestId, { kind: "received" }), false);
+  await f.transport.markAsk(h, pending.requestId, { kind: "escalated", escalation: { target: "user", reason: "timeout" } });
+  await until(async () => (targets.includes("user") ? true : undefined));
+  await f.transport.answerAsk(h, pending.requestId, {
+    answer: "dev",
+    by: { who: "user", where: "parent-session", reason: "timeout", name: "main agent" },
+  });
+  const outcome = await asked;
+  assert.equal(outcome.kind, "answered");
+  assert.equal(outcome.kind === "answered" && outcome.result.answer, "dev");
+  assert.deepEqual(targets, ["parent", "user"]);
+  // Answered once: repeated or stale answers are refused.
+  await assert.rejects(
+    f.transport.answerAsk(h, pending.requestId, { answer: "main", by: { who: "parent" } }),
+    errorCode("busy"),
+  );
+  await assert.rejects(
+    f.transport.answerAsk(h, "unknown-request", { answer: "main", by: { who: "parent" } }),
+    errorCode("busy"),
+  );
+  assert.deepEqual(await f.transport.pendingAsks(h), []);
+  // The child keeps running: no exit record, nothing like caller_ping.
+  const o = await f.transport.observe(h);
+  assert.equal(o.exit, undefined);
+  assert.notEqual(o.kind, "stopped");
+});
+
+test("ask-parent: unavailable parent → fallback to the child's pane without the full timeout; late answers refused", async (t) => {
+  const f = await fixture(t);
+  const h = await f.transport.launch({ ...f.input, ...GENERIC, askParent: true });
+  const child = f.fake.runtime!;
+  const approval = { kind: "approval" as const, text: "npm run build", command: "npm run build", prefix: "npm run" };
+  // Parent extension not loaded: nobody picks the request up.
+  const unpicked = await child.ask(approval, { pickupMs: 30, pollMs: 5 });
+  assert.equal(unpicked.kind, "fallback");
+  assert.match(unpicked.kind === "fallback" ? unpicked.reason : "", /did not pick/);
+  assert.deepEqual(await f.transport.pendingAsks(h), []);
+  await assert.rejects(
+    f.transport.answerAsk(h, unpicked.requestId!, { decision: "once", by: { who: "parent" } }),
+    errorCode("busy"),
+  );
+  // Parent quit or reloaded (closed liveness record): no request at all.
+  await f.transport.askHeartbeat(h, { name: "main agent", id: "s", closed: true });
+  const started = Date.now();
+  const closed = await child.ask(approval, { pickupMs: 60_000 });
+  assert.equal(closed.kind, "fallback");
+  assert.ok(Date.now() - started < 1000);
+  // The parent goes away while the request waits.
+  await f.transport.askHeartbeat(h, { name: "main agent", id: "s" });
+  const waiting = child.ask(approval, { pickupMs: 60_000, pollMs: 5 });
+  const [pending] = await until(async () => {
+    const list = await f.transport.pendingAsks(h);
+    return list.length ? list : undefined;
+  });
+  await f.transport.markAsk(h, pending.requestId, { kind: "received" });
+  await f.transport.askHeartbeat(h, { name: "main agent", id: "s", closed: true });
+  const gone = await waiting;
+  assert.equal(gone.kind, "fallback");
+  assert.match(gone.kind === "fallback" ? gone.reason : "", /not available/);
+  // A fallback answer published by the parent (e.g. no UI to ask the user) also sends the child to its pane.
+  await f.transport.askHeartbeat(h, { name: "main agent", id: "s" });
+  const relayed = child.ask(approval, { pickupMs: 60_000, pollMs: 5 });
+  const [next] = await until(async () => {
+    const list = await f.transport.pendingAsks(h);
+    return list.length ? list : undefined;
+  });
+  await f.transport.answerAsk(h, next.requestId, { fallback: true, reason: "no UI in the parent session" });
+  assert.deepEqual(await relayed, { kind: "fallback", reason: "no UI in the parent session", requestId: next.requestId });
+  // Aborted turn: the child withdraws (claims the slot) and reports cancelled.
+  const controller = new AbortController();
+  const aborted = child.ask(approval, { pickupMs: 60_000, pollMs: 5, signal: controller.signal });
+  const [third] = await until(async () => {
+    const list = await f.transport.pendingAsks(h);
+    return list.length ? list : undefined;
+  });
+  controller.abort();
+  assert.equal((await aborted).kind, "cancelled");
+  await assert.rejects(
+    f.transport.answerAsk(h, third.requestId, { decision: "once", by: { who: "parent" } }),
+    errorCode("busy"),
+  );
+  // Opt-out children never publish requests.
+  const g = await fixture(t);
+  await g.transport.launch({ ...g.input, ...GENERIC });
+  assert.deepEqual(await g.fake.runtime!.ask(approval), { kind: "fallback", reason: "ask-parent is off" });
+});
+
+test("ask-parent nesting: an intermediate agent forwards an escalation one level up, never to its user", async (t) => {
+  // top (main agent) → mid (runtime child, itself a parent) → leaf.
+  const top = await fixture(t);
+  const midHandle = await top.transport.launch({ ...top.input, ...GENERIC, askParent: true, display: { label: "Mid" } });
+  await top.transport.askHeartbeat(midHandle, { name: "main agent", id: "s0" });
+  const mid = await fixture(t);
+  const leafHandle = await mid.transport.launch({ ...mid.input, ...GENERIC, askParent: true, display: { label: "Leaf" } });
+  await mid.transport.askHeartbeat(leafHandle, { name: "Mid", id: "mid-id" });
+  let userAsked = 0;
+  const midHost = new AskParentHost({
+    runtime: mid.transport,
+    children: () => [{ id: "leaf-id", name: "Leaf", handle: leafHandle }],
+    self: () => ({ name: "Mid", id: "mid-id" }),
+    notify: () => {},
+    escalationTarget: () => "parent",
+    escalate: createEscalate({
+      // What the child extension of "mid" registers as its upstream.
+      upstream: () => ({ name: "Mid", forward: (request, options) => top.fake.runtime!.ask(request, { ...options, pollMs: 5 }) }),
+      askUser: async () => {
+        userAsked++;
+        return undefined;
+      },
+      self: () => ({ name: "Mid", id: "mid-id" }),
+    }),
+    timeoutMs: 60_000,
+  });
+  const targets: string[] = [];
+  const leafAsk = mid.fake.runtime!.ask(
+    { kind: "approval", text: "make build", command: "make build", prefix: "make build" },
+    { pollMs: 5, onTarget: (target) => targets.push(target) },
+  );
+  const [pending] = await until(async () => {
+    await midHost.tick();
+    const list = midHost.pending();
+    return list.length ? list : undefined;
+  });
+  assert.equal((await midHost.answer({ id: "leaf-id", requestId: pending.requestId, escalate: true })).ok, true);
+  const [up] = await until(async () => {
+    const list = await top.transport.pendingAsks(midHandle);
+    return list.length ? list : undefined;
+  });
+  assert.equal(up.request.childName, "Mid");
+  assert.deepEqual(up.request.origin, ["Leaf"]);
+  assert.equal(up.request.command, "make build");
+  await top.transport.markAsk(midHandle, up.requestId, { kind: "received" });
+  await top.transport.answerAsk(midHandle, up.requestId, { decision: "once", by: { who: "parent", name: "main agent", id: "s0" } });
+  const outcome = await leafAsk;
+  assert.equal(outcome.kind, "answered");
+  assert.deepEqual(outcome.kind === "answered" && outcome.result, {
+    decision: "once",
+    by: { who: "parent", name: "main agent", id: "s0", forwardedBy: ["Mid"] },
+  });
+  assert.equal(userAsked, 0);
+  assert.deepEqual(targets, ["parent"]); // escalated one level up: still waiting for a parent, not the user
 });
