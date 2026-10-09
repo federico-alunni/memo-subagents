@@ -20,6 +20,20 @@
 - Pane selector: a new `auto` launch takes the visible split whenever it is free (main tab with only the main pane, not zoomed, split not reserved), even with other agents open in background tabs. When the visible agent finishes, the next open agent in menu order (`Ctrl+Alt+X` order, wrapping around) is moved into the split once the finished pane has closed — same pane ID and terminal, through its runtime; the widget `▶` and `/subagent` menu follow it. Promotions share the launches' split reservation and the selector's refusals (unrelated splits, zoom, other workspaces).
 - Pane selector: agents are shown in a column right of the main pane, 40% of the tab by default (`PI_SUBAGENT_COLUMN_RATIO`, a number strictly between 0 and 1; invalid → 0.4), applied when the pane is created and on every move into the column. The column has two stacked slots: one open agent fills it, two are shown top/bottom, more run in background tabs. Each slot is reserved synchronously, so concurrent launches never create more than two agent panes nor an extra split (a second concurrent launch waits for the first one's pane and splits it down). `Ctrl+Alt+X` swaps the two shown agents, or with three or more rotates them as a queue (top → tab, bottom → top, next in menu order → bottom, wrapping around); `/subagent` selection and `visible` launches with both slots taken follow the same queue rule, a free slot is simply filled. A finishing shown agent's slot is filled in place by the next background agent in menu order, otherwise the remaining agent takes the whole column. Every move goes through the owning runtime, is read back and rolled back on failure; the widget `▶` and the menu mark both shown agents. `SelectorState.selected`/`reservedSplit` became `slots`/`reservedSlots` (older states are migrated on load).
 
+## 0.4.0-beta.5 — 2026-10-09
+
+### Added
+
+- **Agent grid**: the agent area right of the main pane is a configurable grid of `cols × rows` cells (default `1x2`). Set globally with `PI_SUBAGENT_GRID` or `"layout": { "grid": "..." }` in `pi-memo-subagents.json`, or per agent with frontmatter `grid: 2x2` (the largest grid of the live agents wins while it lives). Cells fill row by row with equal shares across rows and columns; excess agents run in background tabs and rotate with `Ctrl+Alt+X`. Delegated children place into the same grid.
+- **Ask-parent with per-question target**: every child can ask its parent agent via `to: "parent"` on the `question` tool (steer `subagent_request`, answered with `subagent_answer`). The default target is the user; set `askParent: true` / frontmatter `ask-parent: true` to make the parent the default target for questions without `to` and for bash approvals.
+- **Standalone `pi-memo-question` integration**: `pi-memo-subagents` bundles no copy of the question tool; children register a process-wide router hook (`globalThis[Symbol.for("pi-memo-question/router")]`) through which the installed package routes to the parent when requested.
+
+### Fixed
+
+- Merged `main` (pane selector, ask-parent) cleanly into `beta`.
+- Ordered slot creation across grid rows (`waitFor` previous slot) so lower rows don't split prematurely during concurrent launches.
+- Rebalance grid resizes after adopt.
+
 ## 0.4.0-beta.4 — 2026-10-09
 
 ### Changed
