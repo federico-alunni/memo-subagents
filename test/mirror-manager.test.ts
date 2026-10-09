@@ -67,7 +67,7 @@ test("single shared column viewer is launched once for multiple slots; all slots
   const spec = f.fake.launched[0];
   assert.equal(spec.placement, "auto");
   assert.equal(spec.viewer.script, "/pkg/runtime/mirror-viewer.ts");
-  assert.match(spec.viewer.env.PI_MEMO_MIRROR_VIEW_FILE, /column\.view\.json$/);
+  assert.match(spec.viewer.env.PI_MEMO_MIRROR_VIEW_FILE, /column-4242\.view\.json$/);
   assert.match(spec.display.label, /w1 │ w2/);
 
   // Both slots point to the same pane
@@ -76,7 +76,7 @@ test("single shared column viewer is launched once for multiple slots; all slots
   assert.equal(f.manager.paneId, "mirror-pane-1");
 
   // Read view file: contains both slots
-  const viewFile = join(f.dir, "mirrors", "column.view.json");
+  const viewFile = join(f.dir, "mirrors", `column-${OWNER.pid}.view.json`);
   const parsed = JSON.parse(await readFile(viewFile, "utf8"));
   assert.equal(parsed.slots.length, 2);
   assert.equal(parsed.slots[0].name, "w1");
@@ -94,7 +94,7 @@ test("adding or removing slots updates the shared view file without launching ne
   const s2 = slot({ slotId: "s2" });
   await f.manager.sync([s1, s2]);
   assert.equal(f.fake.launched.length, 1);
-  const parsed = JSON.parse(await readFile(join(f.dir, "mirrors", "column.view.json"), "utf8"));
+  const parsed = JSON.parse(await readFile(join(f.dir, "mirrors", `column-${OWNER.pid}.view.json`), "utf8"));
   assert.equal(parsed.slots.length, 2);
 
   // Drop s1: only s2 remains, same viewer pane stays open
@@ -135,4 +135,23 @@ test("reconcile cleans up orphaned mirror panes from dead owners", async (t) => 
   await second.reconcile();
   assert.deepEqual(other.calls, ["stop:mirror-pane-1", "close:mirror-pane-1"]);
   assert.deepEqual(await readdir(join(f.dir, "mirrors")), []);
+});
+
+test("two sessions of the same user never share or delete each other's mirror view", async (t) => {
+  const f = await fixture(t);
+  const other = new MirrorManager({
+    runtime: fakeRuntime().runtime as any,
+    stateDir: f.dir,
+    viewerScript: "/pkg/runtime/mirror-viewer.ts",
+    cwd: "/other/cwd",
+    owner: { pid: 5353, identity: "other pi" },
+    ownerAlive: async () => true,
+  });
+  await f.manager.sync([slot({ slotId: "mine" })]);
+  await other.sync([slot({ slotId: "theirs", view: { ...slot().view, name: "theirs" } })]);
+  const mine = JSON.parse(await readFile(join(f.dir, "mirrors", `column-${OWNER.pid}.view.json`), "utf8"));
+  assert.deepEqual(mine.slots.map((s: any) => s.slotId), ["mine"]);
+  await other.sync([]);
+  const still = JSON.parse(await readFile(join(f.dir, "mirrors", `column-${OWNER.pid}.view.json`), "utf8"));
+  assert.deepEqual(still.slots.map((s: any) => s.slotId), ["mine"]);
 });

@@ -1,7 +1,7 @@
 // Main-side owner of the mirror viewer: a single read-only viewer pane for the right column,
 // displaying all active worktree-space slots stacked vertically. Managed through the agent runtime
 // so its identity and shutdown follow the same proof as any child. Ownership is persisted
-// (`<stateDir>/mirrors/column.json`) so crashed sessions' mirror panes are safely cleaned up.
+// (`<stateDir>/mirrors/column-<pid>.json`) so crashed sessions' mirror panes are safely cleaned up.
 import { randomUUID } from "node:crypto";
 import { mkdir, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -110,8 +110,10 @@ export class MirrorManager {
     }
 
     // Launch single shared column viewer
-    const viewFile = join(this.dir, "column.view.json");
-    const recordFile = join(this.dir, "column.json");
+    // One column per session: two sessions of the same user never share (or delete) each other's view.
+    const own = `column-${this.options.owner.pid}`;
+    const viewFile = join(this.dir, `${own}.view.json`);
+    const recordFile = join(this.dir, `${own}.json`);
     await publish(viewFile, multiView, false);
 
     const label = `⧉ ${slots.map((s) => s.view.name).join(" │ ")}`;

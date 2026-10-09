@@ -23,6 +23,7 @@
 
 ### Fixed
 
+- Mirror column: view and record files are per session (`column-<pid>.*`); two pi sessions of the same user no longer show or delete each other's mirror.
 - Worktree placement: when `herdr worktree open` is refused (e.g. repository outside the caller workspace), a dedicated workspace is created instead of falling back to creating tabs in the caller workspace.
 - Tab cleanup: closing a completed subagent in a dedicated tab closes the Herdr tab, and waits up to 1.5s for process exit so cleanups are not prematurely blocked.
 - Supplied panel: the presence row of a live subagent shown by the panel no longer adds a second box.
