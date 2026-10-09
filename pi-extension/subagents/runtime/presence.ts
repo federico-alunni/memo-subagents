@@ -38,6 +38,8 @@ export interface PresenceEntry {
 export interface PresenceAttention {
   kind: "question" | "approval" | "blocked";
   label?: string;
+  /** Ask-parent: waiting for the parent agent or for a user (absent: the user). */
+  target?: "parent" | "user";
   since: number;
 }
 

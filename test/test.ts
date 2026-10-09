@@ -2461,6 +2461,49 @@ describe("subagents widget rendering", () => {
     }
   });
 
+  it("ask-parent rows show who the request waits for (parent or user), same counts and duration", () => {
+    const testApi = (subagentsModule as any).__test__;
+    const originalNow = Date.now;
+    Date.now = () => 65_000;
+    try {
+      const running = { kind: "running" as const, startedAt: 5_000, confirmedAt: 5_000 };
+      const agent = (id: string, turn: any) => ({
+        id, name: id, task: "", surface: `s-${id}`, startTime: 5_000, sessionFile: id, interactive: false,
+        lifecycle: { ...createLifecycle(5_000), process: running, hasWorked: true, turn },
+      });
+      const lines = testApi.renderSubagentWidgetLines([
+        agent("asker", { kind: "blocked", startedAt: 53_000, reason: "question", target: "parent" }),
+        agent("builder", { kind: "blocked", startedAt: 62_000, reason: "approval", target: "user" }),
+      ], 100, [
+        { key: "r", label: "planner", model: "p/m", thinking: "low", startedAt: 5_000, state: "active", attention: { kind: "question", target: "parent", since: 64_000 }, updatedAt: 0 },
+      ]);
+      assert.match(lines[0], /3 question/);
+      assert.match(lines[1], /\u2753 question \u2192 parent 12s/);
+      assert.match(lines[2], /\u2753 approval \u2192 user 3s/);
+      assert.match(lines[3], /m\|low \u00b7 \u2753 question \u2192 parent 1s/);
+      // The lifecycle keeps the target from the child's activity attention.
+      const observed = observeLifecycleActivity(
+        { ...createLifecycle(5_000), process: running },
+        {
+          ok: true,
+          activity: {
+            version: 1, runningChildId: "c", createdAt: 5_000, updatedAt: 60_000, sequence: 3,
+            latestEvent: "tool_call", phase: "active", agentActive: true, turnActive: true,
+            providerActive: false, toolActive: true,
+            attention: { kind: "approval", label: "\u2192 user \u00b7 make", target: "user", since: 60_000 },
+          },
+        } as any,
+        60_000,
+      );
+      const projection = projectLifecycle(observed, 65_000);
+      assert.equal(projection.kind, "blocked");
+      assert.equal(projection.reason, "approval");
+      assert.equal(projection.target, "user");
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
   it("renders runtime agents of other clients in their own group box, with client status", () => {
     const testApi = (subagentsModule as any).__test__;
     const originalNow = Date.now;

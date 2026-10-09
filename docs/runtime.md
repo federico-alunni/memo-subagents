@@ -97,6 +97,7 @@ interface LaunchSpec {
   bashAllow?: string[];       // readonly only: extra exact word prefixes, e.g. ["npm test", "gh issue view"]
   bashAsk?: boolean;          // readonly + userInput "allowed" only: ask the user instead of blocking (see "Bash policy")
   question?: boolean;         // isolated children: loads and allows the `question` tool (pi-memo-question)
+  askParent?: boolean;        // userInput "allowed" only: questions/approvals go to the parent first (see "Ask-parent"); default false
   delegatedTools?: DelegatedToolSpec[];
   appendSystemPrompt?: string[]; // absolute, readable files passed with --append-system-prompt
   systemPrompt?: string;      // absolute, readable file passed with --system-prompt (replaces pi's prompt)
@@ -158,7 +159,12 @@ interface DelegatedToolSpec {
   later commands with the same first two words (or the same single word) for the rest of that child process only;
   it is never persisted. Questions are asked one at a time. No UI (`ctx.hasUI` false), cancel or abort → blocked;
   commands with shell grammar are blocked without asking. Workflow children (`takeover`) never ask.
-- Boot records without `bashAllow`/`bashAsk` (0.2.0) mean `[]`/`false`.
+- With `askParent` the same `ask` command goes to the parent agent first (see [Ask-parent](#ask-parent)); the
+  approvals stay serialized one at a time. A `block` command (shell grammar, outside the policy) is never sent. The
+  child re-checks every decision that comes back against `bashDecision`: only a command it would have asked about
+  may run, `once` passes that call only, and `always` is applied only when a user gave it (a parent agent's `always`
+  is never applied). The bash result (allowed) or block reason records who decided.
+- Boot records without `bashAllow`/`bashAsk` (0.2.0) mean `[]`/`false`; without `askParent`, `false`.
 
 ### Exit policy and user input
 
@@ -168,6 +174,8 @@ interface DelegatedToolSpec {
   (Escape) leaves it open. It also gets the `subagent_done` and `caller_ping` tools.
 - `exit: "tool"`: the child ends only through `subagent_done` (`reason: "done"`) or `caller_ping`
   (`reason: "ping"`, `message`), or when the user quits pi.
+- `caller_ping` ends the child and hands the conversation to the parent. With `askParent` a question or bash
+  approval does **not**: the child stays alive and waits for the correlated answer (no `exit` record).
 - `observe` reports the record as `exit`; after it the agent observes `stopped` and `close` works as usual.
 - `userInput: "allowed"` (user-driven subagents): typing, user bash and model/thinking changes in the child pane do
   not block control, and a child that ended because the user quit pi (no acknowledgement) can still be closed.
@@ -190,16 +198,26 @@ While its dialog is open the tool emits `memo-question` on `pi.events`; the chil
 `observe` reports `question` for every child, and the tool also emits `herdr:blocked`. The answer itself stays in
 the child session.
 
+With `askParent` the runtime does not add the extension with `-e`: the child extension registers pi-memo-question's
+own tool through a wrapper (pi-memo-question itself is unchanged), so the child still has exactly one `question` tool
+with the same schema, the same `memo-question` events and `question.json` records. Only the dialog call is routed: to
+the parent first, to the same dialog in the child's pane as fallback. The result text and `details.answeredBy` say who
+answered (e.g. `The parent agent selected: 1. … (answered by the parent agent "main agent" (<session id>))`). Being
+first among the `-e` extensions, this tool wins over a copy loaded by the child's profile.
+
 ### Waiting for the user (`herdr:blocked`, attention)
 
 `herdr:blocked` on `pi.events` is the one signal of a child that waits for the user:
-`{ active: true, label?: string, kind?: string }` when a dialog opens, `{ active: false }` when it closes (always,
-also on cancel, error or abort). The `question` tool emits it without `kind` (= `"question"`); the bash approval of
-`bashAsk` emits `kind: "approval"` with the command as `label`; any other `kind` is shown as `blocked`.
+`{ active: true, label?: string, kind?: string, target?: "parent" | "user" }` when a dialog opens, `{ active: false }`
+when it closes (always, also on cancel, error or abort). The `question` tool emits it without `kind` (= `"question"`);
+the bash approval of `bashAsk` emits `kind: "approval"` with the command as `label`; any other `kind` is shown as
+`blocked`. Ask-parent waits add `target` (who the child waits for) and a label that names it (`→ parent · <text>`,
+`→ user · <text>`), so Herdr's blocked label shows the target too; a wait that moves (escalation, fallback) opens the
+new one before closing the old one.
 
 - The child extension counts open waits (they may overlap) and writes `attention` into `activity.json` at once
-  (no throttle): `{ kind: "question" | "approval" | "blocked", label?, since }` while at least one is open (latest
-  kind/label, `since` of the first), removed when none is. `phase` is unchanged.
+  (no throttle): `{ kind: "question" | "approval" | "blocked", label?, target?, since }` while at least one is open
+  (latest kind/label/target, `since` of the first), removed when none is. `phase` is unchanged.
 - **Profile** children load Herdr's own pi integration with their profile; it listens to the same event and marks
   the pane `blocked`.
 - **Isolated** children (`-ne`) do not load it. Inside Herdr (`HERDR_ENV=1`, `HERDR_PANE_ID`) the child extension
@@ -208,8 +226,50 @@ also on cancel, error or abort). The `question` tool emits it without `kind` (= 
   attention changes, and `pane release-agent` on quit. Only the latest state is sent, `seq` grows from a timestamp,
   errors are ignored. Never in profile children.
 - The parent reads attention from `activity.json` (a pending `question.json` as fallback): the widget row shows
-  `❓ question <duration>` / `❓ approval <duration>` (Herdr `blocked` alone: `blocked <duration>`), the row is not
-  counted as active even when annotated `active: true`, and the parent agent is never notified.
+  `❓ question <duration>` / `❓ approval <duration>`, with a target `❓ question → parent <duration>` /
+  `❓ approval → user <duration>` (Herdr `blocked` alone: `blocked <duration>`), the row is not counted as active even
+  when annotated `active: true`. A wait for the user is never notified to the parent agent; ask-parent requests are
+  (see below).
+
+### Ask-parent
+
+`askParent: true` (user-driven children only; `false` by default, so boot records written before it and other clients
+such as pi-issue-round keep their behaviour) sends the child's `question` calls and `bashAsk` approvals to its parent
+first. The memo `subagent` tool turns it on for its children (agent frontmatter `ask-parent: false` or the spawn
+parameter `askParent: false` turn it off).
+
+Transport (same `publish`/`validTask` primitives as delegated tools, tool name `ask_parent`, never a delegated tool):
+
+1. the child publishes `<key>.request.json` (`kind: "request"`, `tool: "ask_parent"`, `requestId`, `params`:
+   `{ kind: "question" | "approval", childId, childName, text, options? , command?, prefix?, origin? }`) for its
+   current task and waits — it keeps running, there is no exit record;
+2. the parent picks it up (`markAsk(h, id, { kind: "received" })`, exclusive), notifies its agent and may move it
+   (`markAsk(h, id, { kind: "escalated", escalation: { target: "user" | "parent", reason } })`, replaced on change);
+3. one exclusive `<key>.response.json` answers it: `{ answer, custom?, note?, by }` (question),
+   `{ decision: "deny" | "once" | "always" | "cancel", note?, by }` (approval) or `{ fallback: true, reason }` (ask the
+   user in the child's pane). `by` is `{ who: "parent" | "user", name?, id?, where?, reason?, forwardedBy? }`;
+4. liveness: the parent refreshes `parent.json` (`{ pid, at, name, id, closed? }`) every 2 s and writes `closed` on
+   quit/reload. The child falls back to its own pane at once when the record is closed, stale (6 s) or its process is
+   gone, and when nobody picked the request up within 5 s (parent extension not loaded). A child that falls back, or
+   whose turn is aborted, first claims the response slot itself, so a late parent answer is refused (`busy`).
+
+The `subagent` extension (parent side):
+
+- delivers each request to the parent agent as a steer message (`customType: "subagent_request"`, `triggerTurn`,
+  `deliverAs: "steer"`) with the child id/name, kind, text and options or command, `requestId` and how to answer;
+- `subagent_answer({ id, requestId, answer? | decision?, escalate?, note? })` checks that the request is pending for
+  that child and answers it once. The parent agent may answer questions, `deny` or allow `once`; `always` is the
+  user's decision only and escalates;
+- escalates to the user when the parent asks (`escalate: true`), for `always`, and when the parent has not answered
+  within `PI_MEMO_SUBAGENTS_ASK_PARENT_TIMEOUT_MS` (default 60000; invalid values fall back to it). The user answers in
+  the **parent session**: one dialog for every pending escalation (one or more children), `←`/`→` to browse, each
+  naming its child; questions use `pi-memo-question/dialog`, approvals the three options of the child pane. No UI in
+  the parent session → fallback to the child's pane;
+- nested agents: a runtime child with `askParent` that is itself a parent forwards an escalation (or timeout) one
+  level up through its own child runtime (`origin` lists the descendants, `by.forwardedBy` the relays) instead of
+  asking its user; only an agent that is not a runtime child (or whose own parent cannot be asked) shows it to the
+  user. Every level answers within the same limits;
+- after a `/reload` the requests the old instance picked up are answered with a fallback (the child asks in its pane).
 
 ### Sessions
 
@@ -230,6 +290,10 @@ class AgentRuntime {
   watch(h: AgentHandle, onObservation: (o: Observation) => void | Promise<void>, intervalMs?: number): () => void;
   drainRequests(h: AgentHandle): Promise<ChildRecord[]>;
   respond(h: AgentHandle, requestId: string, result: unknown): Promise<void>;
+  pendingAsks(h: AgentHandle): Promise<PendingAsk[]>;  // ask-parent requests without a response
+  markAsk(h: AgentHandle, requestId: string, mark: { kind: "received" } | { kind: "escalated"; escalation: AskEscalation }): Promise<boolean>;
+  answerAsk(h: AgentHandle, requestId: string, result: AskResult): Promise<void>;
+  askHeartbeat(h: AgentHandle, beat: { name: string; id: string; closed?: boolean }): Promise<void>;
   hasResponse(h: AgentHandle, requestId: string): Promise<boolean>;
   interrupt(h: AgentHandle): Promise<void>;
   stop(h: AgentHandle): Promise<void>;
@@ -251,7 +315,8 @@ class AgentRuntime {
 | `dispatch` | Requires the current task to be observed `settled` and a never-used `taskId`. Returns a **new handle** (same pane/process/session, new `taskToken`) that must replace the stored one. `dispatch_uncertain` carries the next handle; never replay. Old handles observe `changed`. |
 | `observe` | `kind`: `starting`, `active`, `settled`, `missing`, `unavailable`, `changed`, `taken-over`, `stopped`. Plus `accepted?`, `completion?` (`status: success \| error \| interrupted`, `summary?`, `error?`, `recordId`), `requests`, `question?` (`{id, text, pending}`), `exited?`. Completion is child evidence, not proof of correctness. Repeated observations return the same `recordId`. |
 | `watch` | One observer per agent (process-wide); private directory events + bounded health probe; callback only on change. Dispose the old observer before watching a new handle of the same agent. |
-| `drainRequests` | Non-destructive: valid delegated-tool requests of the **current** task (`kind: "request"`, `tool`, `params`, `requestId`). Deduplicate in your own durable store. |
+| `drainRequests` | Non-destructive: valid delegated-tool requests of the **current** task (`kind: "request"`, `tool`, `params`, `requestId`). Deduplicate in your own durable store. Ask-parent requests are not included. |
+| `pendingAsks` / `markAsk` / `answerAsk` / `askHeartbeat` | Ask-parent (see above): pending requests of the current task (params validated), the `received` (exclusive, `false` if already picked up) and `escalated` markers, the exclusive answer (unknown/stale/answered → `busy`), the parent's liveness record. |
 | `respond` | Exclusive (`EEXIST` = already answered; acquire, never overwrite). Unknown/stale request → `busy`. |
 | `interrupt` | Writes a correlated request; the child aborts once and acknowledges. Not proof: wait for `settled` with `interrupted`. |
 | `stop` | Refuses active tasks: interrupt and observe settlement first. Timeout → `cleanup_uncertain` (pane retained). |
@@ -281,7 +346,8 @@ Persist handles verbatim. Clients never read protocol files directly; ask for a 
 
 Other exports: `sameAgent`, `sameTask`, `validTask`, `taskKey`, `onceRequestId(taskToken, tool)`,
 `THINKING_LEVELS`, `nodeRunner`, `readProcessTerminal`, `processIdentity`, `terminalName`,
-`hostCompositionFromEnv`, `subagentPanelName(workspace, tab, n)`, `nextSubagentIndex(siblingNames)`, `presence`, `presenceActive` and the types.
+`hostCompositionFromEnv`, `subagentPanelName(workspace, tab, n)`, `nextSubagentIndex(siblingNames)`, `presence`, `presenceActive`,
+`askParentTimeoutMs(env)`, `answeredByText(by)` and the types (`PendingAsk`, `AskRequest`, `AskResult`, `AnsweredBy`, …).
 
 ## Child side
 
@@ -295,7 +361,8 @@ per-launch environment and `PI_MEMO_RUNTIME_PROTOCOL_DIR / _NONCE / _SCOPE / _AG
 The child extension: verifies boot identity, model, thinking, session and cwd; publishes `ready`; accepts each task
 exactly once; publishes `settled` only on `agent_settled` (provider errors and aborts stay distinct; no assistant
 outcome is an error); handles interrupt/shutdown requests; records takeover; enforces the tool allowlist and the
-read-only bash guard (with `bashAllow`, and the user question for `bashAsk`); registers the declared delegated tools and the exit tools; records `question` dialogs (pi-memo-question) in `question.json`; writes
+read-only bash guard (with `bashAllow`, and the user question for `bashAsk`, asked to the parent first with
+`askParent`); registers the declared delegated tools and the exit tools; records `question` dialogs (pi-memo-question) in `question.json`; writes
 display-only activity snapshots (0600) with `attention` while it waits for the user; in isolated children inside
 Herdr, reports the pane's agent state (see [Waiting for the user](#waiting-for-the-user-herdrblocked-attention)). User-driven children (`userInput: "allowed"`) also get an identity widget
 (label, tools, denied tools; Ctrl+J toggles the list); workflow children keep pi's own Ctrl+J.
@@ -310,6 +377,7 @@ shell and process must still match). For workflow children any tab change not re
 `<key>.dispatch.json`, `<key>.accepted.json`, `<key>.settled.json` (key = sha256(taskId)),
 `<key>.request.json` / `<key>.response.json` (key = sha256(requestId)), `interrupt.json` / `interrupt-ack.json`,
 `shutdown.json` / `shutdown-ack.json`, `takeover.json`, `question.json`, `exit.json`, `activity.json`,
+`<key>.received.json` / `<key>.escalated.json` and `parent.json` (ask-parent),
 `move-<uuid>.json`, `sessions/`. The prompt lives only in
 `task.json` and the immutable `<key>.dispatch.json`. `boot.json` also keeps the policy, labels and display data.
 
@@ -360,7 +428,7 @@ interface PresenceEntry {
   key: string; group?: string; label: string; model: string; thinking: string;
   paneId?: string; startedAt: number; state: Observation["kind"] | "launching" | "launch-uncertain";
   status?: string; active?: boolean; questionPending?: boolean; updatedAt: number;
-  attention?: { kind: "question" | "approval" | "blocked"; label?: string; since: number };
+  attention?: { kind: "question" | "approval" | "blocked"; label?: string; target?: "parent" | "user"; since: number };
 }
 function presence(): { list(): PresenceEntry[]; get(key: string): PresenceEntry | undefined; subscribe(listener: () => void): () => void /* + runtime internals */ };
 ```

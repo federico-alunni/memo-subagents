@@ -101,6 +101,9 @@ import {
   superviseSubagent,
   type SupervisedOutcome,
 } from "./runtime-client.ts";
+import { AskParentHost, createEscalate, type AskChild } from "./ask-parent-host.ts";
+import { EscalationList } from "./escalation-dialog.ts";
+import { askParentTimeoutMs, askUpstream } from "./runtime/ask-parent.ts";
 
 
 // Survive /reload: replace presentation timers while keeping active completion
@@ -211,6 +214,12 @@ const SubagentParams = Type.Object({
         "Commit-ish the worktree starts from (requires worktree: true). Default: HEAD of the source checkout, resolved to a commit at spawn time.",
     }),
   ),
+  askParent: Type.Optional(
+    Type.Boolean({
+      description:
+        "Whether the subagent's questions and bash approvals come to you first (delivered as subagent_request messages, answered with subagent_answer) before reaching the user. Default true; overrides the agent's `ask-parent` frontmatter. false: the subagent asks the user in its own pane.",
+    }),
+  ),
 });
 
 type SubagentSessionMode = "standalone" | "lineage-only" | "fork";
@@ -230,6 +239,8 @@ interface AgentDefaults {
   bashAllow?: string;
   spawning?: boolean;
   autoExit?: boolean;
+  /** `ask-parent`: questions/approvals go to the parent agent first (default true). */
+  askParent?: boolean;
   interactive?: boolean;
   systemPromptMode?: "append" | "replace";
   sessionMode?: SubagentSessionMode;
@@ -259,6 +270,7 @@ const SPAWNING_TOOLS = new Set([
   "subagents_list",
   "subagent_resume",
   "subagent_worktrees",
+  "subagent_answer",
 ]);
 
 /**
@@ -382,6 +394,7 @@ function parseAgentDefinition(content: string, fallbackName: string): AgentDefin
     bashAllow: getFrontmatterValue(frontmatter, "bash-allow"),
     spawning: parseOptionalBoolean(getFrontmatterValue(frontmatter, "spawning")),
     autoExit: parseOptionalBoolean(getFrontmatterValue(frontmatter, "auto-exit")),
+    askParent: parseOptionalBoolean(getFrontmatterValue(frontmatter, "ask-parent")),
     interactive: parseOptionalBoolean(getFrontmatterValue(frontmatter, "interactive")),
     sessionMode: parseSessionMode(getFrontmatterValue(frontmatter, "session-mode")),
     cwd: getFrontmatterValue(frontmatter, "cwd"),
@@ -540,6 +553,17 @@ function resolveEffectiveInteractive(
   return !resolveEffectiveAutoExit(params, agentDefs);
 }
 
+/**
+ * Ask-parent of a spawn: the `askParent` parameter wins over the agent's `ask-parent` frontmatter; on by
+ * default (questions and bash approvals come to the parent agent first).
+ */
+function resolveAskParent(
+  params: Pick<Static<typeof SubagentParams>, "askParent">,
+  agentDefs: AgentDefaults | null,
+): boolean {
+  return params.askParent ?? agentDefs?.askParent ?? true;
+}
+
 function loadAgentDefaults(agentName: string): AgentDefaults | null {
   // Resolve through the same name-keyed map discoverAgentDefinitions() builds
   // for the tool-guidance catalog, so a name advertised there always resolves
@@ -669,6 +693,8 @@ interface RunningSubagent {
   runtimePlan: ResolvedRuntimePlan | undefined;
   /** Set when the child runs in a pi-memo-subagents git worktree. */
   worktree?: WorktreeInfo;
+  /** Questions and bash approvals of this child come to this session first (ask-parent). */
+  askParent?: boolean;
 }
 
 interface SubagentRuntime {
@@ -809,7 +835,7 @@ function formatLifecycleWidgetLabel(
     ? ` active · ${projection.label}${duration} `
     : ` active${duration} `;
   if (projection.kind === "blocked")
-    return ` ${formatWaitStatus(projection.reason ?? "herdr", projection.stateDurationSince, now)} `;
+    return ` ${formatWaitStatus(projection.reason ?? "herdr", projection.stateDurationSince, now, projection.target)} `;
   if (projection.kind === "running") return " running… ";
   if (projection.kind === "waiting") return ` waiting${duration} `;
   if (projection.kind === "interrupted") return ` interrupted${duration} `;
@@ -842,21 +868,24 @@ const PRESENCE_STATE_LABEL: Record<PresenceEntry["state"], string> = {
 
 /**
  * The one wording of "waiting for the user", for both row types (subagent-tool lifecycle rows and
- * runtime presence rows): `❓ question 12s`, `❓ approval 3s`, `blocked 1m` (Herdr only).
+ * runtime presence rows): `❓ question 12s`, `❓ approval 3s`, `blocked 1m` (Herdr only). Ask-parent
+ * children add who they wait for: `❓ question → parent 12s`, `❓ approval → user 3s`.
  */
 function formatWaitStatus(
   kind: "question" | "approval" | "herdr" | "blocked",
   since: number | undefined,
   now: number,
+  target?: "parent" | "user",
 ): string {
   const duration = since == null ? "" : ` ${formatElapsedDuration(now - since)}`;
-  if (kind === "question" || kind === "approval") return `❓ ${kind}${duration}`;
+  if (kind === "question" || kind === "approval") return `❓ ${kind}${target ? ` → ${target}` : ""}${duration}`;
   return `blocked${duration}`;
 }
 
 /** Status text of a runtime row: waiting for the user, else the client annotation, else the state. */
 function presenceStatus(entry: PresenceEntry, now: number): string {
-  if (entry.attention) return formatWaitStatus(entry.attention.kind, entry.attention.since, now);
+  if (entry.attention)
+    return formatWaitStatus(entry.attention.kind, entry.attention.since, now, entry.attention.target);
   if (entry.questionPending) return "❓ question";
   return entry.status ?? PRESENCE_STATE_LABEL[entry.state] ?? entry.state;
 }
@@ -1584,6 +1613,7 @@ export const __test__ = {
   resolveLaunchBehavior,
   resolveEffectiveAutoExit,
   resolveEffectiveInteractive,
+  resolveAskParent,
   observeRunningSubagent,
   resolveDenyTools,
   resolveInterruptTarget,
@@ -1885,6 +1915,7 @@ async function launchSubagentInner(
       : {}),
     userInput: "allowed",
     exit: effectiveAutoExit ? "auto" : "tool",
+    askParent: resolveAskParent(params, agentDefs),
     skills: splitList(params.skills ?? agentDefs?.skills),
     session: { kind: "file", path: subagentSessionFile },
     env: subagentEnv({ name: params.name, agent: params.agent, id, denySet }),
@@ -1913,6 +1944,7 @@ async function launchSubagentInner(
     runtimePlan,
     lifecycle: createLifecycle(startTime),
     ...(worktree ? { worktree } : {}),
+    askParent: spec.askParent === true,
   };
 
   runningSubagents.set(id, running);
@@ -2073,8 +2105,75 @@ async function watchSubagent(
   }
 }
 
+/** Name and id of this agent as an ask-parent answerer: a subagent's own name, else the main agent's session. */
+function askSelf(): { name: string; id: string } {
+  if (process.env.PI_SUBAGENT_ID)
+    return { name: process.env.PI_SUBAGENT_NAME ?? "subagent", id: process.env.PI_SUBAGENT_ID };
+  let id = "";
+  try {
+    id = runtime.latestCtx?.sessionManager.getSessionId() ?? "";
+  } catch {
+    // Stale context after a session change: the name alone identifies the answerer.
+  }
+  return { name: "main agent", id };
+}
+
+/** This session's live subagents with ask-parent on. */
+function askChildren(): AskChild[] {
+  return [...runningSubagents.values()]
+    .filter((running) => running.askParent && running.handle)
+    .map((running) => ({ id: running.id, name: running.name, handle: running.handle! }));
+}
+
+/** Interval of the ask-parent host, replaced on /reload. */
+const ASK_INTERVAL_KEY = Symbol.for("pi-memo-subagents/ask-parent-interval");
+
 export default function subagentsExtension(pi: ExtensionAPI) {
   runtime.pi = pi;
+
+  // ── Ask-parent: subagent questions and approvals come here first ──
+  // Escalations shown to the user in this session: one dialog, ←/→ between requests.
+  const escalations = new EscalationList((factory) => {
+    const ctx = runtime.latestCtx;
+    if (!ctx?.hasUI || ctx.mode !== "tui") return undefined;
+    return ctx.ui.custom<void>((tui, theme, _keybindings, done) => factory(tui, theme, () => done(undefined)));
+  });
+  // Nested agent: one level up (never the user here, unless that parent cannot be asked); else the user.
+  const escalateAsk = createEscalate({
+    upstream: askUpstream,
+    askUser: (entry, signal) => escalations.ask(entry, signal),
+    self: askSelf,
+  });
+  const askHost = new AskParentHost({
+    // Resolved per call: tests replace the process-wide runtime.
+    runtime: {
+      pendingAsks: async (h) => subagentRuntime().pendingAsks(h),
+      markAsk: async (h, requestId, mark) => subagentRuntime().markAsk(h, requestId, mark),
+      answerAsk: async (h, requestId, result) => subagentRuntime().answerAsk(h, requestId, result),
+      askHeartbeat: async (h, beat) => subagentRuntime().askHeartbeat(h, beat),
+    },
+    children: askChildren,
+    self: askSelf,
+    notify: (message) =>
+      selectCompletionApi(pi, runtime.pi).sendMessage(
+        { customType: "subagent_request", content: message.content, display: true, details: message.details },
+        { triggerTurn: true, deliverAs: "steer" },
+      ),
+    escalationTarget: () => (askUpstream() ? "parent" : "user"),
+    escalate: escalateAsk,
+    timeoutMs: askParentTimeoutMs(),
+  });
+  const stopAskHost = () => {
+    const previous = (globalThis as any)[ASK_INTERVAL_KEY];
+    if (previous) clearInterval(previous);
+    (globalThis as any)[ASK_INTERVAL_KEY] = null;
+  };
+  const startAskHost = () => {
+    stopAskHost();
+    const interval = setInterval(() => void askHost.tick().catch(() => {}), 500);
+    interval.unref?.();
+    (globalThis as any)[ASK_INTERVAL_KEY] = interval;
+  };
   // Automatic promotion when the visible agent finishes: menu order and refresh of this instance.
   paneSelector.state.menuOrder = selectorOrder;
   paneSelector.state.onPromoted = onSelectorPromoted;
@@ -2103,6 +2202,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     for (const agent of runningSubagents.values()) {
       paneSelector.state.owned.set(agent.surface, agent.name);
     }
+    startAskHost();
     if (runningSubagents.size > 0) {
       startWidgetRefresh();
       startStatusRefresh(pi);
@@ -2113,7 +2213,14 @@ export default function subagentsExtension(pi: ExtensionAPI) {
   });
 
   // Clean up on session shutdown
-  pi.on("session_shutdown", (event, _ctx) => {
+  pi.on("session_shutdown", async (event, _ctx) => {
+    // Ask-parent: this instance answers nothing more; waiting children ask the user in their own pane.
+    stopAskHost();
+    escalations.clear();
+    await Promise.race([
+      askHost.shutdown().catch(() => {}),
+      new Promise((resolve) => setTimeout(resolve, 1500).unref?.()),
+    ]);
     (globalThis as any)[PRESENCE_WIDGET_KEY]?.();
     (globalThis as any)[PRESENCE_WIDGET_KEY] = null;
     if (widgetInterval) {
@@ -2473,6 +2580,55 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       },
     });
 
+  // ── subagent_answer tool (ask-parent) ──
+  if (shouldRegister("subagent_answer"))
+    pi.registerTool({
+      name: "subagent_answer",
+      label: "Answer Subagent",
+      description:
+        "Answer a question or a bash approval request of one of your subagents (delivered to you as a subagent_request message; the subagent waits). " +
+        "Question: `answer` = an option label, its number, or a free answer. " +
+        "Bash approval: `decision` \"once\" (allow this call only) or \"deny\"; \"always\" can only be granted by the user, so it hands the request to the user. " +
+        "`escalate: true` hands the request to the user (in a nested subagent: to your own parent) when you cannot or should not decide. " +
+        "Each request is answered once: repeated or stale answers are refused. The subagent re-checks every approval against its own policy: nothing it blocks can be allowed.",
+      promptSnippet:
+        "Answer a subagent_request (question: answer; bash approval: decision once|deny; escalate: true asks the user). Only the user can allow a command always.",
+      parameters: Type.Object({
+        id: Type.String({ description: "Subagent id from the subagent_request message" }),
+        requestId: Type.String({ description: "requestId from the subagent_request message" }),
+        answer: Type.Optional(Type.String({ description: "Question: option label, option number, or free answer" })),
+        decision: Type.Optional(
+          Type.Union([Type.Literal("deny"), Type.Literal("once"), Type.Literal("always")], {
+            description: "Bash approval: once (allow this call), deny; always escalates to the user",
+          }),
+        ),
+        escalate: Type.Optional(Type.Boolean({ description: "Hand the request to the user (or your own parent)" })),
+        note: Type.Optional(Type.String({ description: "Optional note for the subagent" })),
+      }),
+      async execute(_toolCallId, params) {
+        const result = await askHost.answer(params);
+        return {
+          content: [{ type: "text" as const, text: result.text }],
+          details: { id: params.id, requestId: params.requestId, ok: result.ok },
+          ...(result.ok ? {} : { isError: true }),
+        };
+      },
+      renderCall(args, theme) {
+        const what = args.escalate
+          ? "escalate"
+          : args.decision
+            ? `decision ${args.decision}`
+            : typeof args.answer === "string"
+              ? `answer ${JSON.stringify(args.answer).slice(0, 80)}`
+              : "";
+        return new Text(
+          theme.fg("accent", "▸") + " " + theme.fg("toolTitle", theme.bold(String(args.id ?? "subagent"))) + theme.fg("dim", ` — ${what}`),
+          0,
+          0,
+        );
+      },
+    });
+
   // ── subagent_interrupt tool ──
   if (shouldRegister("subagent_interrupt"))
     pi.registerTool({
@@ -2744,6 +2900,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             agentDir: existsSync(localAgentDir) ? localAgentDir : getAgentConfigDir(),
             userInput: "allowed",
             exit: autoExit ? "auto" : "tool",
+            askParent: true,
             session: { kind: "file", path: params.sessionPath },
             env: subagentEnv({ name, id }),
             placement: surfacePlacement(),
@@ -2772,6 +2929,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           runtimePlan: undefined,
           lifecycle: createLifecycle(startTime),
           ...(worktree ? { worktree } : {}),
+          askParent: true,
         };
         runningSubagents.set(id, running);
         startWidgetRefresh();
@@ -3186,6 +3344,33 @@ export default function subagentsExtension(pi: ExtensionAPI) {
   });
 
   // ── subagent_ping message renderer ──
+  // Ask-parent request of a subagent (steer message): who asks, what, and how to answer.
+  pi.registerMessageRenderer("subagent_request", (message, options, theme) => {
+    const details = message.details as any;
+    if (!details) return undefined;
+    return {
+      render(width: number): string[] {
+        const kind = details.kind === "approval" ? "bash approval" : "question";
+        const header = `${theme.fg("accent", "\u2753")} ${theme.fg("toolTitle", theme.bold(details.from ?? details.name ?? "subagent"))} ${theme.fg("dim", `\u2014 ${kind} for you`)}`;
+        const body: string[] =
+          details.kind === "approval"
+            ? [`  ${details.command ?? details.text ?? ""}`]
+            : [
+                String(details.text ?? ""),
+                ...(Array.isArray(details.options)
+                  ? details.options.map((o: { label: string }, i: number) => theme.fg("dim", `${i + 1}. ${o.label}`))
+                  : []),
+              ];
+        const lines = [header, ...(options.expanded ? body : body.slice(0, 3))];
+        lines.push(theme.fg("dim", `subagent_answer id ${details.id} \u00b7 requestId ${details.requestId}`));
+        if (!options.expanded) lines.push(theme.fg("muted", keyHint("app.tools.expand", "to expand")));
+        const box = new Box(1, 1, (text: string) => theme.bg("customMessageBg", text));
+        box.addChild(new Text(lines.map((line) => truncateToWidth(line, Math.max(1, width - 4))).join("\n"), 0, 0));
+        return ["", ...box.render(width)];
+      },
+    };
+  });
+
   pi.registerMessageRenderer("subagent_ping", (message, options, theme) => {
     const details = message.details as any;
     if (!details) return undefined;

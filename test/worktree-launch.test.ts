@@ -37,6 +37,29 @@ class FakeRuntime {
   async interrupt() {}
   activity() { return { ok: false, reason: "missing" }; }
   forget() {}
+  // Ask-parent records (in memory).
+  asks = new Map<string, { requestId: string; request: any; at: string }[]>();
+  answers = new Map<string, any>();
+  received = new Set<string>();
+  beats: { agentId: string; closed?: boolean }[] = [];
+  async pendingAsks(h: AgentHandle) {
+    return (this.asks.get(h.agentId) ?? [])
+      .filter((a) => !this.answers.has(a.requestId))
+      .map((a) => ({ ...a, received: this.received.has(a.requestId) }));
+  }
+  async markAsk(_h: AgentHandle, requestId: string, mark: { kind: string }) {
+    if (mark.kind !== "received") return true;
+    if (this.received.has(requestId)) return false;
+    this.received.add(requestId);
+    return true;
+  }
+  async answerAsk(_h: AgentHandle, requestId: string, result: unknown) {
+    if (this.answers.has(requestId)) throw new RuntimeError("busy", "Ask-parent request already answered");
+    this.answers.set(requestId, result);
+  }
+  async askHeartbeat(h: AgentHandle, beat: { closed?: boolean }) {
+    this.beats.push({ agentId: h.agentId, ...(beat.closed ? { closed: true } : {}) });
+  }
 }
 let fake: FakeRuntime;
 
@@ -330,6 +353,34 @@ describe("subagent worktree launch", () => {
       assert.equal(spec.bashAsk, true);
       assert.equal(spec.userInput, "allowed");
       __test__.runningSubagents.get(result.details.id)?.abortController?.abort();
+    } finally {
+      rmSync(join(agentDir, "agents"), { recursive: true, force: true });
+    }
+  });
+
+  it("ask-parent is on by default; `ask-parent: false` and the askParent parameter (which wins) opt out", async () => {
+    const repo = makeRepo();
+    mkdirSync(join(agentDir, "agents"), { recursive: true });
+    writeFileSync(join(agentDir, "agents", "own-pane-test.md"), "---\nname: own-pane-test\nbash: readonly\nask-parent: false\n---\nAsk the user.\n");
+    writeFileSync(join(agentDir, "agents", "ask-test.md"), "---\nname: ask-test\nbash: readonly\n---\nAsk the parent.\n");
+    try {
+      const { tools } = setup();
+      const run = async (params: Record<string, unknown>) => {
+        const result = await tools.get("subagent").execute("t", { name: "x", task: "t", thinking: "high", ...params }, undefined, undefined, ctx(repo));
+        __test__.runningSubagents.get(result.details.id)?.abortController?.abort();
+        return { spec: launched(result.details), running: __test__.runningSubagents.get(result.details.id) };
+      };
+      const asking = await run({ agent: "ask-test" });
+      assert.equal(asking.spec.askParent, true);
+      assert.equal(asking.spec.bashAsk, true);
+      assert.equal(asking.running?.askParent, true);
+      assert.equal((await run({})).spec.askParent, true);
+      assert.equal((await run({ agent: "own-pane-test" })).spec.askParent, false);
+      assert.equal((await run({ agent: "own-pane-test", askParent: true })).spec.askParent, true);
+      assert.equal((await run({ agent: "ask-test", askParent: false })).spec.askParent, false);
+      assert.equal(__test__.resolveAskParent({}, null), true);
+      assert.equal(__test__.resolveAskParent({ askParent: false }, { askParent: true }), false);
+      assert.equal(__test__.resolveAskParent({}, { askParent: false }), false);
     } finally {
       rmSync(join(agentDir, "agents"), { recursive: true, force: true });
     }
@@ -654,5 +705,60 @@ describe("subagent worktree launch", () => {
       interactive: false, runtimePlan: undefined, lifecycle: createLifecycle(Date.now()),
     };
     assert.ok(!__test__.renderSubagentWidgetLines([running as any], 120).join("\n").includes("⎇"));
+  });
+});
+
+describe("ask-parent in the parent session", () => {
+  it("a child's request is a steer subagent_request message; subagent_answer answers it once, as the parent", async () => {
+    const repo = makeRepo();
+    const handlers = new Map<string, (...args: any[]) => any>();
+    const tools = new Map<string, any>();
+    const renderers = new Set<string>();
+    const sent: { message: any; options: any }[] = [];
+    subagentsExtension({
+      on: (event: string, handler: (...args: any[]) => any) => handlers.set(event, handler),
+      registerTool(tool: any) { tools.set(tool.name, tool); },
+      registerCommand() {},
+      registerMessageRenderer: (name: string) => renderers.add(name),
+      registerShortcut() {},
+      sendUserMessage() {},
+      sendMessage: (message: any, options: any) => sent.push({ message, options }),
+      getThinkingLevel: () => "high",
+      getAllTools: () => [],
+    } as any);
+    assert.ok(renderers.has("subagent_request"));
+    assert.ok(tools.has("subagent_answer"));
+    const context = ctx(repo);
+    await handlers.get("session_start")!({}, context);
+    try {
+      const started = await tools.get("subagent").execute("t", { name: "Asker", task: "t", thinking: "high" }, undefined, undefined, context);
+      const id = started.details.id;
+      fake.asks.set(id, [{
+        requestId: "r1",
+        at: new Date().toISOString(),
+        request: { kind: "question", childId: id, childName: "Asker", text: "Quale base?", options: [{ label: "main" }, { label: "dev" }] },
+      }]);
+      const deadline = Date.now() + 5_000;
+      while (!sent.some((s) => s.message.customType === "subagent_request") && Date.now() < deadline)
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      const delivered = sent.find((s) => s.message.customType === "subagent_request");
+      assert.ok(delivered, "subagent_request delivered");
+      assert.deepEqual(delivered.options, { triggerTurn: true, deliverAs: "steer" });
+      assert.equal(delivered.message.display, true);
+      assert.equal(delivered.message.details.id, id);
+      assert.equal(delivered.message.details.requestId, "r1");
+      assert.match(delivered.message.content, /Quale base\?/);
+      assert.ok(fake.beats.some((b) => b.agentId === id && !b.closed));
+      const answered = await tools.get("subagent_answer").execute("t", { id, requestId: "r1", answer: "dev" });
+      assert.match(answered.content[0].text, /Delivered to subagent "Asker"/);
+      assert.deepEqual(fake.answers.get("r1"), { answer: "dev", by: { who: "parent", name: "main agent", id: "parent-session-id" } });
+      const again = await tools.get("subagent_answer").execute("t", { id, requestId: "r1", answer: "main" });
+      assert.equal(again.isError, true);
+      assert.equal(fake.answers.get("r1").answer, "dev");
+    } finally {
+      await handlers.get("session_shutdown")!({ reason: "quit" }, context);
+    }
+    // The parent session ended: its liveness record is closed, children ask the user in their own pane.
+    assert.ok(fake.beats.some((b) => b.closed));
   });
 });
