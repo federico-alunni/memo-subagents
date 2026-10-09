@@ -2096,9 +2096,15 @@ export class AgentRuntime {
           "Pane has a different occupant",
         );
       await this.herdr(["pane", "close", h.paneId]);
-      // If the child lived in its own dedicated tab (not a split beside the caller), close the tab too
-      if (h.tabId && h.placement !== "split-right" && h.placement !== "split-down") {
-        await this.herdr(["tab", "close", h.tabId]).catch(() => {});
+      // Close the tab only when this child was its only pane there: a handoff successor may share the tab
+      // (closing it would take the successor down). An unreadable pane list keeps the tab.
+      if (h.tabId && h.workspaceId && h.placement !== "split-right" && h.placement !== "split-down") {
+        const rest = await this.herdr(["pane", "list", "--workspace", h.workspaceId]).then(
+          (r: any) => (Array.isArray(r?.panes) ? (r.panes as Pane[]) : undefined),
+          () => undefined,
+        );
+        if (rest && !rest.some((p) => p.tab_id === h.tabId))
+          await this.herdr(["tab", "close", h.tabId]).catch(() => {});
       }
       // Do not infer closure merely from command acknowledgement.
       try {

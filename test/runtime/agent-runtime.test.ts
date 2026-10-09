@@ -2703,3 +2703,27 @@ test("ask-parent nesting: an intermediate agent forwards an escalation one level
   assert.equal(userAsked, 0);
   assert.deepEqual(targets, ["parent"]); // escalated one level up: still waiting for a parent, not the user
 });
+
+test("closing a child keeps its tab while another pane (a handoff successor) shares it", async (t) => {
+  // Regression: the tab of a finished builder held its successor; closing the tab took the successor down.
+  const dedicated = await fixture(t);
+  const d = await dedicated.transport.launch({ ...dedicated.input, ...GENERIC, placement: "tab" });
+  await dedicated.fake.settle();
+  await dedicated.transport.stop(d);
+  await dedicated.transport.close(d);
+  assert.ok(
+    dedicated.fake.calls.some((c) => c.argv[0] === "tab" && c.argv[1] === "close"),
+    "a dedicated tab is closed with its only pane",
+  );
+
+  const shared = await fixture(t);
+  const s = await shared.transport.launch({ ...shared.input, ...GENERIC, placement: "tab" });
+  shared.fake.livePanes = [{ pane_id: "successor-pane", tab_id: s.tabId, workspace_id: s.workspaceId }];
+  await shared.fake.settle();
+  await shared.transport.stop(s);
+  await shared.transport.close(s);
+  assert.ok(
+    !shared.fake.calls.some((c) => c.argv[0] === "tab" && c.argv[1] === "close"),
+    "a tab that still holds another pane is never closed",
+  );
+});
