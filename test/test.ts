@@ -1063,19 +1063,40 @@ describe("subagent discovery", () => {
       false,
     );
 
-    // Interactive fork workflows such as /iterate opt out explicitly.
+    // Interactive fork workflows such as /iterate opt out explicitly with autoExit: false.
     assert.equal(
       testApi.resolveEffectiveAutoExit(
-        { name: "A", task: "T", fork: true, interactive: true },
+        { name: "A", task: "T", fork: true, interactive: true, autoExit: false },
         null,
       ),
       false,
     );
     assert.equal(
       testApi.resolveEffectiveInteractive(
-        { name: "A", task: "T", fork: true, interactive: true },
+        { name: "A", task: "T", fork: true, interactive: true, autoExit: false },
         null,
       ),
+      true,
+    );
+
+    // `interactive` only silences stall pings: the subagent still closes when done.
+    assert.equal(
+      testApi.resolveEffectiveAutoExit({ name: "A", task: "T", interactive: true }, null),
+      true,
+    );
+
+    // Named agents close when done unless their definition or the caller says otherwise.
+    assert.equal(testApi.resolveEffectiveAutoExit({ name: "A", task: "T" }, {}), true);
+    assert.equal(
+      testApi.resolveEffectiveAutoExit({ name: "A", task: "T" }, { interactive: true }),
+      true,
+    );
+    assert.equal(
+      testApi.resolveEffectiveAutoExit({ name: "A", task: "T", autoExit: false }, { autoExit: true }),
+      false,
+    );
+    assert.equal(
+      testApi.resolveEffectiveAutoExit({ name: "A", task: "T", autoExit: true }, { autoExit: false }),
       true,
     );
   });

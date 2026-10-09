@@ -6,6 +6,7 @@
 
 ### Changed
 
+- Subagents close when they are done by default, named agents included: new `autoExit` spawn parameter (then `auto-exit` frontmatter, then `true`). `interactive` only silences stall pings and no longer keeps a subagent open; `/iterate` passes `autoExit: false`.
 - An explicit `thinking` level the selected model does not support is clamped to the nearest supported level (e.g. `minimal` → `low`) and reported in the launch result, instead of failing the spawn.
 - **Supplied panels follow the life of their subagents.** A panel that names subagents (`group`, or `subagent` on items/rows) is shown only while one of them is alive, while it sets `attention`, or for `linger` ms after its last live subagent. A panel that names none is shown as long as its provider keeps it. A provider can no longer leave a stale box above the editor.
 - **One box.** Live subagents that no panel item stands for are folded into the last supplied panel (rows, compact items, or a trailing group), instead of a second box. Items standing for a live subagent take its live dot and flag (`?40s` waiting, `⚠12m` stalled).
@@ -24,6 +25,7 @@
 
 ### Fixed
 
+- Mirror column: closes as soon as the last worktree-space agent ends (the close was only retried by the widget refresh, which stops with the last agent, and a sync requested during another one was dropped).
 - Mirror column: view and record files are per session (`column-<pid>.*`); two pi sessions of the same user no longer show or delete each other's mirror.
 - Worktree placement: when `herdr worktree open` is refused (e.g. repository outside the caller workspace), a dedicated workspace is created instead of falling back to creating tabs in the caller workspace.
 - Tab cleanup: closing a completed subagent in a dedicated tab closes the Herdr tab, and waits up to 1.5s for process exit so cleanups are not prematurely blocked.

@@ -73,7 +73,8 @@ The default surface is `selector` (`PI_SUBAGENT_SURFACE`): the first child opens
 | `systemPrompt`, `skills`, `tools` | string | Extra role instructions / comma-separated skills / tools. |
 | `cwd` | string | Child working directory (absolute, or relative to the current directory). |
 | `fork` | boolean | Full-context fork of the current conversation. |
-| `interactive` | boolean | Don't wake the parent on stall/recovery transitions. |
+| `autoExit` | boolean | Close the subagent as soon as it gives its final answer (default `true`; falls back to `auto-exit` frontmatter). `false` keeps it open for the user. |
+| `interactive` | boolean | Don't wake the parent on stall/recovery transitions (does not keep the subagent open). |
 | `worktree` | boolean | Run the child in a fresh git worktree on a new branch (see below). |
 | `worktreeBranch` | string | New branch name (requires `worktree: true`). Default `memo/<name>-<id8>`. |
 | `worktreeBase` | string | Start commit-ish (requires `worktree: true`). Default the source `HEAD`. |

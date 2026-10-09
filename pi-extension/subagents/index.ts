@@ -222,10 +222,16 @@ const SubagentParams = Type.Object({
         "Force the full-context fork mode for this spawn. The sub-agent inherits the current session conversation, overriding any agent frontmatter session-mode.",
     }),
   ),
+  autoExit: Type.Optional(
+    Type.Boolean({
+      description:
+        "Close the subagent (pane, tab or sub-space) as soon as it gives its final answer. Default true; false keeps it open so the user can keep talking to it in its pane. Asking the user a question does not need false: a subagent asks with its question tool and closes once it is done. If omitted, falls back to the agent's `auto-exit` frontmatter, otherwise true.",
+    }),
+  ),
   interactive: Type.Optional(
     Type.Boolean({
       description:
-        "Mark the subagent as interactive (long-running, user drives the conversation in its own pane). When true, the main session is not woken by status transitions (stalled/recovered) for this subagent. If omitted, falls back to the agent's `interactive` frontmatter, otherwise the inverse of `auto-exit` (agents that auto-exit are autonomous and get stall pings; agents that don't are interactive and stay quiet).",
+        "Do not wake the main session on stalled/recovered status transitions of this subagent (useful when the user drives it). Does not keep it open: use autoExit: false for that. If omitted, falls back to the agent's `interactive` frontmatter, otherwise the inverse of the resolved autoExit.",
     }),
   ),
   worktree: Type.Optional(
@@ -586,20 +592,17 @@ function resolveLaunchBehavior(
  *      driven by the user in their own pane (planner, iterate/fork) and
  *      stall pings are noise.
  *
- * When no agent defs exist at all (bare `subagent({ name, task })` call,
- * typical for `/iterate` with `fork: true`), `autoExit` is undefined and the
- * subagent is treated as interactive — matching the intent of iterate.
+ * Auto-exit itself: explicit `autoExit` parameter, then `auto-exit` frontmatter, then true.
  */
 function resolveEffectiveAutoExit(
   params: Static<typeof SubagentParams>,
   agentDefs: AgentDefaults | null,
 ): boolean {
-  // Named agents preserve their declared behavior. Bare tool calls are
-  // autonomous by default, including full-context forks: `fork` controls
-  // context inheritance, not whether the child should remain open. Interactive
-  // flows such as /iterate opt out explicitly with `interactive: true`.
-  if (agentDefs) return agentDefs.autoExit ?? false;
-  return params.interactive !== true;
+  // A subagent closes when it is done unless the caller (`autoExit: false`) or its agent
+  // definition (`auto-exit: false`) says otherwise. `fork` and `interactive` never keep it open:
+  // flows such as /iterate opt out explicitly with `autoExit: false`.
+  if (params.autoExit != null) return params.autoExit;
+  return agentDefs?.autoExit ?? true;
 }
 
 function resolveEffectiveInteractive(
@@ -1298,6 +1301,8 @@ function updateWidget() {
       widgetInterval = null;
       (globalThis as any)[WIDGET_INTERVAL_KEY] = null;
     }
+    // The last agent is gone: its mirror column closes now (no refresh tick will do it).
+    void syncMirrors();
     return;
   }
 
@@ -2718,17 +2723,36 @@ function currentPalette(): ReturnType<typeof themePalette> | undefined {
 }
 
 let syncing = false;
+let resyncMirrors = false;
+let mirrorCloseRetry: ReturnType<typeof setTimeout> | undefined;
 /** Opens, updates and closes the mirrors to match the running slots (display only; never throws). */
 async function syncMirrors(): Promise<void> {
   const manager = mirrorManager();
-  if (!manager || syncing) return;
+  if (!manager) return;
+  // A change while a sync runs is never dropped: the running sync goes round once more.
+  if (syncing) {
+    resyncMirrors = true;
+    return;
+  }
   syncing = true;
   try {
-    await manager.sync(mirrorSlots(), { selectedSlotId: runtime.selectedSlotId });
+    do {
+      resyncMirrors = false;
+      await manager.sync(mirrorSlots(), { selectedSlotId: runtime.selectedSlotId });
+    } while (resyncMirrors);
   } catch {
     // A mirror is a convenience: the agents and their results never depend on it.
   } finally {
     syncing = false;
+  }
+  // The column outlives its last agent only until its close is proven: retried here, since the
+  // widget refresh that used to retry it stops with the last agent.
+  if (mirrorSlots().length === 0 && manager.paneId && !mirrorCloseRetry) {
+    mirrorCloseRetry = setTimeout(() => {
+      mirrorCloseRetry = undefined;
+      void syncMirrors();
+    }, 2000);
+    mirrorCloseRetry.unref?.();
   }
 }
 
@@ -4062,8 +4086,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     handler: async (args, _ctx) => {
       const task = args.trim() || "";
       const toolCall = task
-        ? `Use subagent to fork an interactive session. fork: true, interactive: true, name: "Iterate", task: ${JSON.stringify(task)}`
-        : `Use subagent to fork an interactive session. fork: true, interactive: true, name: "Iterate", task: "The user wants to do some hands-on work. Help them with whatever they need."`;
+        ? `Use subagent to fork an interactive session. fork: true, interactive: true, autoExit: false, name: "Iterate", task: ${JSON.stringify(task)}`
+        : `Use subagent to fork an interactive session. fork: true, interactive: true, autoExit: false, name: "Iterate", task: "The user wants to do some hands-on work. Help them with whatever they need."`;
       pi.sendUserMessage(toolCall);
     },
   });
