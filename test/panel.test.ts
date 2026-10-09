@@ -205,16 +205,35 @@ describe("widget surfaces and supplied panels", () => {
     });
   });
 
-  it("a supplied panel is rendered in any surface and claims the subagents it names", async () => {
+  it("a supplied panel is rendered in any surface and claims the subagents it names; other agents fold in", async () => {
     await withSurface(undefined, (api) => {
       api.receivePanel({ source: "test", data: { ...SCENARIO_3, items: [{ ...SCENARIO_3.items![0], subagent: "worker-1" }] } });
       const lines = api.renderWidgetLines([worker], [], 96, theme).map(stripAnsi);
       assert.match(lines[0], /⛟  Pipeline │ panel-refresh/);
       assert.ok(!lines.some((line: string) => /Subagents/.test(line)), "worker-1 is shown only by the supplied panel");
-      // An unnamed subagent still gets the extension's own box below.
+      // An unnamed subagent folds into the same box as a trailing item or group.
       const other = { ...worker, id: "a2", name: "other", slot: undefined };
       const both = api.renderWidgetLines([worker, other], [], 96, theme).map(stripAnsi);
-      assert.ok(both.some((line: string) => /Subagents/.test(line)));
+      assert.ok(both.some((line: string) => /other/.test(line)), "other subagent is folded into the panel");
+      assert.ok(!both.some((line: string) => /Subagents/.test(line)), "no separate subagents box");
+    });
+  });
+
+  it("supplied panel liveness: claims require a live agent or attention", async () => {
+    await withSurface(undefined, (api) => {
+      // Panel claiming worker-1 with NO live agents and no attention is NOT rendered
+      api.receivePanel({ source: "claim", data: { ...SCENARIO_3, items: [{ ...SCENARIO_3.items![0], subagent: "worker-1" }] } });
+      assert.equal(api.renderWidgetLines([], [], 96, theme).length, 0);
+
+      // With attention: true, it IS rendered even with no live agents
+      api.receivePanel({ source: "claim", data: { ...SCENARIO_3, attention: true, items: [{ ...SCENARIO_3.items![0], subagent: "worker-1" }] } });
+      assert.ok(api.renderWidgetLines([], [], 96, theme).length > 0);
+
+      // Group-based claiming: worker with group matches panel with same group
+      api.receivePanel({ source: "claim", data: { ...SCENARIO_3, group: "test-run" } });
+      assert.equal(api.renderWidgetLines([], [], 96, theme).length, 0); // no agents
+      const runWorker = { ...worker, group: "test-run" };
+      assert.ok(api.renderWidgetLines([runWorker], [], 96, theme).length > 0); // matched by group
     });
   });
 

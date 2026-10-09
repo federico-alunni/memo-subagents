@@ -12,13 +12,15 @@ The renderer (`runtime/panel.ts`, `renderPanel(data, width, theme): string[]`) i
 ```ts
 pi.events.emit("subagents:panel", { source: "my-tool", data });   // add or replace
 pi.events.emit("subagents:panel", { source: "my-tool", data: null }); // remove
-pi.events.on("subagents:ready", () => sendAgain());               // emitted at session start
+pi.events.on("subagents:ready", ({ agents }) => sendAgain());     // emitted at session start with snapshot
 ```
 
 - `source` identifies the provider; each source has one panel and panels are shown in the order they first arrived.
 - Send again whenever your state changes; the extension does not poll you. Malformed data is ignored.
-- If your extension may load before this one, resend on `subagents:ready`.
-- Name a subagent on an item or row (`subagent: "<subagent or slot name>"`): that subagent is then shown only by your panel (not again in the extension's own rows), and it gets the `▸` marker when it is selected with `/subagent` or `Ctrl+Alt+X`.
+- If your extension may load before this one, resend on `subagents:ready`. The event carries `{ agents: { id, name, agent, group }[] }` of currently running subagents.
+- **Liveness rule**: A panel naming subagents (via `group` or `subagent: "<name>"`) is shown **only** while at least one of those subagents is alive, while `data.attention` is true (e.g. waiting for human answer), or within `data.linger` ms after the last subagent ends. A panel naming no subagents is static and shown as long as the provider keeps it.
+- **One unified box**: Any running subagent that is not claimed by a panel item is automatically folded into the panel as a trailing item or group, so only a single box is displayed.
+- Subagents named on items or rows take live state dots and flags (`?40s` waiting, `⚠12m` stalled) and get the `▸` marker when selected with `/subagent` or `Ctrl+Alt+X`.
 
 ## Data
 
@@ -27,6 +29,9 @@ interface PanelData {
   icon?: string; label?: string;   // top bar brand, default "⧉" "Subagents"
   title?: string; phase?: string;  // "│ <title> │ phase <phase>" segments, each optional
   done?: number; total?: number;   // progress ▰▱ done/total, only with total > 0
+  group?: string;                  // claims all subagents started with this group
+  attention?: boolean;             // keep visible without live subagents (e.g. human question)
+  linger?: number;                 // ms to stay visible after last subagent ends
   rows?: PanelRow[];               // free rows; when present they are the whole body
   columns?: PanelColumn[];         // stage columns shared by every item
   legend?: { mark: string; color?: Color; label: string }[]; // after the column legend

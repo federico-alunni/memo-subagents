@@ -35,7 +35,7 @@ export interface PanelItem {
   dot: PanelDot;
   /** Marks by column key; a missing mark is `pending`. */
   marks?: Record<string, PanelMarkValue>;
-  /** Shown instead of the marks when the data declares no columns. */
+  /** Shown instead of the marks when the data declares no columns, or the item has no marks. */
   text?: string;
   /** Short flag at the end of the cell: `?40s` (warning, waits for an answer) or anything else (error, e.g. `⚠12m`). */
   flag?: string;
@@ -93,6 +93,16 @@ export interface PanelData {
   detail?: { branch?: string; status?: string };
   /** Right-aligned hint on the detail row. */
   hint?: string;
+  /**
+   * Subagent group this panel stands for: subagents started with this `group` belong to it. A panel that names
+   * subagents (`group`, or `subagent` on items/rows) is shown only while one of them is alive, while it has
+   * `attention`, or within `linger` ms after the last one ended. A panel naming none is always shown.
+   */
+  group?: string;
+  /** Keep the panel visible without live subagents (e.g. a question or a decision waits for the user). */
+  attention?: boolean;
+  /** Milliseconds the panel stays visible after its last live subagent ended (default 0). */
+  linger?: number;
 }
 
 const DEFAULT_GLYPHS: Record<PanelMarkState, string> = { done: "✓", active: "▶", pending: "·" };
@@ -183,6 +193,7 @@ export function renderPanel(data: PanelData, width: number, theme: MirrorTheme):
 
   const formatStrip = (item: PanelItem): string => {
     if (columns.length === 0) return pad(theme.fg("muted", truncate(item.text ?? "", textWidth)), textWidth);
+    if (!item.marks && item.text) return pad(theme.fg("muted", truncate(item.text, stripWidth)), stripWidth);
     return columns.map((column) => formatMark(column, item.marks?.[column.key])).join(" ");
   };
 
@@ -227,11 +238,12 @@ export function renderPanel(data: PanelData, width: number, theme: MirrorTheme):
     const active = group.status === "active";
     const arrow = theme.fg(active ? "accent" : "muted", "▾");
     const note = group.note ?? DEFAULT_NOTES[group.status];
-    const dot = active
-      ? `${theme.fg("accent", "●")} ${theme.fg("muted", theme.italic(note))}`
-      : `${theme.fg("muted", "○")} ${theme.fg("muted", theme.italic(note))}`;
-    const label = `${arrow} ${theme.bold(group.name)} ${dot}`;
-    if (active && headers) {
+    const dot = note
+      ? `${theme.fg(active ? "accent" : "muted", active ? "●" : "○")} ${theme.fg("muted", theme.italic(note))}`
+      : "";
+    const label = `${arrow} ${theme.bold(group.name)} ${dot}`.trimEnd();
+    // Column headers only over groups whose items carry marks (free-text groups have none).
+    if (active && headers && group.items.some((item) => item.marks)) {
       const leftPart = pad(label, 2 + 2 + idW + 2) + headers;
       const rightPart = " ".repeat(2 + idW + 2) + headers;
       lines.push(row(`${pad(leftPart, 2 + cellWidth)} ${sepBar} ${rightPart}`));
@@ -297,22 +309,8 @@ export function buildSlotPanelData(agents: any[], selectedSlotId?: string, now =
     const sorted = [...members].sort((a, b) => a.startTime - b.startTime);
     const active = sorted[sorted.length - 1];
     const first = sorted[0];
-    const turn = active.lifecycle?.turn;
-    const since = turn?.stateDurationSince ?? active.startTime;
-    let dot: PanelDot = "muted";
-    let flag: string | undefined;
-    if (active.lifecycle?.process?.kind === "completed") {
-      dot = "success";
-      done++;
-    } else if (turn?.kind === "blocked") {
-      dot = "warning";
-      flag = `?${formatDuration(now - since)}`;
-    } else if (turn?.kind === "stalled") {
-      dot = "error";
-      flag = `⚠${formatDuration(now - since)}`;
-    } else if (turn?.kind === "active" || active.lifecycle?.process?.kind === "running") {
-      dot = "accent";
-    }
+    const { dot, flag } = agentState(active, now);
+    if (dot === "success") done++;
     const chain: string[] = first.slot?.chain ?? [first.name];
     const selected = key === selectedKey;
     if (selected) {
@@ -338,4 +336,130 @@ export function buildSlotPanelData(agents: any[], selectedSlotId?: string, now =
     ...(detail ? { detail } : {}),
     hint: "/subagent · Ctrl+Alt+X",
   };
+}
+
+/** Dot and flag of a live agent from its lifecycle: completed, waiting for an answer, stalled, working. */
+export function agentState(agent: any, now = Date.now()): { dot: PanelDot; flag?: string } {
+  const turn = agent?.lifecycle?.turn;
+  const since = turn?.stateDurationSince ?? agent?.startTime ?? now;
+  if (agent?.lifecycle?.process?.kind === "completed") return { dot: "success" };
+  if (turn?.kind === "blocked") return { dot: "warning", flag: `?${formatDuration(now - since)}` };
+  if (turn?.kind === "stalled") return { dot: "error", flag: `⚠${formatDuration(now - since)}` };
+  if (turn?.kind === "active" || agent?.lifecycle?.process?.kind === "running") return { dot: "accent" };
+  return { dot: "muted" };
+}
+
+/** A live agent as seen by panels: its name, slot name and group. */
+export interface PanelAgent {
+  name: string;
+  slot?: { name: string };
+  group?: string;
+  agent?: string;
+  /** Short state shown when folded into a panel (default the agent type). */
+  text?: string;
+  lifecycle?: any;
+  startTime?: number;
+}
+
+/** Subagent names the panel's items and rows stand for. */
+function namedSubagents(data: PanelData): Set<string> {
+  const names = new Set<string>();
+  for (const item of [...(data.items ?? []), ...(data.groups ?? []).flatMap((group) => group.items)]) {
+    if (item.subagent) names.add(item.subagent);
+  }
+  for (const row of data.rows ?? []) if (row.subagent) names.add(row.subagent);
+  return names;
+}
+
+/** True when the panel names no subagent at all: it is shown as long as its provider keeps it. */
+export function isStaticPanel(data: PanelData): boolean {
+  return !data.group && namedSubagents(data).size === 0;
+}
+
+/** The item/row name `agent` matches in `data`, if any (a group mismatch never matches). */
+function matchName(data: PanelData, agent: PanelAgent, names = namedSubagents(data)): string | undefined {
+  if (data.group && agent.group !== undefined && agent.group !== data.group) return undefined;
+  if (names.has(agent.name)) return agent.name;
+  if (agent.slot && names.has(agent.slot.name)) return agent.slot.name;
+  return undefined;
+}
+
+/** True when `agent` belongs to the panel: same group, or an item/row stands for it. */
+export function belongsToPanel(data: PanelData, agent: PanelAgent): boolean {
+  if (data.group && agent.group === data.group) return true;
+  return matchName(data, agent) !== undefined;
+}
+
+/**
+ * The panel with live state merged in: items and rows standing for a live agent take its dot and flag
+ * (waiting `?40s`, stalled `⚠12m`). Items without a live agent keep the provider's state.
+ */
+export function enrichPanel(data: PanelData, agents: PanelAgent[], now = Date.now()): PanelData {
+  const names = namedSubagents(data);
+  if (names.size === 0) return data;
+  const live = new Map<string, PanelAgent>();
+  for (const agent of agents) {
+    const name = matchName(data, agent, names);
+    // The latest agent of a handoff chain wins.
+    if (name && (!live.has(name) || (agent.startTime ?? 0) >= (live.get(name)!.startTime ?? 0))) live.set(name, agent);
+  }
+  if (live.size === 0) return data;
+  const item = (entry: PanelItem): PanelItem => {
+    const agent = entry.subagent ? live.get(entry.subagent) : undefined;
+    if (!agent) return entry;
+    const state = agentState(agent, now);
+    const { flag: _old, ...rest } = entry;
+    return { ...rest, dot: state.dot, ...(state.flag ? { flag: state.flag } : {}) };
+  };
+  const row = (entry: PanelRow): PanelRow => {
+    const agent = entry.subagent ? live.get(entry.subagent) : undefined;
+    if (!agent) return entry;
+    const state = agentState(agent, now);
+    const icon = state.dot === "warning" ? "?" : state.dot === "error" ? "⚠" : state.dot === "success" ? "✓" : "◐";
+    return { ...entry, icon, iconColor: state.dot === "muted" ? "muted" : state.dot };
+  };
+  return {
+    ...data,
+    ...(data.items ? { items: data.items.map(item) } : {}),
+    ...(data.groups ? { groups: data.groups.map((group) => ({ ...group, items: group.items.map(item) })) } : {}),
+    ...(data.rows ? { rows: data.rows.map(row) } : {}),
+  };
+}
+
+/** Live agents no item/row of `data` stands for, one per slot (the chain's latest member). */
+export function unshownAgents<T extends PanelAgent>(panels: PanelData[], agents: T[]): T[] {
+  const bySlot = new Map<string, T>();
+  for (const agent of agents) {
+    if (panels.some((data) => matchName(data, agent) !== undefined)) continue;
+    const key = agent.slot?.name ?? agent.name;
+    const prev = bySlot.get(key);
+    if (!prev || (agent.startTime ?? 0) >= (prev.startTime ?? 0)) bySlot.set(key, agent);
+  }
+  return [...bySlot.values()];
+}
+
+/** Appends live agents to the panel, so one box shows everything: as rows, compact items, or a last group. */
+export function foldAgents(data: PanelData, agents: PanelAgent[], now = Date.now(), label = "subagents"): PanelData {
+  if (agents.length === 0) return data;
+  if (data.rows) {
+    const rows = agents.map((agent): PanelRow => {
+      const state = agentState(agent, now);
+      const icon = state.dot === "warning" ? "?" : state.dot === "error" ? "⚠" : state.dot === "success" ? "✓" : "◐";
+      return {
+        icon,
+        iconColor: state.dot === "muted" ? "muted" : state.dot,
+        label: agent.slot?.name ?? agent.name,
+        text: agent.text ?? agent.agent ?? "",
+        subagent: agent.slot?.name ?? agent.name,
+      };
+    });
+    return { ...data, rows: [...data.rows, ...rows] };
+  }
+  const items = agents.map((agent): PanelItem => {
+    const state = agentState(agent, now);
+    const name = agent.slot?.name ?? agent.name;
+    return { id: name, name, ...state, text: agent.text ?? agent.agent ?? "", subagent: name };
+  });
+  if (data.compact) return { ...data, items: [...(data.items ?? []), ...items] };
+  return { ...data, groups: [...(data.groups ?? []), { name: label, status: "active", note: "", items }] };
 }

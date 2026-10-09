@@ -39,7 +39,17 @@ import type { PaneLayoutSnapshot } from "./runtime/column-layout.ts";
 import { MirrorManager } from "./runtime/mirror-manager.ts";
 import type { MirrorSlot } from "./runtime/mirror-manager.ts";
 import { themePalette, paletteTheme } from "./runtime/mirror-view.ts";
-import { buildSlotPanelData, isPanelData, markSelected, renderPanel } from "./runtime/panel.ts";
+import {
+  belongsToPanel,
+  buildSlotPanelData,
+  enrichPanel,
+  foldAgents,
+  isPanelData,
+  isStaticPanel,
+  markSelected,
+  renderPanel,
+  unshownAgents,
+} from "./runtime/panel.ts";
 import { startSessionSocket } from "./runtime/session-socket.ts";
 import type { SessionSocketServer } from "./runtime/session-socket.ts";
 import type { PanelData, PanelRow } from "./runtime/panel.ts";
@@ -733,6 +743,8 @@ interface RunningSubagent {
   slot?: AgentSlot;
   /** Started for another agent (delegated spawn or handoff): how, and by whom; its end is routed to it. */
   spawnedBy?: { mode: SpawnMode; parentId: string };
+  /** Group given at spawn by a script (or inherited from the requester): a supplied panel with this `group` shows it. */
+  group?: string;
   /** Granted delegated spawning: how many levels may still exist below this agent. */
   spawning?: { depth: number };
   /** Member of a column of panes (a root agent and the agents started under it). */
@@ -763,6 +775,8 @@ interface SubagentRuntime {
   selectedSlotId?: string;
   /** Panels supplied by other extensions through `PANEL_EVENT`, by source. */
   panels?: Map<string, PanelData>;
+  /** Last time each supplied panel had a live subagent (for `linger`). */
+  panelAlive?: Map<string, number>;
   sessionSocket?: SessionSocketServer;
 }
 
@@ -1044,16 +1058,33 @@ function selectedSubagentName(agents: RunningSubagent[]): string | undefined {
   return pane ? agents.find((agent) => agent.surface === pane)?.name : undefined;
 }
 
-/** Subagent names shown by supplied panels: the extension's own rows leave them out. */
-function claimedByPanels(panels: PanelData[]): Set<string> {
-  const names = new Set<string>();
-  for (const data of panels) {
-    for (const item of [...(data.items ?? []), ...(data.groups ?? []).flatMap((group) => group.items)]) {
-      if (item.subagent) names.add(item.subagent);
+/**
+ * Supplied panels shown now: a static panel (naming no subagent) always; otherwise while one of its subagents
+ * is alive, while it has `attention`, or within `linger` ms after its last live subagent.
+ */
+function visiblePanels(agents: RunningSubagent[], now = Date.now()): PanelData[] {
+  const panels = runtime.panels;
+  if (!panels?.size) return [];
+  const alive = (runtime.panelAlive ??= new Map());
+  const visible: PanelData[] = [];
+  for (const [source, data] of panels) {
+    if (isStaticPanel(data)) {
+      visible.push(data);
+    } else if (agents.some((agent) => belongsToPanel(data, agent))) {
+      alive.set(source, now);
+      visible.push(data);
+    } else {
+      const last = alive.get(source);
+      if (data.attention || (last !== undefined && now - last < (data.linger ?? 0))) visible.push(data);
     }
-    for (const row of data.rows ?? []) if (row.subagent) names.add(row.subagent);
   }
-  return names;
+  return visible;
+}
+
+/** Short state of an agent folded into a panel: its lifecycle label, else its agent type. */
+function foldedAgent(agent: RunningSubagent, now: number) {
+  const label = formatLifecycleWidgetLabel(projectLifecycle(ensureLifecycle(agent), now), now).trim().replace(/^❓\s*/, "");
+  return { ...agent, text: [agent.agent, label].filter(Boolean).join(" · ") };
 }
 
 function panelTheme(theme?: any) {
@@ -1068,14 +1099,20 @@ function renderWidgetLines(
   width: number,
   theme?: any,
 ): string[] {
-  // Panels supplied by other extensions come first; the subagents they show leave the extension's own rows.
-  const supplied = [...(runtime.panels?.values() ?? [])];
+  // Panels supplied by other extensions come first, with live state merged in. One box: the live agents
+  // no panel item stands for join the last panel, so they leave the extension's own rows.
+  const now = Date.now();
+  const supplied = visiblePanels(agents, now);
   const lines: string[] = [];
   if (supplied.length > 0) {
     const selected = selectedSubagentName(agents);
-    for (const data of supplied) lines.push(...renderPanel(markSelected(data, selected), width, panelTheme(theme)));
-    const claimed = claimedByPanels(supplied);
-    agents = agents.filter((agent) => !claimed.has(agent.name) && !(agent.slot && claimed.has(agent.slot.name)));
+    const rest = unshownAgents(supplied, agents).map((agent) => foldedAgent(agent, now));
+    supplied.forEach((data, index) => {
+      let shown = enrichPanel(data, agents, now);
+      if (index === supplied.length - 1) shown = foldAgents(shown, rest, now);
+      lines.push(...renderPanel(markSelected(shown, selected), width, panelTheme(theme)));
+    });
+    agents = [];
   }
   if (surfaceMode() === "panel") {
     if (agents.length === 0) return lines;
@@ -1251,7 +1288,7 @@ function updateWidget() {
   const own = new Set([...runningSubagents.values()].map((agent) => agent.handle?.protocolDir));
   if (
     runningSubagents.size === 0 &&
-    !runtime.panels?.size &&
+    visiblePanels([]).length === 0 &&
     presence().list().every((entry) => own.has(entry.key))
   ) {
     latestCtx.ui.setWidget("subagent-status", undefined);
@@ -1608,6 +1645,7 @@ function startStatusRefresh(pi: ExtensionAPI) {
     }
   }, 1000);
 
+  statusInterval.unref?.();
   (globalThis as any)[STATUS_INTERVAL_KEY] = statusInterval;
 }
 
@@ -2055,10 +2093,14 @@ function receivePanel(payload: unknown): void {
   const { source, data } = payload as { source?: unknown; data?: unknown };
   if (typeof source !== "string" || !source) return;
   const panels = (runtime.panels ??= new Map());
-  if (data === null) panels.delete(source);
-  else if (isPanelData(data)) panels.set(source, data);
+  if (data === null) {
+    panels.delete(source);
+    runtime.panelAlive?.delete(source);
+  } else if (isPanelData(data)) panels.set(source, data);
   else return;
   updateWidget();
+  // A visible panel keeps the refresh running: live state, and its linger running out.
+  if (visiblePanels([...runningSubagents.values()]).length > 0) startWidgetRefresh();
 }
 
 function startWidgetRefresh() {
@@ -2068,6 +2110,7 @@ function startWidgetRefresh() {
     updateWidget();
     void syncMirrors();
   }, 1000);
+  widgetInterval.unref?.();
   (globalThis as any)[WIDGET_INTERVAL_KEY] = widgetInterval;
 }
 
@@ -2088,6 +2131,8 @@ interface LaunchOptions {
   spawnedBy?: { mode: SpawnMode; parent: RunningSubagent };
   /** Grant delegated spawning to the new agent. */
   spawning?: { depth: number };
+  /** Subagent group (scripts only; requested agents inherit their requester's). */
+  group?: string;
   /** Open in a column: split the column's bottom pane (`target`) down, keeping `ratio` for it. */
   column?: { rootId: string; target: string; ratio: number };
 }
@@ -2414,6 +2459,8 @@ async function launchSubagentInner(
     }
   }
   if (options?.spawnedBy) running.spawnedBy = { mode: options.spawnedBy.mode, parentId: options.spawnedBy.parent.id };
+  const group = options?.group ?? options?.spawnedBy?.parent.group;
+  if (group) running.group = group;
   if (options?.spawning) running.spawning = { ...options.spawning };
   if (options?.column) running.column = { rootId: options.column.rootId };
 
@@ -2881,6 +2928,7 @@ function startSupervision(running: RunningSubagent, pi: ExtensionAPI): void {
     id: running.id,
     name: running.name,
     agent: running.agent,
+    group: running.group,
     slot: running.slot ? { id: running.slot.id, name: running.slot.name, chain: [...running.slot.chain] } : undefined,
     worktree: running.worktree ? { branch: running.worktree.branch, path: running.worktree.path, repo: running.worktree.repo } : undefined,
     startTime: running.startTime,
@@ -2897,6 +2945,7 @@ function startSupervision(running: RunningSubagent, pi: ExtensionAPI): void {
         id: running.id,
         name: running.name,
         agent: running.agent,
+        group: running.group,
         slot: running.slot ? { id: running.slot.id, name: running.slot.name, chain: [...running.slot.chain] } : undefined,
         exitCode: result.exitCode,
         elapsed: result.elapsed,
@@ -2978,6 +3027,7 @@ function startSupervision(running: RunningSubagent, pi: ExtensionAPI): void {
         id: running.id,
         name: running.name,
         agent: running.agent,
+        group: running.group,
         slot: running.slot ? { id: running.slot.id, name: running.slot.name, chain: [...running.slot.chain] } : undefined,
         exitCode: 1,
         elapsed: Math.floor((Date.now() - running.startTime) / 1000),
@@ -3041,6 +3091,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         const launchOpts: LaunchOptions = {
           ...(worktreePlan ? { worktreePlan, ...(params.worktreeSpace === true ? { worktreeSpace: true } : {}) } : {}),
           ...(params.spawning === true ? { spawning: { depth: (params.spawningDepth as number) ?? DEFAULT_SPAWNING_DEPTH } } : {}),
+          ...(typeof params.group === "string" && params.group ? { group: params.group } : {}),
         };
         const running = await launchSubagent(
           params as any,
@@ -3062,6 +3113,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           id: a.id,
           name: a.name,
           agent: a.agent,
+          group: a.group,
           surface: a.surface,
           slot: a.slot,
           worktree: a.worktree,
@@ -3126,7 +3178,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     // Mirrors of sessions that no longer exist (crash) are closed; a live session's are never touched.
     void mirrorManager()?.reconcile().catch(() => {});
     // Providers loaded before this extension send their panel again.
-    pi.events?.emit(PANEL_READY_EVENT, {});
+    pi.events?.emit(PANEL_READY_EVENT, {
+      agents: [...runningSubagents.values()].map((agent) => ({ id: agent.id, name: agent.name, agent: agent.agent, group: agent.group })),
+    });
     if (runtime.panels?.size) updateWidget();
     if (runningSubagents.size > 0) {
       startWidgetRefresh();
@@ -3144,6 +3198,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     (globalThis as any)[PANEL_EVENT_KEY]?.();
     (globalThis as any)[PANEL_EVENT_KEY] = null;
     runtime.panels?.clear();
+    runtime.panelAlive?.clear();
     if (runtime.sessionSocket) {
       void runtime.sessionSocket.close().catch(() => {});
       delete runtime.sessionSocket;
