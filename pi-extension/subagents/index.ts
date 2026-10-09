@@ -1104,6 +1104,9 @@ function renderWidgetLines(
   const now = Date.now();
   const supplied = visiblePanels(agents, now);
   const lines: string[] = [];
+  // Presence rows of this extension's own children are never shown twice (their running entry is richer).
+  const own = new Set(agents.map((agent) => agent.handle?.protocolDir).filter(Boolean));
+  entries = entries.filter((entry) => !own.has(entry.key));
   if (supplied.length > 0) {
     const selected = selectedSubagentName(agents);
     const rest = unshownAgents(supplied, agents).map((agent) => foldedAgent(agent, now));
@@ -1123,9 +1126,6 @@ function renderWidgetLines(
     return [...lines, ...renderPanel(data, width, panelTheme(theme))];
   }
   if (lines.length > 0 && agents.length === 0 && entries.length === 0) return lines;
-  // Subagent-tool children are rendered from their richer running entry, not their presence row.
-  const own = new Set(agents.map((agent) => agent.handle?.protocolDir).filter(Boolean));
-  entries = entries.filter((entry) => !own.has(entry.key));
   const ungrouped = entries.filter((entry) => !entry.group);
   const subagentsBox = agents.length > 0 || ungrouped.length > 0;
   return [

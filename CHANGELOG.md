@@ -18,6 +18,8 @@
 
 ### Fixed
 
+- Supplied panel: the presence row of a live subagent shown by the panel no longer adds a second box.
+- Panel renderer in narrow panes: every line keeps the exact width (the top bar sheds progress glyphs, then the phase, then cuts the title; long rows are cut with `…`), and an active group's label never runs into the column headers.
 - The `pi-subagent` bin is self-contained JavaScript: installed from npm it imported `client.ts`, which Node refuses to type-strip under `node_modules`.
 
 ## 0.4.0-beta.3 — 2026-10-09

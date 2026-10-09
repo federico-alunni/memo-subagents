@@ -2,7 +2,7 @@
 // Everything shown comes from the data: brand, title, phase, progress, the stage columns of a staged
 // workflow, groups of items, free rows. The extension derives the data from its own subagents, or another
 // extension supplies it (see `PANEL_EVENT` in index.ts).
-import { visibleWidth } from "./mirror-view.ts";
+import { truncateAnsi, visibleWidth } from "./mirror-view.ts";
 import type { MirrorColor, MirrorTheme } from "./mirror-view.ts";
 
 /** Builtin progress of one stage of an item. */
@@ -136,22 +136,32 @@ export function renderPanel(data: PanelData, width: number, theme: MirrorTheme):
   const sepBar = theme.fg("muted", "│");
 
   // Top bar: ╭─ <icon>  <label> │ <title> │ phase <phase> ──────── <progress> <done>/<total> ─╮
+  // In a narrow pane it sheds the progress glyphs, then the phase, then cuts the title.
   const segments = [theme.bold(theme.fg("text", brand))];
   if (data.title) segments.push(`${sepBar} ${theme.italic(data.title)}`);
-  if (data.phase) segments.push(`${sepBar} phase ${theme.bold(data.phase)}`);
-  const barLeft = `${theme.fg("accent", "╭─")} ${segments.join(" ")} `;
+  const phaseSegment = data.phase ? `${sepBar} phase ${theme.bold(data.phase)}` : "";
   const total = data.total ?? 0;
   const done = data.done ?? 0;
   let prog = "";
   for (let i = 0; i < total; i++) prog += i < done ? theme.fg("success", "▰") : theme.fg("muted", "▱");
-  const barRight = total > 0
-    ? ` ${prog} ${theme.bold(theme.fg("text", `${done}/${total}`))} ${theme.fg("accent", "─╮")}`
-    : theme.fg("accent", "─╮");
+  const count = theme.bold(theme.fg("text", `${done}/${total}`));
+  const close = theme.fg("accent", "─╮");
+  const left = (withPhase: boolean) =>
+    `${theme.fg("accent", "╭─")} ${[...segments, ...(withPhase && phaseSegment ? [phaseSegment] : [])].join(" ")} `;
+  let barLeft = left(true);
+  let barRight = total > 0 ? ` ${prog} ${count} ${close}` : close;
+  const fits = () => visibleWidth(barLeft) + visibleWidth(barRight) + 1 <= width;
+  if (!fits() && total > 0) barRight = ` ${count} ${close}`;
+  if (!fits()) barLeft = left(false);
+  if (!fits()) barLeft = `${truncateAnsi(barLeft, Math.max(0, width - visibleWidth(barRight) - 3))}… `;
   const barFill = Math.max(1, width - visibleWidth(barLeft) - visibleWidth(barRight));
   lines.push(barLeft + theme.fg("accent", "─".repeat(barFill)) + barRight);
 
+  // A row never exceeds the box: longer content (e.g. the legend in a narrow pane) is cut with `…`.
+  const fit = (content: string, max: number): string =>
+    visibleWidth(content) <= max ? content : `${truncateAnsi(content, Math.max(0, max - 1))}…`;
   const row = (content = ""): string =>
-    `${theme.fg("accent", "│")} ${pad(content, width - 4)} ${theme.fg("accent", "│")}`;
+    `${theme.fg("accent", "│")} ${pad(fit(content, width - 4), width - 4)} ${theme.fg("accent", "│")}`;
 
   // Free rows.
   if (data.rows && data.rows.length > 0) {
@@ -173,7 +183,13 @@ export function renderPanel(data: PanelData, width: number, theme: MirrorTheme):
   const allItems: PanelItem[] = data.compact ? (data.items ?? []) : (data.groups ?? []).flatMap((group) => group.items);
   const maxNameLen = Math.max(0, ...allItems.map((item) => visibleWidth(item.name)));
   const idMax = Math.max(8, cellWidth - 2 - 2 - stripWidth - 1 - 5);
-  const idW = Math.min(idMax, maxNameLen > 0 ? maxNameLen + 1 : 8);
+  // An active group's label sits before the column headers: the name column is at least that wide.
+  const labelWidth = (group: PanelGroup) =>
+    visibleWidth(`▾ ${group.name} ● ${group.note ?? DEFAULT_NOTES[group.status]}`) + 1;
+  const headerLabels = data.compact
+    ? 0
+    : Math.max(0, ...(data.groups ?? []).filter((group) => group.status === "active").map(labelWidth));
+  const idW = Math.min(idMax, Math.max(maxNameLen > 0 ? maxNameLen + 1 : 8, headerLabels - 6));
   // Without columns the free text takes the strip and whatever the name column leaves.
   const textWidth = Math.max(stripWidth, cellWidth - (2 + idW) - 2 - 1 - 5);
 
@@ -244,7 +260,11 @@ export function renderPanel(data: PanelData, width: number, theme: MirrorTheme):
     const label = `${arrow} ${theme.bold(group.name)} ${dot}`.trimEnd();
     // Column headers only over groups whose items carry marks (free-text groups have none).
     if (active && headers && group.items.some((item) => item.marks)) {
-      const leftPart = pad(label, 2 + 2 + idW + 2) + headers;
+      // The label must leave a space before the headers: drop the note, then cut, when the pane is narrow.
+      const room = 2 + 2 + idW + 1;
+      const short = `${arrow} ${theme.bold(group.name)} ${theme.fg("accent", "●")}`;
+      const fitted = visibleWidth(label) <= room ? label : visibleWidth(short) <= room ? short : fit(short, room);
+      const leftPart = pad(fitted, 2 + 2 + idW + 2) + headers;
       const rightPart = " ".repeat(2 + idW + 2) + headers;
       lines.push(row(`${pad(leftPart, 2 + cellWidth)} ${sepBar} ${rightPart}`));
     } else {

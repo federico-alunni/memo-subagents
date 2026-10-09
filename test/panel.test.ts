@@ -146,6 +146,28 @@ test("defaults: generic brand, no progress without a total, free text without co
   for (const line of plain) assert.equal(visibleWidth(line), 96);
 });
 
+test("narrow panes: every line is exactly the width; the group label never runs into the column headers", () => {
+  const data: PanelData = {
+    ...STAGED,
+    title: "live-demo",
+    phase: "core",
+    done: 1,
+    total: 3,
+    groups: [
+      { name: "core", status: "active", items: [
+        { id: "a", name: "fix-a", dot: "accent", marks: marks("done", "active", "pending", false) },
+        { id: "b", name: "fix-b", dot: "success", marks: marks("done", "done", "done", false) },
+      ] },
+    ],
+  };
+  for (const width of [50, 67, 96]) {
+    const lines = renderPanel(data, width, theme);
+    for (const line of lines) assert.equal(visibleWidth(line), width, `W=${width}: ${stripAnsi(line)}`);
+    const header = stripAnsi(lines.find((line) => /▾ core/.test(stripAnsi(line)))!);
+    assert.match(header, /▾ core ●(?: \S+)? +B S R/, `W=${width}: ${header}`);
+  }
+});
+
 test("isPanelData accepts panel shapes and rejects others", () => {
   assert.ok(isPanelData({}));
   assert.ok(isPanelData(SCENARIO_2));
