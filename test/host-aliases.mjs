@@ -60,3 +60,7 @@ registerHooks({
 		return nextLoad(url, context);
 	},
 });
+
+// The agent grid of the tests: the default 1×2, whatever the machine's config says (tests that need another
+// grid set PI_SUBAGENT_GRID themselves).
+process.env.PI_SUBAGENT_GRID = "1x2";

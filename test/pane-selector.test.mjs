@@ -716,3 +716,80 @@ test('state reused after reload retains ownership and slots; an older single-age
     globalThis[key] = previous;
   }
 });
+
+// ── Grid (cols × rows) ──
+
+import { parseGrid, configuredGrid, slotSplit, planColumn, gridCapacity, selectorGrid } from '../pi-extension/subagents/pane-selector.ts';
+
+test('grid: "CxR" with sides 1..4; PI_SUBAGENT_GRID, else 1×2; a live agent can only enlarge it', () => {
+  assert.deepEqual(parseGrid('2x2'), { cols: 2, rows: 2 });
+  assert.deepEqual(parseGrid(' 1 × 3 '), { cols: 1, rows: 3 });
+  for (const invalid of ['', '2', '0x2', '5x1', 'x2', '2x', 'axb', 2, undefined]) assert.equal(parseGrid(invalid), undefined, String(invalid));
+  assert.deepEqual(configuredGrid({ PI_SUBAGENT_GRID: '3x1', PI_MEMO_SUBAGENTS_CONFIG: '/nonexistent' }), { cols: 3, rows: 1 });
+  assert.deepEqual(configuredGrid({ PI_SUBAGENT_GRID: 'bad', PI_MEMO_SUBAGENTS_CONFIG: '/nonexistent' }), { cols: 1, rows: 2 });
+  const state = { owned: new Map() };
+  assert.deepEqual(selectorGrid(state), { cols: 1, rows: 2 });
+  state.gridHint = () => ({ cols: 2, rows: 2 });
+  assert.deepEqual(selectorGrid(state), { cols: 2, rows: 2 });
+  state.gridHint = () => ({ cols: 1, rows: 1 });
+  assert.deepEqual(selectorGrid(state), { cols: 1, rows: 2 });
+  assert.equal(gridCapacity({ cols: 3, rows: 2 }), 6);
+});
+
+test('grid: slots fill row by row; the first row splits right, the next rows split the slot above down', () => {
+  const parent = { pane_id: 'main', tab_id: 't', workspace_id: 'w' };
+  const g = { cols: 2, rows: 2 };
+  assert.deepEqual(slotSplit(0, g, parent), { direction: 'right', from: 'main', ratio: 0.6 });
+  assert.deepEqual(slotSplit(1, g, parent), { direction: 'right', from: 0, ratio: 0.5 });
+  assert.deepEqual(slotSplit(2, g, parent), { direction: 'down', from: 0, ratio: 0.5 });
+  assert.deepEqual(slotSplit(3, g, parent), { direction: 'down', from: 1, ratio: 0.5 });
+  const three = { cols: 1, rows: 3 };
+  assert.deepEqual(slotSplit(1, three, parent), { direction: 'down', from: 0, ratio: 0.3333 });
+  assert.deepEqual(slotSplit(2, three, parent), { direction: 'down', from: 1, ratio: 0.5 });
+});
+
+test('grid: 2×2 launches take the four cells, the fifth goes to a tab; concurrent ones wait for the cell they split', () => {
+  const parent = { pane_id: 'main', tab_id: 't', workspace_id: 'w' };
+  const state = { owned: new Map(), gridHint: () => ({ cols: 2, rows: 2 }) };
+  const shown = [];
+  const layout = () => ({ panes: [{ pane_id: 'main' }, ...shown.map(pane_id => ({ pane_id }))] });
+  const launch = (name) => {
+    const r = reservePlacement(state, parent, layout(), 'auto');
+    if (r.placement !== 'tab') {
+      const target = r.targetPane ?? state.placed.get(r.after);
+      notePlacedPane(state, r, name);
+      shown.push(name);
+      adoptPane(state, r, name, name);
+      return [r.placement, target];
+    }
+    return ['tab'];
+  };
+  assert.deepEqual(launch('a'), ['split-right', 'main']);
+  assert.deepEqual(launch('b'), ['split-right', 'a']);
+  assert.deepEqual(launch('c'), ['split-down', 'a']);
+  assert.deepEqual(launch('d'), ['split-down', 'b']);
+  assert.deepEqual(launch('e'), ['tab']);
+  // Concurrent: the second cell splits the first one, which its launch has not created yet.
+  const fresh = { owned: new Map(), gridHint: () => ({ cols: 2, rows: 2 }) };
+  const empty = { panes: [{ pane_id: 'main' }] };
+  const first = reservePlacement(fresh, parent, empty, 'auto');
+  const second = reservePlacement(fresh, parent, empty, 'auto');
+  assert.deepEqual([first.slot, first.targetPane], [0, 'main']);
+  assert.deepEqual([second.slot, second.after, second.placement], [1, first.token, 'split-right']);
+});
+
+test('grid: rearranging a wider grid appends, trims from the end, or rebuilds row by row', () => {
+  const parent = { pane_id: 'main', tab_id: 't', workspace_id: 'w' };
+  const g = { cols: 2, rows: 2 };
+  const label = (id) => id;
+  const summary = (steps) => steps.map((s) => `${s.paneId}:${'newTab' in s.to ? 'tab' : `${s.to.split.direction}@${s.to.split.targetPane}`}`);
+  assert.deepEqual(summary(planColumn(parent, ['a', 'b'], ['a', 'b', 'c'], label, g)), ['c:down@a']);
+  assert.deepEqual(summary(planColumn(parent, ['a', 'b', 'c'], ['a', 'b'], label, g)), ['c:tab']);
+  assert.deepEqual(summary(planColumn(parent, ['a', 'b', 'c', 'd'], ['b', 'c', 'd', 'e'], label, g)), [
+    'd:tab', 'c:tab', 'b:tab', 'a:tab', 'b:right@main', 'c:right@b', 'd:down@b', 'e:down@c',
+  ]);
+  // One column of three: the agents in order stay, a new one is inserted below its predecessor.
+  const col = { cols: 1, rows: 3 };
+  assert.deepEqual(summary(planColumn(parent, ['a', 'b', 'c'], ['b', 'c', 'd'], label, col)), ['a:tab', 'd:down@c']);
+  assert.deepEqual(summary(planColumn(parent, ['a', 'c'], ['a', 'b', 'c'], label, col)), ['b:down@a']);
+});

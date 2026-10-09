@@ -63,9 +63,11 @@ import {
   forgetPane,
   notePlacedPane,
   placedPane,
+  rebalanceGrid,
   releasePlacement,
   reservePlacement,
   selectorState,
+  shownSlots,
 } from "./pane-selector.ts";
 import type {
   PaneLayout,
@@ -1344,9 +1346,12 @@ export class AgentRuntime {
           await evidence("ready", { pid: h.pid, sessionPath: h.sessionPath });
           presence().update(protocolDir, { state: "starting" });
           // Panes of the caller's workspace can be shown beside it by the pane selector (any client).
-          if (h.workspaceId === parent.workspace_id)
+          if (h.workspaceId === parent.workspace_id) {
             adoptPane(this.selector, reservation, h.paneId, label, this.control(h));
-          else releasePlacement(this.selector, reservation);
+            // A new grid cell: equal shares again (cosmetic, in the background).
+            if (split && reservation && reservation.placement !== "tab")
+              void rebalanceGrid(parent as Pane & { tab_id: string }, shownSlots(this.selector), (args) => this.herdr(args, cwd));
+          } else releasePlacement(this.selector, reservation);
           return h;
         }
         await delay(25);

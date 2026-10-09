@@ -1,5 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { resolveConfigPath } from "../config-path.ts";
 import type { AgentHandle } from "./protocol.ts";
 
 export interface PaneRect {
@@ -38,8 +40,79 @@ export interface PaneControl {
   move(h: AgentHandle, to: PaneMoveTarget): Promise<AgentHandle>;
 }
 
-/** Agents shown at once in the column right of the main pane (top and bottom slot). */
+/**
+ * The agent area right of the main pane is a grid of `cols` columns × `rows` rows, filled row by row (slot
+ * index i: row floor(i / cols), column i % cols). Default 1×2: one column, two agents stacked top/bottom.
+ */
+export interface GridShape {
+  cols: number;
+  rows: number;
+}
+export const DEFAULT_GRID: GridShape = { cols: 1, rows: 2 };
+/** Largest side of a grid (more panes than this are unreadable beside a main pane). */
+export const MAX_GRID_SIDE = 4;
+/** Agents shown at once with the default grid (top and bottom slot). */
 export const COLUMN_SLOTS = 2;
+
+/** `"CxR"` (e.g. `"2x2"`, `"1x3"`), each side 1..4; anything else → undefined. */
+export function parseGrid(value: unknown): GridShape | undefined {
+  if (typeof value !== "string") return undefined;
+  const match = /^\s*(\d+)\s*[x×]\s*(\d+)\s*$/i.exec(value);
+  if (!match) return undefined;
+  const cols = Number(match[1]);
+  const rows = Number(match[2]);
+  const ok = (n: number) => Number.isInteger(n) && n >= 1 && n <= MAX_GRID_SIDE;
+  return ok(cols) && ok(rows) ? { cols, rows } : undefined;
+}
+
+export function gridCapacity(grid: GridShape): number {
+  return grid.cols * grid.rows;
+}
+
+/**
+ * The configured grid: `PI_SUBAGENT_GRID` (e.g. `2x2`), else `layout.grid` of the user config
+ * (`pi-memo-subagents.json`), else 1×2. Invalid values fall back to the next source.
+ */
+export function configuredGrid(env: NodeJS.ProcessEnv = process.env): GridShape {
+  const fromEnv = parseGrid(env.PI_SUBAGENT_GRID);
+  if (fromEnv) return fromEnv;
+  try {
+    const config = JSON.parse(readFileSync(resolveConfigPath(env), "utf8"));
+    const fromConfig = parseGrid(config?.layout?.grid);
+    if (fromConfig) return fromConfig;
+  } catch { /* No or unreadable config: the default. */ }
+  return DEFAULT_GRID;
+}
+
+/** The grid in use: the configured one, or a larger one asked for by a live agent (`state.gridHint`). */
+export function selectorGrid(state: SelectorState): GridShape {
+  const configured = configuredGrid();
+  let hint: GridShape | undefined;
+  try {
+    hint = state.gridHint?.();
+  } catch {
+    hint = undefined;
+  }
+  return hint && gridCapacity(hint) > gridCapacity(configured) ? hint : configured;
+}
+
+/**
+ * Where slot `index` is created, given the panes already in the lower slots (row-major): slot 0 splits the
+ * main pane to the right (the column ratio); the rest of the first row splits the slot on its left to the
+ * right; the next rows split the slot above down. The split pane keeps an equal share of what remains.
+ */
+export function slotSplit(
+  index: number,
+  grid: GridShape,
+  parent: PaneRecord,
+): { direction: "right" | "down"; from: number | "main"; ratio: number } {
+  if (index === 0) return { direction: "right", from: "main", ratio: columnSplitRatio() };
+  const row = Math.floor(index / grid.cols);
+  const col = index % grid.cols;
+  if (row === 0) return { direction: "right", from: index - 1, ratio: Number((1 / (grid.cols - col + 1)).toFixed(4)) };
+  void parent;
+  return { direction: "down", from: index - grid.cols, ratio: Number((1 / (grid.rows - row + 1)).toFixed(4)) };
+}
 /** Default width of the agent column, as a fraction of the tab (the main pane keeps the rest). */
 export const DEFAULT_COLUMN_RATIO = 0.4;
 
@@ -96,6 +169,8 @@ export interface SelectorState {
   onVacated?: () => void;
   /** Called after a promotion moved `paneId` into the column (widget refresh, handle sync). */
   onPromoted?: (paneId: string) => void;
+  /** A larger grid asked for by a live agent (agent definition `grid`), registered by the extension. */
+  gridHint?: () => GridShape | undefined;
 }
 
 export interface VacatedSlot {
@@ -183,25 +258,27 @@ function siblingsOf(layout: PaneLayout, parent: PaneRecord): LayoutPane[] {
 }
 
 const OTHER_SPLITS =
-  "The main tab contains other splits; leave only the main pane and up to two of its agents before selecting";
+  "The main tab contains other splits; leave only the main pane and its agents (right of it) before selecting";
 
 /**
- * The agents in the column right of the main pane (top first), or why the selector must not touch the tab:
- * zoom, a pane that is not ours, more than two agents, or agents not stacked in one column on the right.
+ * The agents in the grid right of the main pane (row by row), or why the selector must not touch the tab:
+ * zoom, a pane that is not ours, more agents than the grid holds, or agents not right of the main pane
+ * (with one column: not stacked in one column).
  */
 export function readColumn(
   layout: PaneLayout,
   parent: PaneRecord,
   ours: (paneId: string) => boolean,
+  grid: GridShape = DEFAULT_GRID,
 ): { shown: string[] } | { refusal: string } {
   if (layout.zoomed) return { refusal: "Unzoom the main pane before selecting an agent" };
   const siblings = siblingsOf(layout, parent);
-  if (siblings.length > COLUMN_SLOTS || siblings.some((pane) => !ours(pane.pane_id))) return { refusal: OTHER_SPLITS };
+  if (siblings.length > gridCapacity(grid) || siblings.some((pane) => !ours(pane.pane_id))) return { refusal: OTHER_SPLITS };
   const main = layout.panes.find((pane) => pane.pane_id === parent.pane_id)?.rect;
   if (main && siblings.every((pane) => pane.rect)) {
     const rects = siblings.map((pane) => pane.rect!);
     const right = rects.every((rect) => rect.x >= main.x + main.width);
-    const stacked = rects.every((rect) => rect.x === rects[0].x && rect.width === rects[0].width);
+    const stacked = grid.cols > 1 || rects.every((rect) => rect.x === rects[0].x && rect.width === rects[0].width);
     if (!right || !stacked) return { refusal: OTHER_SPLITS };
   }
   return { shown: siblings.map((pane) => pane.pane_id) };
@@ -226,7 +303,9 @@ export function reservePlacement(
   if (!layout) return tab;
   if (seenEpoch !== undefined && (state.layoutEpoch ?? 0) !== seenEpoch) return tab;
   const placing = new Map([...(state.placed ?? new Map<string, string>())].map(([t, pane]) => [pane, t] as const));
-  const column = readColumn(layout, parent, (id) => state.owned.has(id) || placing.has(id));
+  const grid = selectorGrid(state);
+  const capacity = gridCapacity(grid);
+  const column = readColumn(layout, parent, (id) => state.owned.has(id) || placing.has(id), grid);
   if ("refusal" in column) return tab;
   const shown = column.shown;
   const reserved = state.reservedSlots!;
@@ -234,28 +313,27 @@ export function reservePlacement(
     reserved[slot] = token;
     return { token, slot, ...rest };
   };
-  if (shown.length === COLUMN_SLOTS) {
-    // "visible": the queue rule. The top agent goes to a tab, the bottom one moves up, the new one goes below it.
-    if (mode !== "visible" || reservedAny(state) || shown.some((id) => placing.has(id))) return tab;
-    return take(1, { placement: "split-down", targetPane: shown[1], ratio: 0.5, park: shown[0] });
+  // A shown slot reserved by someone else than the launch placing it (a selector rearrangement): wait.
+  if (shown.some((id, slot) => reserved[slot] && placing.get(id) !== reserved[slot])) return tab;
+  if (shown.length >= capacity) {
+    // "visible", one column: the queue rule. The top agent goes to a tab, the others move up, the new one goes
+    // below the last. A wider grid would have to be rebuilt: a tab.
+    if (mode !== "visible" || grid.cols !== 1 || reservedAny(state) || shown.some((id) => placing.has(id))) return tab;
+    return take(capacity - 1, { placement: "split-down", targetPane: shown[capacity - 1], ratio: 0.5, park: shown[0] });
   }
-  if (shown.length === 1) {
-    // The top agent is shown (or being placed by the launch that reserved the top slot): the bottom slot.
-    if (reserved[1] || (reserved[0] && placing.get(shown[0]) !== reserved[0])) return tab;
-    return take(1, { placement: "split-down", targetPane: shown[0], ratio: 0.5 });
-  }
-  if (!reserved[0]) {
-    if (reserved[1]) return tab;
-    return take(0, { placement: "split-right", targetPane: parent.pane_id, ratio: columnSplitRatio() });
-  }
-  if (reserved[1]) return tab;
-  // The top slot's launch has not created its pane yet: the bottom slot, split from that pane once it exists.
-  const pending = state.placed?.get(reserved[0]);
-  return take(1, {
-    placement: "split-down",
-    ratio: 0.5,
-    ...(pending ? { targetPane: pending } : { after: reserved[0] }),
-  });
+  // The next free slot; slots reserved by launches still placing their pane come first.
+  let slot = shown.length;
+  while (slot < capacity && reserved[slot]) slot++;
+  if (slot >= capacity) return tab;
+  const split = slotSplit(slot, grid, parent);
+  const placement = split.direction === "right" ? "split-right" : "split-down";
+  if (split.from === "main") return take(slot, { placement, targetPane: parent.pane_id, ratio: split.ratio });
+  if (split.from < shown.length) return take(slot, { placement, targetPane: shown[split.from], ratio: split.ratio });
+  // The slot it splits is being placed by another launch: split that pane once it exists.
+  const owner = reserved[split.from];
+  if (!owner) return tab;
+  const pending = state.placed?.get(owner);
+  return take(slot, { placement, ratio: split.ratio, ...(pending ? { targetPane: pending } : { after: owner }) });
 }
 
 /** The launch created its pane in the reserved slot (not adopted yet): it counts as ours in the column. */
@@ -309,7 +387,7 @@ export function adoptPane(
   const slots = state.slots!;
   if (slots[reservation.slot] && slots[reservation.slot] !== paneId) {
     // The column changed since the reservation (e.g. the top agent was parked by a visible launch).
-    state.slots = [...shownSlots(state).filter((id) => id !== paneId), paneId].slice(-COLUMN_SLOTS);
+    state.slots = [...shownSlots(state).filter((id) => id !== paneId), paneId].slice(-gridCapacity(selectorGrid(state)));
   } else slots[reservation.slot] = paneId;
 }
 
@@ -375,16 +453,27 @@ export interface ColumnStep {
   expect: string[];
 }
 
+/** The move creating slot `index` of `grid` from the panes in the lower slots (`column`, row by row). */
+export function slotTarget(parent: PaneRecord, grid: GridShape, column: string[], index: number): PaneMoveTarget {
+  const split = slotSplit(index, grid, parent);
+  const targetPane = split.from === "main" ? parent.pane_id : column[split.from];
+  return { split: { targetPane, tab: parent.tab_id, direction: split.direction, ratio: split.ratio } };
+}
+
 /**
- * Moves turning the column `from` into `desired` (both top first, at most two agents): park the agents that
- * leave, park the top one to swap or to put another agent above it, then fill the column top to bottom.
- * Herdr only splits right or down, so an agent can only enter the empty column or below the top agent.
+ * Moves turning the grid `from` into `desired` (both row by row, at most the grid's capacity). Herdr only
+ * splits right or down, so an agent enters a slot by splitting the pane on its left or above it.
+ * - One column (the default): park the agents that leave and those out of order (from the top), then insert
+ *   each missing agent below its predecessor (the first one: right of the main pane).
+ * - Wider grids: append when `from` is a prefix of `desired`, park from the end when `desired` is a prefix of
+ *   `from`, otherwise park every agent (last first) and build the grid again row by row.
  */
 export function planColumn(
   parent: PaneRecord,
   from: string[],
   desired: string[],
   label: (paneId: string) => string,
+  grid: GridShape = DEFAULT_GRID,
 ): ColumnStep[] {
   const steps: ColumnStep[] = [];
   let column = [...from];
@@ -392,12 +481,35 @@ export function planColumn(
     column = column.filter((id) => id !== paneId);
     steps.push({ paneId, to: { newTab: { label: label(paneId) } }, expect: [...column] });
   };
-  for (const id of from) if (!desired.includes(id)) park(id);
-  if (column.length === 2 && column[0] !== desired[0]) park(column[0]);
-  if (column.length === 1 && column[0] !== desired[0]) park(column[0]);
+  if (grid.cols === 1) {
+    for (const id of from) if (!desired.includes(id)) park(id);
+    // Keep the agents already in desired order, starting with the first one (nothing can enter above it).
+    let next = 0;
+    for (const id of [...column]) {
+      const at = desired.indexOf(id, next);
+      if (at === -1 || (next === 0 && at !== 0)) park(id);
+      else next = at + 1;
+    }
+    for (let index = 0; index < desired.length; index++) {
+      const paneId = desired[index];
+      if (column.includes(paneId)) continue;
+      const above = index === 0 ? undefined : desired[index - 1];
+      const to: PaneMoveTarget = above
+        ? { split: { targetPane: above, tab: parent.tab_id, direction: "down", ratio: 0.5 } }
+        : columnTarget(parent);
+      column = above ? [...column.slice(0, column.indexOf(above) + 1), paneId, ...column.slice(column.indexOf(above) + 1)] : [paneId, ...column];
+      steps.push({ paneId, to, expect: [...column] });
+    }
+    return steps;
+  }
+  const prefix = (a: string[], b: string[]) => a.every((id, index) => b[index] === id);
+  if (!prefix(from, desired)) {
+    const keep = prefix(desired, from) ? desired.length : 0;
+    for (const id of [...from].reverse()) if (from.indexOf(id) >= keep) park(id);
+  }
   while (column.length < desired.length) {
     const paneId = desired[column.length];
-    const to = column.length === 0 ? columnTarget(parent) : belowTarget(parent, column[0]);
+    const to = slotTarget(parent, grid, column, column.length);
     column = [...column, paneId];
     steps.push({ paneId, to, expect: [...column] });
   }
@@ -406,6 +518,63 @@ export function planColumn(
 
 function same(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every((id, index) => id === b[index]);
+}
+
+interface LayoutSplitRecord {
+  direction: string;
+  ratio: number;
+  rect: PaneRect;
+}
+
+/**
+ * Resizes giving equal shares in the agent grid: the rows of each column (vertical chains) and the columns
+ * (the chain of right splits through the top row). Only splits that are exactly "this pane and everything
+ * after it" are touched, so the main pane and anything else keep their size. Herdr: `pane resize --pane X
+ * --direction down|right --amount a` grows X's side of the split by a, `up|left` on the pane after it shrinks
+ * the one before. Cosmetic: never throws.
+ */
+export async function rebalanceGrid(
+  parent: PaneRecord,
+  shown: string[],
+  run: (args: string[]) => unknown | Promise<unknown>,
+  tolerance = 0.02,
+): Promise<void> {
+  if (shown.length < 2) return;
+  try {
+    const layout = ((await run(["pane", "layout", "--pane", parent.pane_id])) as { layout?: { panes: LayoutPane[]; splits?: LayoutSplitRecord[] } })?.layout;
+    if (!layout?.splits) return;
+    const rect = new Map(layout.panes.map((pane) => [pane.pane_id, pane.rect]));
+    const cells = shown.map((id) => ({ id, rect: rect.get(id) })).filter((cell): cell is { id: string; rect: PaneRect } => !!cell.rect);
+    const ops: string[][] = [];
+    const chain = (ordered: { id: string; rect: PaneRect }[], axis: "down" | "right") => {
+      if (ordered.length < 2) return;
+      const last = ordered.at(-1)!.rect;
+      const end = axis === "down" ? last.y + last.height : last.x + last.width;
+      for (let i = 0; i < ordered.length - 1; i++) {
+        const top = ordered[i].rect;
+        const split = layout.splits!.find((s) =>
+          s.direction === axis &&
+          (axis === "down"
+            ? s.rect.x === top.x && s.rect.width === top.width && s.rect.y === top.y && s.rect.y + s.rect.height === end
+            : s.rect.x === top.x && s.rect.y === top.y && s.rect.x + s.rect.width === end),
+        );
+        if (!split) continue;
+        const delta = 1 / (ordered.length - i) - split.ratio;
+        if (Math.abs(delta) <= tolerance) continue;
+        const amount = String(Math.round(Math.abs(delta) * 10000) / 10000);
+        ops.push(delta > 0
+          ? ["pane", "resize", "--pane", ordered[i].id, "--direction", axis, "--amount", amount]
+          : ["pane", "resize", "--pane", ordered[i + 1].id, "--direction", axis === "down" ? "up" : "left", "--amount", amount]);
+      }
+    };
+    // Columns: cells sharing x, top to bottom; then the first cell of each column, left to right.
+    const columns = new Map<number, { id: string; rect: PaneRect }[]>();
+    for (const cell of cells) columns.set(cell.rect.x, [...(columns.get(cell.rect.x) ?? []), cell]);
+    const ordered = [...columns.entries()].sort((a, b) => a[0] - b[0]).map(([, list]) => list.sort((a, b) => a.rect.y - b.rect.y));
+    chain(ordered.map((list) => list[0]), "right");
+    for (const list of ordered) chain(list, "down");
+    for (const op of ops) await run(op);
+  } catch { /* The layout stays as Herdr left it. */ }
 }
 
 /** What Ctrl+Alt+X did: `only`/`none` change nothing. */
@@ -458,7 +627,7 @@ export class PaneSelector {
 
   /** The column on the current layout; throws the selector's refusal (zoom, unrelated splits). */
   private column(parent: PaneRecord): string[] {
-    const column = readColumn(this.layout(parent), parent, (id) => this.state.owned.has(id));
+    const column = readColumn(this.layout(parent), parent, (id) => this.state.owned.has(id), selectorGrid(this.state));
     if ("refusal" in column) throw new Error(column.refusal);
     return column.shown;
   }
@@ -519,7 +688,8 @@ export class PaneSelector {
       this.state.slots = shown;
       return;
     }
-    const desired = shown.length < COLUMN_SLOTS ? [...shown, paneId] : [shown[1], paneId];
+    const capacity = gridCapacity(selectorGrid(this.state));
+    const desired = shown.length < capacity ? [...shown, paneId] : [...shown.slice(1), paneId];
     await this.rearrange(parent, shown, desired, this.mover(move));
   }
 
@@ -535,22 +705,24 @@ export class PaneSelector {
       (anchor === undefined ? order : after(order, anchor)).find(
         (id) => !exclude.includes(id) && this.eligible(id, parent),
       );
+    const capacity = gridCapacity(selectorGrid(this.state));
     let desired: string[];
     let result: CycleResult;
-    if (shown.length === 0) {
-      const first = next(undefined, []);
-      if (!first) return "none";
-      const second = next(first, [first]);
-      desired = second ? [first, second] : [first];
-      result = "filled";
-    } else if (shown.length === 1) {
-      const second = next(shown[0], shown);
-      if (!second) return "only";
-      desired = [shown[0], second];
+    if (shown.length < capacity) {
+      // Free slots: filled with the next open agents in menu order.
+      desired = [...shown];
+      while (desired.length < capacity) {
+        const incoming = next(desired.at(-1), desired);
+        if (!incoming) break;
+        desired.push(incoming);
+      }
+      if (desired.length === shown.length) return shown.length === 0 ? "none" : "only";
       result = "filled";
     } else {
-      const incoming = next(shown[1], shown);
-      desired = incoming ? [shown[1], incoming] : [shown[1], shown[0]];
+      // Full: the first agent leaves (to a tab, or to the end when no other agent is open), the others move up
+      // and the next agent in menu order after the last one comes in.
+      const incoming = next(shown.at(-1), shown);
+      desired = incoming ? [...shown.slice(1), incoming] : [...shown.slice(1), shown[0]];
       result = incoming ? "rotated" : "swapped";
     }
     await this.rearrange(parent, shown, desired, this.mover(move));
@@ -564,12 +736,13 @@ export class PaneSelector {
   private async rearrange(parent: PaneRecord, shown: string[], desired: string[], mover: PaneMover): Promise<void> {
     if (reservedAny(this.state)) throw new Error("An agent is being placed beside the main pane; try again in a moment");
     const token = randomUUID();
-    this.state.reservedSlots = [token, token];
+    const grid = selectorGrid(this.state);
+    this.state.reservedSlots = Array.from({ length: gridCapacity(grid) }, () => token);
     this.state.layoutEpoch = (this.state.layoutEpoch ?? 0) + 1;
     try {
       const label = (id: string) => this.state.owned.get(id) ?? "agent";
       try {
-        for (const step of planColumn(parent, shown, desired, label)) await this.step(parent, step, mover);
+        for (const step of planColumn(parent, shown, desired, label, grid)) await this.step(parent, step, mover, grid);
       } catch (error) {
         await this.rollback(parent, shown, mover);
         throw error;
@@ -578,10 +751,19 @@ export class PaneSelector {
     } finally {
       releaseToken(this.state, token);
     }
+    await this.rebalance();
+  }
+
+  /** Equal shares in the grid (rows of each column, columns of the first row); cosmetic, never throws. */
+  async rebalance(): Promise<void> {
+    try {
+      const parent = this.parent();
+      await rebalanceGrid(parent, shownSlots(this.state), (args) => this.run(args));
+    } catch { /* The layout stays as Herdr left it. */ }
   }
 
   /** Runs one move and reads the layout back: a failed answer does not prove the move failed, nor the reverse. */
-  private async step(parent: PaneRecord, step: ColumnStep, mover: PaneMover): Promise<void> {
+  private async step(parent: PaneRecord, step: ColumnStep, mover: PaneMover, grid: GridShape = DEFAULT_GRID): Promise<void> {
     let failure: unknown;
     try {
       await mover(step.paneId, step.to);
@@ -589,7 +771,10 @@ export class PaneSelector {
       failure = error;
     }
     const now = siblingsOf(this.layout(parent), parent).map((pane) => pane.pane_id);
-    if (!same(now, step.expect)) throw failure ?? new Error("Unable to move the agent pane safely");
+    // A wider grid reflows when a pane leaves (Herdr gives its space to a neighbour): the agents count, not
+    // their reading order.
+    const ok = grid.cols === 1 ? same(now, step.expect) : same([...now].sort(), [...step.expect].sort());
+    if (!ok) throw failure ?? new Error("Unable to move the agent pane safely");
   }
 
   /** Best effort: back to the original column with the agents still open; never closes anything. */
@@ -607,7 +792,8 @@ export class PaneSelector {
         }
       });
       const label = (id: string) => this.state.owned.get(id) ?? "agent";
-      for (const step of planColumn(parent, now, target, label)) await this.step(parent, step, mover);
+      const grid = selectorGrid(this.state);
+      for (const step of planColumn(parent, now, target, label, grid)) await this.step(parent, step, mover, grid);
     } catch { /* Keep every terminal alive; the selector can be used again. */ } finally {
       try {
         this.state.slots = this.visible();
@@ -677,10 +863,10 @@ export class PaneSelector {
   async promote(vacated: VacatedSlot, move?: PaneMover): Promise<string | undefined> {
     const parent = this.parent();
     if (reservedAny(this.state)) return undefined;
-    const column = readColumn(this.layout(parent), parent, (id) => this.state.owned.has(id));
+    const column = readColumn(this.layout(parent), parent, (id) => this.state.owned.has(id), selectorGrid(this.state));
     if ("refusal" in column) return undefined;
     const shown = column.shown;
-    if (shown.length >= COLUMN_SLOTS) return undefined;
+    if (shown.length >= gridCapacity(selectorGrid(this.state))) return undefined;
     const candidate = promotionOrder(vacated).find((id) => !shown.includes(id) && this.eligible(id, parent));
     if (!candidate) {
       this.state.slots = shown;

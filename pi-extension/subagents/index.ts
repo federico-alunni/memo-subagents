@@ -24,6 +24,8 @@ import {
 } from "./terminal.ts";
 import type { CompletionResult } from "./completion.ts";
 import { isShown, paneSelector } from "./pane-selector.ts";
+import { gridCapacity, parseGrid } from "./runtime/pane-selector.ts";
+import type { GridShape } from "./runtime/pane-selector.ts";
 import {
   SPAWN_SPEC,
   SPAWN_TOOL,
@@ -310,8 +312,10 @@ interface AgentDefaults {
   bashAllow?: string;
   spawning?: boolean;
   autoExit?: boolean;
-  /** `ask-parent`: questions/approvals go to the parent agent first (default true). */
+  /** `ask-parent`: the parent agent is the default target of questions/approvals (default false). */
   askParent?: boolean;
+  /** `grid` (e.g. "2x2"): the agent grid beside the main pane while this agent lives (if larger). */
+  grid?: GridShape;
   interactive?: boolean;
   systemPromptMode?: "append" | "replace";
   sessionMode?: SubagentSessionMode;
@@ -466,6 +470,7 @@ function parseAgentDefinition(content: string, fallbackName: string): AgentDefin
     spawning: parseOptionalBoolean(getFrontmatterValue(frontmatter, "spawning")),
     autoExit: parseOptionalBoolean(getFrontmatterValue(frontmatter, "auto-exit")),
     askParent: parseOptionalBoolean(getFrontmatterValue(frontmatter, "ask-parent")),
+    grid: parseGrid(getFrontmatterValue(frontmatter, "grid")),
     interactive: parseOptionalBoolean(getFrontmatterValue(frontmatter, "interactive")),
     sessionMode: parseSessionMode(getFrontmatterValue(frontmatter, "session-mode")),
     cwd: getFrontmatterValue(frontmatter, "cwd"),
@@ -784,6 +789,8 @@ interface RunningSubagent {
   servedRequests?: Set<string>;
   /** Questions and bash approvals of this child come to this session first (ask-parent). */
   askParent?: boolean;
+  /** Grid asked for by its agent definition (`grid`), applied while it lives. */
+  grid?: GridShape;
 }
 
 /** A worktree-space workspace: its agents (a handoff chain) share one mirror and one widget row. */
@@ -2522,6 +2529,7 @@ async function launchSubagentInner(
     lifecycle: createLifecycle(startTime),
     ...(worktree ? { worktree } : {}),
     askParent: spec.askParent === true,
+    ...(agentDefs?.grid ? { grid: agentDefs.grid } : {}),
   };
   if (inSlot) {
     if (handoff) {
@@ -2976,16 +2984,9 @@ async function launchRequested(parent: RunningSubagent, request: SpawnRequest, p
     if ("error" in planned) throw new Error(planned.error);
     worktreePlan = planned.plan;
   }
-  // Delegated agents open in a column under the requester (a worktree space opens its own workspace).
-  let column: LaunchOptions["column"];
-  if (mode === "delegate" && !wantsWorktreeSpace(params)) {
-    const rootId = columnRootOf(parent);
-    const panes = columnPanes(rootId);
-    const layout = readLayout(parent.surface);
-    const ordered = layout ? orderColumn(panes, layout) : panes;
-    const next = nextColumnSplit(ordered.length > 0 ? ordered : [parent.surface]);
-    if (next) column = { rootId, ...next };
-  }
+  // Delegated agents are placed like any other: in the agent grid beside the main pane, else a tab
+  // (a worktree space opens its own workspace).
+  const column: LaunchOptions["column"] = undefined;
   const running = await launchSubagent(params, ctx as unknown as LaunchContext, pi.getThinkingLevel() as ThinkingLevel, {
     ...(worktreePlan ? { worktreePlan, ...(wantsWorktreeSpace(params as any) ? { worktreeSpace: true } : {}) } : {}),
     spawnedBy: { mode, parent },
@@ -3316,6 +3317,13 @@ export default function subagentsExtension(pi: ExtensionAPI) {
   // Automatic promotion when the visible agent finishes: menu order and refresh of this instance.
   paneSelector.state.menuOrder = selectorOrder;
   paneSelector.state.onPromoted = onSelectorPromoted;
+  // A live agent whose definition asks for a larger grid (e.g. a planner and its helpers) enlarges it.
+  paneSelector.state.gridHint = () => {
+    let largest: GridShape | undefined;
+    for (const agent of runningSubagents.values())
+      if (agent.grid && (!largest || gridCapacity(agent.grid) > gridCapacity(largest))) largest = agent.grid;
+    return largest;
+  };
 
   // Unified widget: agents launched by any AgentRuntime client in this process (e.g. issue-round)
   // are shown next to the generic subagents. Display only.
