@@ -102,7 +102,7 @@ export class ChildRuntime {
   private closed = false;
   private latest?: readonly unknown[];
   private timer?: ReturnType<typeof setInterval>;
-  private pendingRequest?: string;
+  private pendingRequests = new Set<string>();
   private holds = 0;
   constructor(boot: Boot, host: ChildHost) {
     this.boot = boot;
@@ -213,7 +213,7 @@ export class ChildRuntime {
         if (
           this.active ||
           !this.host.isIdle() ||
-          this.pendingRequest ||
+          this.pendingRequests.size > 0 ||
           !validTask(settled, task, "settled")
         )
           return;
@@ -345,15 +345,19 @@ export class ChildRuntime {
     const spec: DelegatedToolSpec | undefined =
       this.boot.policy.delegatedTools.find((d) => d.name === tool);
     const task = this.active;
-    if (!spec || !task || this.pendingRequest)
+    if (!spec || !task)
       throw new Error(
-        `${tool} is restricted to the active task (one request at a time)`,
+        `${tool} is restricted to the active task`,
       );
     const requestId =
       spec.once === "per-task"
         ? onceRequestId(task.taskToken, tool)
         : `${task.taskToken}-${tool}-${toolCallId}`;
-    this.pendingRequest = requestId;
+    if (this.pendingRequests.has(requestId))
+      throw new Error(
+        `${tool} is restricted to the active task (one request at a time)`,
+      );
+    this.pendingRequests.add(requestId);
     try {
       const path = requestFile(this.boot.protocolDir, requestId, "request");
       const existing = await json<ChildRecord>(path);
@@ -390,7 +394,7 @@ export class ChildRuntime {
         `${tool} outcome uncertain; the parent must reconcile the request, never blindly retry`,
       );
     } finally {
-      this.pendingRequest = undefined;
+      this.pendingRequests.delete(requestId);
     }
   }
   /** Record that the active task awaits a human answer (pending) or received it (any child: the

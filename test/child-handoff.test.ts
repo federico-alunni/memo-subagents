@@ -135,7 +135,7 @@ test("end(\"replace\") publishes the exit record and shuts the child down", asyn
 /** A real ChildRuntime over a temp protocol dir; `active` accepts the task before the hook is used. */
 async function childFixture(
   t: { after(fn: () => unknown): void },
-  extra: { exit?: "auto" | "tool" | "parent"; active?: boolean } = {},
+  extra: { exit?: "auto" | "tool" | "parent"; active?: boolean; delegatedTools?: any[] } = {},
 ) {
   const dir = realpathSync(await mkdtemp(join(tmpdir(), "memo-handoff-")));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -148,7 +148,7 @@ async function childFixture(
     question: false,
     askParent: false,
     askParentDefault: false,
-    delegatedTools: [HANDOFF_SPEC],
+    delegatedTools: extra.delegatedTools ?? [HANDOFF_SPEC],
     userInput: "takeover",
     exit: extra.exit ?? "tool",
   };
@@ -197,3 +197,32 @@ async function drainRequests(dir: string): Promise<ChildRecord[]> {
   }
   return out.sort((a, b) => a.at.localeCompare(b.at));
 }
+
+test("concurrent parallel delegated tool calls with distinct toolCallId run simultaneously", async (t) => {
+  const SPAWN_SPEC = { name: "subagent_spawn", label: "Spawn", description: "", parameters: { type: "object" }, internal: true, timeoutMs: 5000 };
+  const { dir, runtime } = await childFixture(t, { active: true, delegatedTools: [SPAWN_SPEC] });
+  const answered = new Set<string>();
+  const server = (async () => {
+    while (answered.size < 2) {
+      for (const request of await drainRequests(dir)) {
+        if (!answered.has(request.requestId!)) {
+          answered.add(request.requestId!);
+          await publish(
+            join(dir, `${sha(request.requestId!)}.response.json`),
+            record(request, "response", { requestId: request.requestId, tool: request.tool, result: { id: request.requestId } }),
+          );
+        }
+      }
+      await new Promise((r) => setTimeout(r, 5));
+    }
+  })();
+  const [res1, res2] = await Promise.all([
+    runtime.delegate("subagent_spawn", { name: "agent-1" }, "call-1"),
+    runtime.delegate("subagent_spawn", { name: "agent-2" }, "call-2"),
+  ]);
+  await server;
+  assert.equal(answered.size, 2);
+  assert.ok(res1 && (res1 as any).id);
+  assert.ok(res2 && (res2 as any).id);
+  assert.notEqual((res1 as any).id, (res2 as any).id);
+});
