@@ -19,7 +19,11 @@ import {
   createBashApprovals,
 } from "../../pi-extension/subagents/runtime/child/bash-policy.ts";
 import type { BashParentRoute, HerdrBlockedEvent, ParentApproval } from "../../pi-extension/subagents/runtime/child/bash-policy.ts";
-import { registerAskParentQuestion, routedAnswerText } from "../../pi-extension/subagents/runtime/child/question-tool.ts";
+import {
+  QUESTION_ROUTER_KEY,
+  createQuestionRouter,
+  setQuestionRouter,
+} from "../../pi-extension/subagents/runtime/child/question-router.ts";
 import childExtension, { CHILD_ENV, createAttentionTracker } from "../../pi-extension/subagents/runtime/child/extension.ts";
 import { createSubagentActivityRecorder, readSubagentActivityFile } from "../../pi-extension/subagents/activity.ts";
 import { normalizePolicy, validPolicy } from "../../pi-extension/subagents/runtime/protocol.ts";
@@ -238,110 +242,84 @@ test("opt-out: with ask-parent off the approval is exactly today's question in t
   assert.equal((await createBashApprovals(() => {}, r).check(ASK, "make", noUi))?.block, true);
 });
 
-// ── The question tool through the parent ──
+// ── The question tool through the parent: pi-memo-question's router hook ──
 
-function questionHarness(outcome: AskOutcome, enabled = true) {
-  const tools: any[] = [];
-  const emitted: [string, any][] = [];
-  const pi = {
-    registerTool: (tool: any) => tools.push(tool),
-    events: { emit: (name: string, data: unknown) => emitted.push([name, data]), on() {} },
-  } as any;
+function routerHarness(outcome: AskOutcome, opts: { enabled?: boolean; parentByDefault?: boolean } = {}) {
+  const emitted: HerdrBlockedEvent[] = [];
   const asks: unknown[][] = [];
-  registerAskParentQuestion(pi, {
-    enabled: () => enabled,
+  const router = createQuestionRouter({
+    enabled: () => opts.enabled ?? true,
+    parentByDefault: () => opts.parentByDefault ?? false,
     ask: async (question, options, _signal, onTarget) => {
       asks.push([question, options]);
       onTarget("parent");
       return outcome;
     },
-    emitBlocked: (event) => emitted.push(["herdr:blocked", event]),
+    emitBlocked: (event) => emitted.push(event),
   });
-  let customCalls = 0;
-  const ctx = {
-    hasUI: true,
-    ui: {
-      custom: async () => {
-        customCalls++;
-        return { answer: "dev", custom: false, index: 2 };
-      },
-    },
-  };
-  const params = { question: "Quale base?", options: [{ label: "main (Recommended)" }, { label: "dev" }] };
-  return {
-    tools,
-    emitted,
-    asks,
-    customCalls: () => customCalls,
-    run: () => tools[0].execute("call-1", params, undefined, undefined, ctx),
-  };
+  const q = { id: "q1", question: "Quale base?", options: [{ label: "main (Recommended)" }, { label: "dev" }] };
+  return { router, emitted, asks, run: () => router.askParent(q, undefined) };
 }
 
-test("question: one tool with pi-memo-question's schema; the parent's answer is used and recorded, no pane dialog", async () => {
-  const h = questionHarness({
+test("question router: the parent's answer becomes pi-memo-question's answer, with who answered", async () => {
+  const h = routerHarness({
     kind: "answered",
     requestId: "r1",
     result: { answer: "1", note: "safer", by: { who: "parent", name: "main agent", id: "s1" } },
   });
-  assert.deepEqual(h.tools.map((t) => t.name), ["question"]);
-  assert.deepEqual(Object.keys(h.tools[0].parameters.properties), ["question", "options"]);
-  const result = await h.run();
-  assert.equal(h.customCalls(), 0);
+  const outcome = await h.run();
   assert.deepEqual(h.asks, [["Quale base?", [{ label: "main (Recommended)" }, { label: "dev" }]]]);
-  assert.equal(
-    result.content[0].text,
-    'The parent agent selected: 1. main (Recommended)\nParent agent note: safer\n(answered by the parent agent "main agent" (s1))',
-  );
-  assert.equal(result.details.answer, "main (Recommended)");
-  assert.deepEqual(result.details.answeredBy, { who: "parent", name: "main agent", id: "s1" });
-  // memo-question events still feed question.json; the wait carries its target.
-  const memo = h.emitted.filter(([name]) => name === "memo-question").map(([, data]) => data);
-  assert.equal(memo[0].pending, true);
-  assert.equal(memo[1].answer, "main (Recommended)");
-  assert.ok(h.emitted.some(([name, data]) => name === "herdr:blocked" && data.target === "parent"));
-  const blocked = h.emitted.filter(([name]) => name === "herdr:blocked").map(([, data]) => data);
-  assert.equal(blocked.filter((e) => e.active).length, blocked.filter((e) => !e.active).length);
+  assert.deepEqual(outcome, {
+    kind: "answered",
+    answer: { answer: "main (Recommended)", custom: false, index: 1, note: "safer" },
+    by: "the parent agent",
+    note: "safer",
+    details: {
+      answeredBy: { who: "parent", name: "main agent", id: "s1" },
+      answeredByText: 'answered by the parent agent "main agent" (s1)',
+      requestId: "r1",
+    },
+  });
+  // The wait is visible with its target, and always closed.
+  assert.deepEqual(h.emitted, [
+    { active: true, kind: "question", label: "→ parent · Quale base?", target: "parent" },
+    { active: false },
+  ]);
 });
 
-test("question: a user answer via the parent session, a fallback to the pane, a withdrawn request, and opt-out", async () => {
-  const viaUser = await questionHarness({
+test("question router: escalated answers, fallback to the user, withdrawal, default target", async () => {
+  const viaUser = await routerHarness({
     kind: "answered",
     requestId: "r1",
     result: { answer: "something else", by: { who: "user", where: "parent-session", reason: "timeout", name: "main agent" } },
   }).run();
-  assert.match(
-    viaUser.content[0].text,
-    /^User wrote: something else\n\(answered by the user in the session of "main agent" \(the parent agent did not answer in time\)\)$/,
-  );
-  const fallback = questionHarness({ kind: "fallback", reason: "the parent agent is not available" });
-  const local = await fallback.run();
-  assert.equal(fallback.customCalls(), 1);
-  assert.equal(
-    local.content[0].text,
-    "User selected: 2. dev\n(answered by the user in this pane; the parent agent could not answer: the parent agent is not available)",
-  );
-  assert.equal(local.details.answeredBy.where, "child-pane");
-  assert.ok(fallback.emitted.some(([name, data]) => name === "herdr:blocked" && data.target === "user"));
-  const withdrawn = await questionHarness({ kind: "cancelled" }).run();
-  assert.match(withdrawn.content[0].text, /^User cancelled the selection\n\(the request to the parent agent was withdrawn/);
-  const off = questionHarness({ kind: "fallback", reason: "unused" }, false);
-  const plain = await off.run();
-  assert.equal(off.customCalls(), 1);
+  assert.equal(viaUser.kind === "answered" && viaUser.by, "the user");
+  assert.deepEqual(viaUser.kind === "answered" && viaUser.answer, { answer: "something else", custom: true });
+  assert.deepEqual(await routerHarness({ kind: "fallback", reason: "the parent agent is not available" }).run(), {
+    kind: "user",
+    reason: "the parent agent is not available",
+  });
+  assert.deepEqual(await routerHarness({ kind: "cancelled" }).run(), { kind: "cancelled" });
+  const off = routerHarness({ kind: "cancelled" }, { enabled: false, parentByDefault: true });
+  assert.equal((await off.run()).kind, "user");
   assert.equal(off.asks.length, 0);
-  assert.equal(plain.content[0].text, "User selected: 2. dev");
-  assert.equal(routedAnswerText(null, { who: "parent", name: "p" }), 'The parent agent cancelled the selection\n(answered by the parent agent "p")');
+  assert.equal(off.router.defaultTarget(), "user");
+  assert.equal(routerHarness({ kind: "cancelled" }, { parentByDefault: true }).router.defaultTarget(), "parent");
+  assert.equal(routerHarness({ kind: "cancelled" }).router.defaultTarget(), "user");
 });
 
-test("child extension: ask-parent children register the one wrapped question tool; others do not", async (t) => {
+test("child extension: ask-parent children register the router; the question tool stays the installed package's", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "memo-ask-child-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const previous = process.env[CHILD_ENV.protocolDir];
   t.after(() => {
     if (previous === undefined) delete process.env[CHILD_ENV.protocolDir];
     else process.env[CHILD_ENV.protocolDir] = previous;
+    setQuestionRouter(undefined);
   });
   process.env[CHILD_ENV.protocolDir] = dir;
   const load = async (policy: object, isolation = "profile") => {
+    setQuestionRouter(undefined);
     await writeFile(join(dir, "boot.json"), JSON.stringify({ isolation, policy }));
     const tools: string[] = [];
     childExtension({
@@ -350,16 +328,15 @@ test("child extension: ask-parent children register the one wrapped question too
       registerTool: (tool: any) => tools.push(tool.name),
       on() {},
     } as any);
-    return tools.sort();
+    return { tools: tools.sort(), router: (globalThis as any)[QUESTION_ROUTER_KEY] };
   };
   const base = { tools: null, bash: "readonly", bashAsk: true, question: false, delegatedTools: [], userInput: "allowed", exit: "tool" };
-  assert.deepEqual(await load({ ...base, askParent: true }), ["caller_ping", "question", "subagent_done"]);
-  assert.deepEqual(
-    await load({ ...base, askParent: true, tools: ["read"], question: true }, "isolated"),
-    ["caller_ping", "question", "subagent_done"],
-  );
-  assert.deepEqual(await load({ ...base, askParent: true }, "isolated"), ["caller_ping", "subagent_done"]);
-  assert.deepEqual(await load(base), ["caller_ping", "subagent_done"]);
+  const asking = await load({ ...base, askParent: true, askParentDefault: false });
+  assert.deepEqual(asking.tools, ["caller_ping", "subagent_done"]);
+  assert.equal(typeof asking.router?.askParent, "function");
+  // Not started yet: no runtime, so the user is the target whatever the default.
+  assert.equal(asking.router.defaultTarget(), "user");
+  assert.equal((await load(base)).router, undefined);
 });
 
 test("attention: the waiting target reaches activity.json (validated)", async (t) => {
@@ -388,4 +365,37 @@ test("attention: the waiting target reaches activity.json (validated)", async (t
   const raw = JSON.parse(await readFile(file, "utf8"));
   await writeFile(file, JSON.stringify({ ...raw, attention: { kind: "approval", target: "someone", since: 1 } }));
   assert.equal(readSubagentActivityFile(file, "c").ok, false);
+});
+
+test("contract with pi-memo-question: its question tool asks this router (to: parent, or the parent default)", async (t) => {
+  const { default: questionExtension } = await import("pi-memo-question/extension");
+  t.after(() => setQuestionRouter(undefined));
+  const tools: any[] = [];
+  questionExtension({ registerTool: (tool: any) => tools.push(tool), events: { emit() {} } } as any);
+  const tool = tools.find((x) => x.name === "question");
+  assert.deepEqual(Object.keys(tool.parameters.properties), ["question", "options", "to"]);
+  let parentByDefault = false;
+  const asked: string[] = [];
+  setQuestionRouter(
+    createQuestionRouter({
+      enabled: () => true,
+      parentByDefault: () => parentByDefault,
+      ask: async (question) => {
+        asked.push(question);
+        return { kind: "answered", requestId: "r", result: { answer: "dev", by: { who: "parent", name: "main agent" } } };
+      },
+      emitBlocked() {},
+    }),
+  );
+  const params = { question: "Quale base?", options: [{ label: "main" }, { label: "dev" }] };
+  const noUi = { hasUI: false, ui: {} };
+  const routed = await tool.execute("c1", { ...params, to: "parent" }, undefined, undefined, noUi);
+  assert.equal(routed.content[0].text, "The parent agent selected: 2. dev");
+  // The host's details (who answered, request id) are recorded with the result.
+  assert.deepEqual(routed.details.answeredBy, { who: "parent", name: "main agent" });
+  // Without `to` the user is asked (default false): no UI here, so the tool reports it instead of the router.
+  assert.match((await tool.execute("c2", params, undefined, undefined, noUi)).content[0].text, /UI not available/);
+  parentByDefault = true;
+  assert.equal((await tool.execute("c3", params, undefined, undefined, noUi)).content[0].text, "The parent agent selected: 2. dev");
+  assert.deepEqual(asked, ["Quale base?", "Quale base?"]);
 });

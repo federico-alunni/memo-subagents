@@ -358,11 +358,11 @@ describe("subagent worktree launch", () => {
     }
   });
 
-  it("ask-parent is on by default; `ask-parent: false` and the askParent parameter (which wins) opt out", async () => {
+  it("every subagent can ask its parent; the user is the default target unless `ask-parent` or askParent (which wins) say parent", async () => {
     const repo = makeRepo();
     mkdirSync(join(agentDir, "agents"), { recursive: true });
-    writeFileSync(join(agentDir, "agents", "own-pane-test.md"), "---\nname: own-pane-test\nbash: readonly\nask-parent: false\n---\nAsk the user.\n");
-    writeFileSync(join(agentDir, "agents", "ask-test.md"), "---\nname: ask-test\nbash: readonly\n---\nAsk the parent.\n");
+    writeFileSync(join(agentDir, "agents", "own-pane-test.md"), "---\nname: own-pane-test\nbash: readonly\n---\nAsk the user.\n");
+    writeFileSync(join(agentDir, "agents", "ask-test.md"), "---\nname: ask-test\nbash: readonly\nask-parent: true\n---\nAsk the parent.\n");
     try {
       const { tools } = setup();
       const run = async (params: Record<string, unknown>) => {
@@ -372,15 +372,18 @@ describe("subagent worktree launch", () => {
       };
       const asking = await run({ agent: "ask-test" });
       assert.equal(asking.spec.askParent, true);
+      assert.equal(asking.spec.askParentDefault, true);
       assert.equal(asking.spec.bashAsk, true);
       assert.equal(asking.running?.askParent, true);
-      assert.equal((await run({})).spec.askParent, true);
-      assert.equal((await run({ agent: "own-pane-test" })).spec.askParent, false);
-      assert.equal((await run({ agent: "own-pane-test", askParent: true })).spec.askParent, true);
-      assert.equal((await run({ agent: "ask-test", askParent: false })).spec.askParent, false);
-      assert.equal(__test__.resolveAskParent({}, null), true);
+      const bare = await run({});
+      assert.equal(bare.spec.askParent, true);
+      assert.equal(bare.spec.askParentDefault, false);
+      assert.equal((await run({ agent: "own-pane-test" })).spec.askParentDefault, false);
+      assert.equal((await run({ agent: "own-pane-test", askParent: true })).spec.askParentDefault, true);
+      assert.equal((await run({ agent: "ask-test", askParent: false })).spec.askParentDefault, false);
+      assert.equal(__test__.resolveAskParent({}, null), false);
       assert.equal(__test__.resolveAskParent({ askParent: false }, { askParent: true }), false);
-      assert.equal(__test__.resolveAskParent({}, { askParent: false }), false);
+      assert.equal(__test__.resolveAskParent({}, { askParent: true }), true);
     } finally {
       rmSync(join(agentDir, "agents"), { recursive: true, force: true });
     }

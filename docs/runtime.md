@@ -97,7 +97,8 @@ interface LaunchSpec {
   bashAllow?: string[];       // readonly only: extra exact word prefixes, e.g. ["npm test", "gh issue view"]
   bashAsk?: boolean;          // readonly + userInput "allowed" only: ask the user instead of blocking (see "Bash policy")
   question?: boolean;         // isolated children: loads and allows the `question` tool (pi-memo-question)
-  askParent?: boolean;        // userInput "allowed" only: questions/approvals go to the parent first (see "Ask-parent"); default false
+  askParent?: boolean;        // userInput "allowed" only: the parent can be asked (see "Ask-parent"); default false
+  askParentDefault?: boolean; // with askParent: questions without `to` and bash approvals go to the parent first; default false
   delegatedTools?: DelegatedToolSpec[];
   appendSystemPrompt?: string[]; // absolute, readable files passed with --append-system-prompt
   systemPrompt?: string;      // absolute, readable file passed with --system-prompt (replaces pi's prompt)
@@ -163,12 +164,13 @@ interface DelegatedToolSpec {
   later commands with the same first two words (or the same single word) for the rest of that child process only;
   it is never persisted. Questions are asked one at a time. No UI (`ctx.hasUI` false), cancel or abort → blocked;
   commands with shell grammar are blocked without asking. Workflow children (`takeover`) never ask.
-- With `askParent` the same `ask` command goes to the parent agent first (see [Ask-parent](#ask-parent)); the
+- With `askParentDefault` the same `ask` command goes to the parent agent first (see [Ask-parent](#ask-parent)); the
   approvals stay serialized one at a time. A `block` command (shell grammar, outside the policy) is never sent. The
   child re-checks every decision that comes back against `bashDecision`: only a command it would have asked about
   may run, `once` passes that call only, and `always` is applied only when a user gave it (a parent agent's `always`
   is never applied). The bash result (allowed) or block reason records who decided.
-- Boot records without `bashAllow`/`bashAsk` (0.2.0) mean `[]`/`false`; without `askParent`, `false`.
+- Boot records without `bashAllow`/`bashAsk` (0.2.0) mean `[]`/`false`; without `askParent`, `false`; without
+  `askParentDefault`, the value of `askParent` (records written when ask-parent meant "parent first").
 
 ### Exit policy and user input
 
@@ -202,12 +204,14 @@ While its dialog is open the tool emits `memo-question` on `pi.events`; the chil
 `observe` reports `question` for every child, and the tool also emits `herdr:blocked`. The answer itself stays in
 the child session.
 
-With `askParent` the runtime does not add the extension with `-e`: the child extension registers pi-memo-question's
-own tool through a wrapper (pi-memo-question itself is unchanged), so the child still has exactly one `question` tool
-with the same schema, the same `memo-question` events and `question.json` records. Only the dialog call is routed: to
-the parent first, to the same dialog in the child's pane as fallback. The result text and `details.answeredBy` say who
-answered (e.g. `The parent agent selected: 1. … (answered by the parent agent "main agent" (<session id>))`). Being
-first among the `-e` extensions, this tool wins over a copy loaded by the child's profile.
+The extension is always the **installed** pi-memo-question (resolved from the user's `settings.json` packages or pi's
+git checkout; `config.questionExtension` overrides it): profile children get it with the profile and `-e` names the
+same real path, so pi loads it once. The runtime never loads a copy of its own. With `askParent` the child extension
+registers a router through the package's hook (`globalThis[Symbol.for("pi-memo-question/router")]`, pi-memo-question
+`src/router.ts`): the tool asks it for `to: "parent"` (and without `to` when `askParentDefault`), the router sends the
+question to the parent and returns the answer, or tells the tool to open its dialog in the child's pane when the parent
+cannot answer. The result text says who answered (`The parent agent selected: 1. …`) and `details.answeredBy` /
+`details.answeredByText` record it.
 
 ### Waiting for the user (`herdr:blocked`, attention)
 
@@ -238,9 +242,10 @@ new one before closing the old one.
 ### Ask-parent
 
 `askParent: true` (user-driven children only; `false` by default, so boot records written before it and other clients
-such as pi-issue-round keep their behaviour) sends the child's `question` calls and `bashAsk` approvals to its parent
-first. The memo `subagent` tool turns it on for its children (agent frontmatter `ask-parent: false` or the spawn
-parameter `askParent: false` turn it off).
+such as pi-issue-round keep their behaviour) lets the child ask its parent: `question` calls with `to: "parent"`, and
+with `askParentDefault: true` also questions without `to` and `bashAsk` approvals. The memo `subagent` tool turns
+`askParent` on for every child; `askParentDefault` follows the spawn parameter `askParent`, else the agent frontmatter
+`ask-parent`, else `false`.
 
 Transport (same `publish`/`validTask` primitives as delegated tools, tool name `ask_parent`, never a delegated tool):
 

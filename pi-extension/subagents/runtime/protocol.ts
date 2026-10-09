@@ -102,10 +102,15 @@ export interface ChildPolicy {
   userInput: UserInputPolicy;
   exit: ExitPolicy;
   /**
-   * User-driven children only: `question` calls and `bashAsk` approvals go to the parent agent first
-   * (correlated request/response records), escalating to the user only when the parent cannot answer.
+   * User-driven children only: the parent agent can be asked (correlated request/response records):
+   * `question` with `to: "parent"`, escalating to the user only when the parent cannot answer.
    */
   askParent: boolean;
+  /**
+   * With `askParent`: the default target is the parent agent, for `question` calls without `to` and for
+   * `bashAsk` approvals. Otherwise they go to the user, and only `to: "parent"` asks the parent.
+   */
+  askParentDefault: boolean;
 }
 /**
  * One `bashAllow` entry: a non-empty sequence of plain words (no shell grammar, quotes, globs, `$`, comments),
@@ -133,6 +138,8 @@ export function normalizePolicy(raw: unknown): ChildPolicy | undefined {
     userInput: p.userInput ?? "takeover",
     exit: p.exit ?? "parent",
     askParent: p.askParent ?? false,
+    // Records written before the per-question target existed: ask-parent meant "parent first".
+    askParentDefault: p.askParentDefault ?? (p.askParent ?? false),
   };
 }
 export interface DisplaySpec {
@@ -392,6 +399,8 @@ export function validPolicy(policy: ChildPolicy | undefined): policy is ChildPol
     // Asking the parent first only makes sense for children whose questions reach a user.
     typeof policy.askParent === "boolean" &&
     (!policy.askParent || policy.userInput === "allowed") &&
+    typeof policy.askParentDefault === "boolean" &&
+    (!policy.askParentDefault || policy.askParent) &&
     Array.isArray(policy.delegatedTools) &&
     policy.delegatedTools.every(
       (d) =>

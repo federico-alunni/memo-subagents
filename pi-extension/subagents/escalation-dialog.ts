@@ -1,13 +1,40 @@
 // Ask-parent escalations shown to the user in the parent session: one dialog listing every pending
 // escalated request (one or more children), browsed with ←/→, each showing which child it comes from.
-// Questions use pi-memo-question's dialog component; approvals the same three options as the child pane.
+// Questions use the installed pi-memo-question's dialog component (published on globalThis by the package, never
+// imported); approvals the same three options as the child pane.
 import { Key, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { TUI } from "@earendil-works/pi-tui";
-import { questionComponent } from "pi-memo-question/dialog";
-import type { QuestionAnswer } from "pi-memo-question/dialog";
 import { BASH_ASK_OPTIONS, bashAskTitle } from "./runtime/child/bash-policy.ts";
 import { askOrigin } from "./runtime/ask-parent.ts";
 import type { ApprovalDecision, AskRequest } from "./runtime/ask-parent.ts";
+
+/** pi-memo-question's dialog result: an option (1-based index, optional note) or a free answer. */
+type QuestionAnswer = { answer: string; custom: false; index: number; note?: string } | { answer: string; custom: true };
+
+/** pi-memo-question's `QUESTION_DIALOG_KEY`: its extension publishes `{ questionComponent }` when it loads. */
+const QUESTION_DIALOG_KEY = Symbol.for("pi-memo-question/dialog");
+
+type QuestionComponent = (
+  tui: TUI,
+  theme: Theme,
+  question: string,
+  options: { label: string; description?: string }[],
+  done: (answer: QuestionAnswer | null) => void,
+) => DialogComponent;
+
+function installedQuestionComponent(): QuestionComponent | undefined {
+  const api = (globalThis as Record<symbol, { questionComponent?: unknown } | undefined>)[QUESTION_DIALOG_KEY];
+  return typeof api?.questionComponent === "function" ? (api.questionComponent as QuestionComponent) : undefined;
+}
+
+/** Without pi-memo-question in this session: say so; any key answers "cancelled" (the child decides). */
+function missingQuestionComponent(theme: Theme, done: (answer: QuestionAnswer | null) => void): DialogComponent {
+  return {
+    render: (width) => wrapTextWithAnsi(theme.fg("warning", "pi-memo-question is not loaded in this session: press any key to cancel this question."), width),
+    handleInput: () => done(null),
+    invalidate() {},
+  };
+}
 
 export interface EscalationEntry {
   key: string;
@@ -170,9 +197,11 @@ export class EscalationList {
     const theme = this.theme!;
     item.component =
       request.kind === "question"
-        ? questionComponent(tui, theme, request.text, request.options ?? [], (answer) =>
-            this.remove(item, { kind: "question", answer }),
-          )
+        ? (() => {
+            const done = (answer: QuestionAnswer | null) => this.remove(item, { kind: "question", answer });
+            const question = installedQuestionComponent();
+            return question ? question(tui, theme, request.text, request.options ?? [], done) : missingQuestionComponent(theme, done);
+          })()
         : approvalComponent(tui, theme, request.command ?? request.text, request.prefix ?? "", (decision) =>
             this.remove(item, { kind: "approval", decision }),
           );

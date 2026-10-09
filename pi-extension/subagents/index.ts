@@ -288,7 +288,7 @@ const SubagentParams = Type.Object({
   askParent: Type.Optional(
     Type.Boolean({
       description:
-        "Whether the subagent's questions and bash approvals come to you first (delivered as subagent_request messages, answered with subagent_answer) before reaching the user. Default true; overrides the agent's `ask-parent` frontmatter. false: the subagent asks the user in its own pane.",
+        "Default target of the subagent's questions and bash approvals. true: they come to you first (subagent_request messages, answered with subagent_answer) and reach the user only if you escalate or do not answer; use it when you can answer what the subagent will ask. false (default): they go to the user. Either way the subagent may pick per question (question tool, to: \"parent\" | \"user\"). Overrides the agent's `ask-parent` frontmatter.",
     }),
   ),
 });
@@ -628,14 +628,15 @@ function resolveEffectiveInteractive(
 }
 
 /**
- * Ask-parent of a spawn: the `askParent` parameter wins over the agent's `ask-parent` frontmatter; on by
- * default (questions and bash approvals come to the parent agent first).
+ * Default target of a subagent's questions (without `to`) and bash approvals: the parent agent when the
+ * `askParent` parameter, else the agent's `ask-parent` frontmatter, says so; otherwise the user. Every
+ * subagent can still ask the parent per question (`to: "parent"`) or the user (`to: "user"`).
  */
 function resolveAskParent(
   params: Pick<Static<typeof SubagentParams>, "askParent">,
   agentDefs: AgentDefaults | null,
 ): boolean {
-  return params.askParent ?? agentDefs?.askParent ?? true;
+  return params.askParent ?? agentDefs?.askParent ?? false;
 }
 
 function loadAgentDefaults(agentName: string): AgentDefaults | null {
@@ -2485,7 +2486,8 @@ async function launchSubagentInner(
       : {}),
     userInput: "allowed",
     exit: effectiveAutoExit ? "auto" : "tool",
-    askParent: resolveAskParent(params, agentDefs),
+    askParent: true,
+    askParentDefault: resolveAskParent(params, agentDefs),
     skills: splitList(params.skills ?? agentDefs?.skills),
     session: { kind: "file", path: subagentSessionFile },
     env: subagentEnv({ name: params.name, agent: params.agent, id, denySet, worktreeSpace: inSlot, spawning: options?.spawning }),
@@ -3958,6 +3960,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             userInput: "allowed",
             exit: autoExit ? "auto" : "tool",
             askParent: true,
+            askParentDefault: false,
             session: { kind: "file", path: params.sessionPath },
             env: subagentEnv({ name, id }),
             placement: surfacePlacement(),

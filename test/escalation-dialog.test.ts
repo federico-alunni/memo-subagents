@@ -3,6 +3,10 @@ import assert from "node:assert/strict";
 import { EscalationList, approvalComponent } from "../pi-extension/subagents/escalation-dialog.ts";
 import type { DialogComponent, EscalationAnswer } from "../pi-extension/subagents/escalation-dialog.ts";
 import type { AskRequest } from "../pi-extension/subagents/runtime/ask-parent.ts";
+import { questionComponent } from "pi-memo-question/dialog";
+
+// The installed pi-memo-question publishes its dialog when it loads; the test stands in for it.
+(globalThis as any)[Symbol.for("pi-memo-question/dialog")] = { questionComponent };
 
 const LEFT = "\x1b[D";
 const RIGHT = "\x1b[C";

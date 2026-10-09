@@ -42,9 +42,6 @@
     "@earendil-works/pi-tui": "*",
     "typebox": "*"
   },
-  "dependencies": {
-    "pi-memo-question": "git+https://github.com/federico-alunni/pi-memo-question.git#semver:^0.1.0"
-  },
   "pi": {
     "extensions": [
       "./pi-extension/subagents/index.ts"
@@ -52,5 +49,8 @@
   },
   "engines": {
     "node": ">=22.15"
+  },
+  "devDependencies": {
+    "pi-memo-question": "git+https://github.com/federico-alunni/pi-memo-question.git#beta"
   }
 }

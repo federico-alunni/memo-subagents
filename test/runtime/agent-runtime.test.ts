@@ -44,10 +44,14 @@ import type {
   DelegatedToolSpec,
 } from "../../pi-extension/subagents/runtime/protocol.ts";
 import { childToolCall } from "../../pi-extension/subagents/runtime/child/extension.ts";
-import { resolveQuestionExtension } from "../../pi-extension/subagents/runtime/question-extension.ts";
 import { AskParentHost, createEscalate } from "../../pi-extension/subagents/ask-parent-host.ts";
 import { PaneSelector } from "../../pi-extension/subagents/runtime/pane-selector.ts";
 import type { SelectorState } from "../../pi-extension/subagents/runtime/pane-selector.ts";
+
+// Stands for the installed pi-memo-question (the runtime resolves the user's installation; tests pin a path).
+const QUESTION_EXTENSION = realpathSync(
+  fileURLToPath(new URL("../../node_modules/pi-memo-question/extensions/question.ts", import.meta.url)),
+);
 
 // Role presets of the original issue-round transport tests, expressed as runtime policies.
 const WORKER_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
@@ -319,6 +323,8 @@ async function fixture(t: { after(fn: () => unknown): void }) {
     shellReadyTimeoutMs: 1000,
     shutdownTimeoutMs: 500,
     selector: { owned: new Map() } as SelectorState,
+    // The installed package in production; here a fixed path, whatever this machine installed.
+    questionExtension: QUESTION_EXTENSION,
   };
   const transport = new AgentRuntime(config);
   const input: LaunchSpec = {
@@ -1458,10 +1464,6 @@ test("invalid tool policies are refused before any pane is created", async (t) =
   assert.equal(f.fake.createCount, 0);
 });
 
-// The runtime prefers a pi-installed pi-memo-question over the bundled dependency: expect what it resolves.
-const QUESTION_EXTENSION =
-  resolveQuestionExtension() ??
-  realpathSync(fileURLToPath(new URL("../../node_modules/pi-memo-question/extensions/question.ts", import.meta.url)));
 
 test("question is pi-memo-question's tool: loaded with question: true, observed for any child with a task", async (t) => {
   assert.equal(childToolCall(WORKER_POLICY, "question", {})?.block, true);
@@ -2035,6 +2037,7 @@ test("boot records of 0.2.0 (without the new policy fields) keep their meaning",
     exit: "parent",
     // Boot records written before ask-parent (and external clients) never ask the parent.
     askParent: false,
+    askParentDefault: false,
   });
 });
 
@@ -2508,21 +2511,24 @@ const until = async <T>(read: () => Promise<T | undefined>, ms = 3000): Promise<
   }
 };
 
-test("ask-parent: launch policy, user-driven only, and the child extension owns the one question tool", async (t) => {
+test("ask-parent: launch policy, user-driven only; the question tool is always the installed package", async (t) => {
   const f = await fixture(t);
-  await f.transport.launch({ ...f.input, ...GENERIC, askParent: true });
+  await f.transport.launch({ ...f.input, ...GENERIC, askParent: true, askParentDefault: true });
   assert.equal(f.fake.boot!.policy.askParent, true);
-  const run = f.fake.calls.find((c) => c.argv[1] === "run")!.argv[3];
-  assert.doesNotMatch(run, /extensions\/question\.ts/);
-  // Opt-out: profile children keep loading pi-memo-question's extension as before.
+  assert.equal(f.fake.boot!.policy.askParentDefault, true);
+  // With or without ask-parent the child loads the installed extension (routed through its router hook).
+  assert.ok(f.fake.calls.find((c) => c.argv[1] === "run")!.argv[3].includes(`'-e' '${QUESTION_EXTENSION}'`));
   const g = await fixture(t);
   await g.transport.launch({ ...g.input, ...GENERIC });
   assert.equal(g.fake.boot!.policy.askParent, false);
-  assert.match(g.fake.calls.find((c) => c.argv[1] === "run")!.argv[3], /extensions\/question\.ts/);
-  // Workflow (takeover) children never ask the parent; `ask_parent` is a reserved tool name.
+  assert.equal(g.fake.boot!.policy.askParentDefault, false);
+  assert.ok(g.fake.calls.find((c) => c.argv[1] === "run")!.argv[3].includes(`'-e' '${QUESTION_EXTENSION}'`));
+  // Workflow (takeover) children never ask the parent; the parent as default needs ask-parent;
+  // `ask_parent` is a reserved tool name.
   const n = await fixture(t);
   for (const [index, patch] of [
     { askParent: true },
+    { askParentDefault: true, ...GENERIC },
     { askParent: "yes" as unknown as boolean, ...GENERIC },
     { delegatedTools: [{ ...INTEGRATE, name: "ask_parent" }] },
   ].entries())

@@ -126,10 +126,12 @@ export interface LaunchSpec {
   bashAsk?: boolean;
   question?: boolean;
   /**
-   * userInput "allowed" only: `question` calls and `bashAsk` approvals go to the parent agent first
-   * (`pendingAsks` / `answerAsk`), and to the user only when the parent cannot answer. Default false.
+   * userInput "allowed" only: the parent agent can be asked (`pendingAsks` / `answerAsk`): `question` with
+   * `to: "parent"`, and to the user only when the parent cannot answer. Default false.
    */
   askParent?: boolean;
+  /** With `askParent`: questions without `to` and `bashAsk` approvals go to the parent first. Default false. */
+  askParentDefault?: boolean;
   delegatedTools?: DelegatedToolSpec[];
   /** "takeover" (default) or "allowed": whether the user may drive the child without blocking control. */
   userInput?: UserInputPolicy;
@@ -671,6 +673,7 @@ export class AgentRuntime {
       userInput: input.userInput ?? "takeover",
       exit: input.exit ?? "parent",
       askParent: (input.askParent ?? false) as boolean,
+      askParentDefault: (input.askParentDefault ?? false) as boolean,
     };
     const skills = [...(input.skills ?? [])];
     if (!skills.every((skill) => typeof skill === "string" && /^[A-Za-z0-9_.:-]+$/.test(skill)))
@@ -795,10 +798,10 @@ export class AgentRuntime {
         "unsupported",
         "question: true requires the pi-memo-question package",
       );
-    // With askParent the child extension registers the one `question` tool itself (pi-memo-question's,
-    // wrapped to ask the parent first), so the package is not loaded a second time.
+    // Always the installed package (the same path as the profile's, so pi loads it once); ask-parent routes
+    // it through pi-memo-question's router hook, never through a copy.
     const extraExtensions = [
-      ...(questionExtension && !policy.askParent && (policy.question || isolation === "profile")
+      ...(questionExtension && (policy.question || isolation === "profile")
         ? [questionExtension]
         : []),
       ...(this.config.hostExtensions ?? []),

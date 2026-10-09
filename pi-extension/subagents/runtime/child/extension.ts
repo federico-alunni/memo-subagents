@@ -17,7 +17,7 @@ import { ChildRuntime } from "./runtime.ts";
 import type { QuestionEvent } from "pi-memo-question/events";
 import { bashDecision, createBashApprovals, readonlyBlockReason } from "./bash-policy.ts";
 import type { BashAskContext, BashParentRoute, HerdrBlockedEvent, ParentApproval } from "./bash-policy.ts";
-import { registerAskParentQuestion } from "./question-tool.ts";
+import { createQuestionRouter, setQuestionRouter } from "./question-router.ts";
 import { setAskUpstream } from "../ask-parent.ts";
 import type { AskTarget } from "../ask-parent.ts";
 import { CHILD_ENV } from "./env.ts";
@@ -240,7 +240,8 @@ export default function childExtension(pi: ExtensionAPI): void {
   // Ask-parent: questions and approvals go to the parent agent first (see docs/runtime.md).
   const askEnabled = () => !!runtime && boot?.policy.askParent === true;
   const bashRoute: BashParentRoute = {
-    enabled: askEnabled,
+    // Approvals follow the default target: the parent only when it is the default.
+    enabled: () => askEnabled() && boot?.policy.askParentDefault === true,
     async ask(command, prefix, signal, onTarget): Promise<ParentApproval> {
       const outcome = await runtime!.ask({ kind: "approval", text: command, command, prefix }, { signal, onTarget });
       if (outcome.kind !== "answered") return outcome;
@@ -255,13 +256,18 @@ export default function childExtension(pi: ExtensionAPI): void {
   const toolGuard = createChildToolGuard(emitBlocked, bashRoute);
   // Transcript lines of approvals given upstream, appended to the bash result.
   const approvalAudit = new Map<string, string>();
-  if (declared?.askParent && (declared.question || declaredBoot?.isolation === "profile"))
-    registerAskParentQuestion(pi, {
-      enabled: askEnabled,
-      ask: (question, options, signal, onTarget) =>
-        runtime!.ask({ kind: "question", text: question, options }, { signal, onTarget }),
-      emitBlocked,
-    });
+  // The installed pi-memo-question asks this router before its dialog (`to: "parent"`, or no `to` when the
+  // parent is the default target).
+  if (declared?.askParent)
+    setQuestionRouter(
+      createQuestionRouter({
+        enabled: askEnabled,
+        parentByDefault: () => boot?.policy.askParentDefault === true,
+        ask: (question, options, signal, onTarget) =>
+          runtime!.ask({ kind: "question", text: question, options }, { signal, onTarget }),
+        emitBlocked,
+      }),
+    );
   // Isolated children (-ne) lack Herdr's pi integration: report the pane's agent state directly.
   const herdr = declared ? createHerdrReporter({ isolation: declaredBoot?.isolation }) : undefined;
   pi.events.on(
