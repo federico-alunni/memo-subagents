@@ -20,6 +20,16 @@
 - Pane selector: a new `auto` launch takes the visible split whenever it is free (main tab with only the main pane, not zoomed, split not reserved), even with other agents open in background tabs. When the visible agent finishes, the next open agent in menu order (`Ctrl+Alt+X` order, wrapping around) is moved into the split once the finished pane has closed — same pane ID and terminal, through its runtime; the widget `▶` and `/subagent` menu follow it. Promotions share the launches' split reservation and the selector's refusals (unrelated splits, zoom, other workspaces).
 - Pane selector: agents are shown in a column right of the main pane, 40% of the tab by default (`PI_SUBAGENT_COLUMN_RATIO`, a number strictly between 0 and 1; invalid → 0.4), applied when the pane is created and on every move into the column. The column has two stacked slots: one open agent fills it, two are shown top/bottom, more run in background tabs. Each slot is reserved synchronously, so concurrent launches never create more than two agent panes nor an extra split (a second concurrent launch waits for the first one's pane and splits it down). `Ctrl+Alt+X` swaps the two shown agents, or with three or more rotates them as a queue (top → tab, bottom → top, next in menu order → bottom, wrapping around); `/subagent` selection and `visible` launches with both slots taken follow the same queue rule, a free slot is simply filled. A finishing shown agent's slot is filled in place by the next background agent in menu order, otherwise the remaining agent takes the whole column. Every move goes through the owning runtime, is read back and rolled back on failure; the widget `▶` and the menu mark both shown agents. `SelectorState.selected`/`reservedSplit` became `slots`/`reservedSlots` (older states are migrated on load).
 
+## 0.4.2 — 2026-10-09
+
+### Fixed
+
+- A subagent keeps the session socket inherited from its parent instead of starting its own. Its scripts (e.g. a CLI asking for a `replace` handoff) therefore act as this agent in the session that owns it: the successor is supervised and closed there, and the slot's final result reaches the main session. Before, the successor belonged to the agent it replaced, which then ended: nobody supervised or closed it.
+
+### Added
+
+- Frontmatter `spawning: true` (with optional `spawning-depth`) grants delegated spawning by default; an explicit `spawning` parameter wins.
+
 ## 0.4.1 — 2026-10-09
 
 ### Fixed

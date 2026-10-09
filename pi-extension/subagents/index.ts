@@ -310,7 +310,10 @@ interface AgentDefaults {
   bash?: string;
   /** Raw `bash-allow`: comma-separated extra command prefixes on top of `readonly` (e.g. `npm test`). */
   bashAllow?: string;
+  /** `spawning`: true grants delegated spawning by default (the tool parameter wins); false denies the spawning tools. */
   spawning?: boolean;
+  /** `spawning-depth` (1..4) with `spawning: true`. */
+  spawningDepth?: number;
   autoExit?: boolean;
   /** `ask-parent`: the parent agent is the default target of questions/approvals (default false). */
   askParent?: boolean;
@@ -432,6 +435,25 @@ function getFrontmatterValue(frontmatter: string, key: string): string | undefin
   return value;
 }
 
+function parseSpawningDepth(value: string | undefined): number | undefined {
+  const depth = value === undefined ? NaN : Number(value.trim());
+  return Number.isInteger(depth) && depth >= 1 && depth <= 4 ? depth : undefined;
+}
+
+/**
+ * The spawning grant of a new agent: the `spawning` parameter decides when given; otherwise the agent's
+ * frontmatter `spawning: true` grants it (depth from `spawning-depth`, default 2).
+ */
+export function spawningGrant(
+  params: { spawning?: unknown; spawningDepth?: unknown },
+  defs: Pick<AgentDefaults, "spawning" | "spawningDepth"> | null | undefined,
+): { depth: number } | undefined {
+  if (params.spawning === true)
+    return { depth: typeof params.spawningDepth === "number" ? params.spawningDepth : DEFAULT_SPAWNING_DEPTH };
+  if (params.spawning === false || defs?.spawning !== true) return undefined;
+  return { depth: defs.spawningDepth ?? DEFAULT_SPAWNING_DEPTH };
+}
+
 function parseOptionalBoolean(value: string | undefined): boolean | undefined {
   return value != null ? value === "true" : undefined;
 }
@@ -468,6 +490,7 @@ function parseAgentDefinition(content: string, fallbackName: string): AgentDefin
     bash: getFrontmatterValue(frontmatter, "bash"),
     bashAllow: getFrontmatterValue(frontmatter, "bash-allow"),
     spawning: parseOptionalBoolean(getFrontmatterValue(frontmatter, "spawning")),
+    spawningDepth: parseSpawningDepth(getFrontmatterValue(frontmatter, "spawning-depth")),
     autoExit: parseOptionalBoolean(getFrontmatterValue(frontmatter, "auto-exit")),
     askParent: parseOptionalBoolean(getFrontmatterValue(frontmatter, "ask-parent")),
     grid: parseGrid(getFrontmatterValue(frontmatter, "grid")),
@@ -1781,6 +1804,8 @@ export function wantsWorktreeSpace(params: {
 /** `handoff` is a wait/replace mode, only available inside a worktree space (the caller passes that fact). */
 export const DEFAULT_SPAWNING_DEPTH = 2;
 
+const withSpawning = (grant: { depth: number } | undefined) => (grant ? { spawning: grant } : {});
+
 /** `spawningDepth` is 1..4 and only meaningful with `spawning: true`. */
 function validateSpawningParams(params: { spawning?: boolean; spawningDepth?: number }): string | undefined {
   if (params.spawningDepth !== undefined && params.spawning !== true) return "spawningDepth requires spawning: true.";
@@ -1839,9 +1864,12 @@ function authorizeSpawn(
     : base;
   const params = { ...spawn, ...(cwd ? { cwd } : {}) } as SpawnParams;
   let childSpawning: { depth: number } | undefined;
-  if (spawn.spawning === true) {
-    if (parent.spawning.depth <= 1) return { error: "This agent has no spawning depth left: its sub-agents cannot start further agents." };
-    childSpawning = { depth: parent.spawning.depth - 1 };
+  const wanted = spawningGrant(spawn, typeof spawn.agent === "string" && spawn.agent ? loadAgentDefaults(spawn.agent) : null);
+  if (wanted) {
+    if (parent.spawning.depth > 1) childSpawning = { depth: parent.spawning.depth - 1 };
+    else if (spawn.spawning === true)
+      return { error: "This agent has no spawning depth left: its sub-agents cannot start further agents." };
+    // A frontmatter default without depth left is simply not granted.
   }
   delete (params as Record<string, unknown>).spawning;
   delete (params as Record<string, unknown>).spawningDepth;
@@ -2312,6 +2340,16 @@ function subagentToolPolicy(
 }
 
 /** Identity variables read by pi-memo-subagents inside the child (self-spawn guard, denied tools). */
+/** True in a subagent started with its parent's session socket (still present). */
+export function inheritsParentSocket(env: NodeJS.ProcessEnv): boolean {
+  return Boolean(
+    env.PI_SUBAGENT_ID &&
+      env.PI_SUBAGENT_SOCKET &&
+      env.PI_SUBAGENT_SOCKET_TOKEN?.includes(".") && // an agent token `<id>.<mac>`, not a session token
+      existsSync(env.PI_SUBAGENT_SOCKET),
+  );
+}
+
 function subagentEnv(options: {
   name: string;
   agent?: string;
@@ -3188,8 +3226,10 @@ const ASK_INTERVAL_KEY = Symbol.for("pi-memo-subagents/ask-parent-interval");
 export default function subagentsExtension(pi: ExtensionAPI) {
   runtime.pi = pi;
 
-  // Session socket for scripts and CLI
-  if (!runtime.sessionSocket) {
+  // Session socket for scripts and CLI. A subagent keeps the socket inherited from its parent (with its
+  // own agent token): its scripts then act as this agent in the session that owns it, so a handoff
+  // `replace` is supervised there. Its own socket would make it the owner of agents it is about to leave.
+  if (!runtime.sessionSocket && !inheritsParentSocket(process.env)) {
     void startSessionSocket({
       async spawn(callerId, params) {
         if (callerId) {
@@ -3209,7 +3249,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         }
         const launchOpts: LaunchOptions = {
           ...(worktreePlan ? { worktreePlan, ...(wantsWorktreeSpace(params as any) ? { worktreeSpace: true } : {}) } : {}),
-          ...(params.spawning === true ? { spawning: { depth: (params.spawningDepth as number) ?? DEFAULT_SPAWNING_DEPTH } } : {}),
+          ...withSpawning(
+            spawningGrant(params, typeof params.agent === "string" && params.agent ? loadAgentDefaults(params.agent) : null),
+          ),
           ...(typeof params.group === "string" && params.group ? { group: params.group } : {}),
         };
         const running = await launchSubagent(
@@ -3533,7 +3575,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             parentThinking,
             {
               ...(worktreePlan ? { worktreePlan, ...(wantsWorktreeSpace(params as any) ? { worktreeSpace: true } : {}) } : {}),
-              ...(params.spawning === true ? { spawning: { depth: params.spawningDepth ?? DEFAULT_SPAWNING_DEPTH } } : {}),
+              ...withSpawning(spawningGrant(params, params.agent ? loadAgentDefaults(params.agent) : null)),
             },
           );
         } catch (error) {

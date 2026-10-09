@@ -61,7 +61,7 @@ The default surface is `selector` (`PI_SUBAGENT_SURFACE`): agents are shown in a
 | `/subagent-worktrees` | command | Interactive list/remove of subagent worktrees. |
 | `Ctrl+Alt+X` | shortcut | Cycles the agent shown on the right (next open agent, wrapping around), no menu. |
 
-`spawning: false` in agent frontmatter denies all of `subagent`, `subagent_interrupt`, `subagents_list`, `subagent_resume`, `subagent_worktrees` and `subagent_answer` to that child; `deny-tools` denies individual tools.
+`spawning: true` in agent frontmatter grants delegated spawning by default (as if the caller passed `spawning: true`; `spawning-depth` sets the depth, default 2; an explicit `spawning` parameter wins). `spawning: false` in agent frontmatter denies all of `subagent`, `subagent_interrupt`, `subagents_list`, `subagent_resume`, `subagent_worktrees` and `subagent_answer` to that child; `deny-tools` denies individual tools.
 
 ### `subagent` parameters
 
@@ -86,7 +86,7 @@ The default surface is `selector` (`PI_SUBAGENT_SURFACE`): agents are shown in a
 | `handoff` | `"wait"` \| `"replace"` | Start an agent in a new tab of your own worktree space (worktree-space children only). `wait`: wait for result; `replace`: hand off and exit. |
 | `askParent` | boolean | Default target of the child's questions (without `to`) and bash approvals: `true` the parent agent first ([Ask-parent](#ask-parent)), `false` (default) the user in the child's pane. Overrides the agent's `ask-parent` frontmatter. The child can always pick per question with `to: "parent" \| "user"`. |
 
-Agent frontmatter supports `name`, `description`, `model`, `thinking`, `tools`, `skills`, `session-mode` (`standalone` / `lineage-only` / `fork`), `spawning`, `deny-tools`, `bash`, `bash-allow` (see below), `auto-exit`, `ask-parent` (`true` makes the parent agent the default target, see [Ask-parent](#ask-parent); parsed like `auto-exit`), `grid` (e.g. `2x2`: the agent grid beside the main pane while this agent lives, if larger than the configured one), `interactive`, `system-prompt` (`append` / `replace`), `cwd` and `disable-model-invocation`, as upstream ([reference](https://github.com/0xRichardH/pi-herdr-subagents/blob/v0.2.0/README.md#frontmatter-reference)). `worktree` is **not** read from frontmatter in this version.
+Agent frontmatter supports `name`, `description`, `model`, `thinking`, `tools`, `skills`, `session-mode` (`standalone` / `lineage-only` / `fork`), `spawning`, `spawning-depth`, `deny-tools`, `bash`, `bash-allow` (see below), `auto-exit`, `ask-parent` (`true` makes the parent agent the default target, see [Ask-parent](#ask-parent); parsed like `auto-exit`), `grid` (e.g. `2x2`: the agent grid beside the main pane while this agent lives, if larger than the configured one), `interactive`, `system-prompt` (`append` / `replace`), `cwd` and `disable-model-invocation`, as upstream ([reference](https://github.com/0xRichardH/pi-herdr-subagents/blob/v0.2.0/README.md#frontmatter-reference)). `worktree` is **not** read from frontmatter in this version.
 
 Bash levels per agent:
 

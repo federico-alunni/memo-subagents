@@ -1,4 +1,7 @@
-import { describe, it } from "node:test";
+import { describe, it, test } from "node:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import assert from "node:assert/strict";
 import { createLifecycle } from "../pi-extension/subagents/lifecycle.ts";
 import * as subagentsModule from "../pi-extension/subagents/index.ts";
@@ -135,4 +138,28 @@ describe("spawning: panel rows", () => {
       Date.now = originalNow;
     }
   });
+});
+
+test("a subagent keeps its parent's session socket (its scripts act as this agent there)", async () => {
+  const { inheritsParentSocket } = subagentsModule as any;
+  const dir = mkdtempSync(join(tmpdir(), "inherit-sock-"));
+  const sock = join(dir, "s.sock");
+  writeFileSync(sock, "");
+  const child = { PI_SUBAGENT_ID: "abc", PI_SUBAGENT_SOCKET: sock, PI_SUBAGENT_SOCKET_TOKEN: "abc.mac" };
+  assert.equal(inheritsParentSocket(child), true);
+  // The main session (no agent id), a session token, or a vanished socket: start an own socket.
+  assert.equal(inheritsParentSocket({ ...child, PI_SUBAGENT_ID: undefined }), false);
+  assert.equal(inheritsParentSocket({ ...child, PI_SUBAGENT_SOCKET_TOKEN: "sessiontoken" }), false);
+  assert.equal(inheritsParentSocket({ ...child, PI_SUBAGENT_SOCKET: join(dir, "gone.sock") }), false);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("frontmatter `spawning: true` grants delegated spawning by default; the parameter wins", () => {
+  const { spawningGrant } = subagentsModule as any;
+  assert.deepEqual(spawningGrant({}, { spawning: true }), { depth: 2 });
+  assert.deepEqual(spawningGrant({}, { spawning: true, spawningDepth: 3 }), { depth: 3 });
+  assert.deepEqual(spawningGrant({ spawning: true, spawningDepth: 1 }, null), { depth: 1 });
+  assert.equal(spawningGrant({ spawning: false }, { spawning: true }), undefined);
+  assert.equal(spawningGrant({}, { spawning: false }), undefined);
+  assert.equal(spawningGrant({}, null), undefined);
 });
