@@ -463,13 +463,16 @@ export class AgentRuntime {
     const deadline = Date.now() + 15_000;
     for (;;) {
       const reservation = await this.reserveOnce(parent, mode, cwd);
-      if (!reservation.after) return reservation;
-      const target = await placedPane(this.selector, reservation.after, {
-        timeoutMs: Math.max(0, deadline - Date.now()),
-      });
-      if (target) {
-        const { after: _after, ...rest } = reservation;
-        return { ...rest, targetPane: target };
+      // Cells are created in slot order: the previous slot's launch first.
+      const before = reservation.waitFor
+        ? await placedPane(this.selector, reservation.waitFor, { timeoutMs: Math.max(0, deadline - Date.now()) })
+        : true;
+      const target = before && reservation.after
+        ? await placedPane(this.selector, reservation.after, { timeoutMs: Math.max(0, deadline - Date.now()) })
+        : undefined;
+      if (before && (!reservation.after || target)) {
+        const { after: _after, waitFor: _waitFor, ...rest } = reservation;
+        return target ? { ...rest, targetPane: target } : rest;
       }
       releasePlacement(this.selector, reservation);
       if (Date.now() >= deadline) return { token: reservation.token, placement: "tab" };

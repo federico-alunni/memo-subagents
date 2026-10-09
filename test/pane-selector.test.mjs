@@ -793,3 +793,16 @@ test('grid: rearranging a wider grid appends, trims from the end, or rebuilds ro
   assert.deepEqual(summary(planColumn(parent, ['a', 'b', 'c'], ['b', 'c', 'd'], label, col)), ['a:tab', 'd:down@c']);
   assert.deepEqual(summary(planColumn(parent, ['a', 'c'], ['a', 'b', 'c'], label, col)), ['b:down@a']);
 });
+
+test('grid: a cell below waits for the previous cell of the row above (creation in slot order)', () => {
+  const parent = { pane_id: 'main', tab_id: 't', workspace_id: 'w' };
+  const state = { owned: new Map(), gridHint: () => ({ cols: 2, rows: 2 }) };
+  const empty = { panes: [{ pane_id: 'main' }] };
+  const a = reservePlacement(state, parent, empty, 'auto');
+  const b = reservePlacement(state, parent, empty, 'auto');
+  const c = reservePlacement(state, parent, empty, 'auto');
+  assert.equal(b.after, a.token);
+  assert.equal(b.waitFor, undefined); // it splits the previous cell: `after` already orders it
+  assert.equal(c.after, a.token); // c splits a down...
+  assert.equal(c.waitFor, b.token); // ...but only once b completed the first row
+});

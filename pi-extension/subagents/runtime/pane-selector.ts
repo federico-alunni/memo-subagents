@@ -203,6 +203,11 @@ export interface PlacementReservation {
   targetPane?: string;
   /** Bottom slot reserved before the top slot's launch created its pane: split that pane once created. */
   after?: string;
+  /**
+   * The previous slot's launch has not created its pane yet: wait for it first, so cells are created in slot
+   * order (a cell below must not be split before the row above is complete).
+   */
+  waitFor?: string;
   /** Herdr `--ratio` of the split. */
   ratio?: number;
   /** `visible` only: our agent in the top slot, to park in a tab before the new split is created. */
@@ -327,13 +332,15 @@ export function reservePlacement(
   if (slot >= capacity) return tab;
   const split = slotSplit(slot, grid, parent);
   const placement = split.direction === "right" ? "split-right" : "split-down";
+  const previous = slot > shown.length ? reserved[slot - 1] : undefined;
+  const waitFor = previous && !state.placed?.get(previous) && split.from !== slot - 1 ? { waitFor: previous } : {};
   if (split.from === "main") return take(slot, { placement, targetPane: parent.pane_id, ratio: split.ratio });
-  if (split.from < shown.length) return take(slot, { placement, targetPane: shown[split.from], ratio: split.ratio });
+  if (split.from < shown.length) return take(slot, { placement, targetPane: shown[split.from], ratio: split.ratio, ...waitFor });
   // The slot it splits is being placed by another launch: split that pane once it exists.
   const owner = reserved[split.from];
   if (!owner) return tab;
   const pending = state.placed?.get(owner);
-  return take(slot, { placement, ratio: split.ratio, ...(pending ? { targetPane: pending } : { after: owner }) });
+  return take(slot, { placement, ratio: split.ratio, ...(pending ? { targetPane: pending } : { after: owner }), ...waitFor });
 }
 
 /** The launch created its pane in the reserved slot (not adopted yet): it counts as ours in the column. */
