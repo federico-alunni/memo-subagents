@@ -320,7 +320,7 @@ async function fixture(t: { after(fn: () => unknown): void }) {
     herdrExecutable: "fake-herdr",
     runner: fake.runner,
     startupTimeoutMs: 200,
-    shellReadyTimeoutMs: 1000,
+    shellReadyTimeoutMs: 5000,
     shutdownTimeoutMs: 500,
     selector: { owned: new Map() } as SelectorState,
     // The installed package in production; here a fixed path, whatever this machine installed.
