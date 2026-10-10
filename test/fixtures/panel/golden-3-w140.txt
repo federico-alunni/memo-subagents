@@ -1,2 +1,2 @@
 ╭─ ⛟  Pipeline │ panel-refresh │ phase foundation ──────────────────────────────────────────────────────────────────────────── ▰▰▱▱▱▱ 2/6 ─╮
-│   ● feat-run-control      ✓ ✓ ▶ ·  ☐                                │ ● chore-pr-automation   ✓ ▶ · ·  ☐ ⚠12m                            │
+│     ● feat-run-control      ✓ ✓ ▶ ·  ☐                              │   ● chore-pr-automation   ✓ ▶ · ·  ☐ ⚠12m                          │

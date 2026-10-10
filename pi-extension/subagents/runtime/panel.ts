@@ -213,7 +213,7 @@ export function renderPanel(data: PanelData, width: number, theme: MirrorTheme):
   const cellWidth = Math.floor((width - 4 - 2 - 3) / 2);
   const allItems: PanelItem[] = data.compact ? (data.items ?? []) : (data.groups ?? []).flatMap((group) => group.items);
   const maxNameLen = Math.max(0, ...allItems.map((item) => visibleWidth(item.name)));
-  const idMax = Math.max(8, cellWidth - 2 - 2 - stripWidth - 1 - 5);
+  const idMax = Math.max(6, cellWidth - 2 - 2 - stripWidth - 1 - 5 - 2);
   // An active group's label sits before the column headers: the name column is at least that wide.
   const labelWidth = (group: PanelGroup) =>
     visibleWidth(`▾ ${group.name} ● ${group.note ?? DEFAULT_NOTES[group.status]}`) + 1;
@@ -256,9 +256,9 @@ export function renderPanel(data: PanelData, width: number, theme: MirrorTheme):
   };
 
   const formatPair = (left?: PanelItem, right?: PanelItem): string => {
-    const leftPrefix = left?.selected ? ` ${theme.fg("accent", "▸")}` : "  ";
-    const rightPrefix = right?.selected ? theme.fg("accent", "▸") : " ";
-    return row(`${leftPrefix}${pad(formatCell(left), cellWidth)} ${sepBar}${rightPrefix}${pad(formatCell(right), cellWidth)}`);
+    const leftPrefix = left?.selected ? `  ${theme.fg("accent", "▸")} ` : "    ";
+    const rightPrefix = right?.selected ? ` ${theme.fg("accent", "▸")} ` : "   ";
+    return row(`${leftPrefix}${pad(formatCell(left), cellWidth - 2)} ${sepBar}${rightPrefix}${pad(formatCell(right), cellWidth - 2)}`);
   };
 
   // Compact: pairs of items only.
@@ -349,9 +349,9 @@ export function renderPanel(data: PanelData, width: number, theme: MirrorTheme):
         if (!isCompleted) {
           for (const item of group.items) {
             const prefix = isLeft
-              ? (item.selected ? ` ${theme.fg("accent", "▸")}` : "  ")
-              : (item.selected ? theme.fg("accent", "▸") : " ");
-            colLines.push(`${prefix}${pad(formatCell(item), cellWidth)}`);
+              ? (item.selected ? `  ${theme.fg("accent", "▸")} ` : "    ")
+              : (item.selected ? ` ${theme.fg("accent", "▸")} ` : "   ");
+            colLines.push(`${prefix}${pad(formatCell(item), cellWidth - 2)}`);
           }
         }
       }
